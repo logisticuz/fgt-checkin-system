@@ -18,35 +18,36 @@ The goal is a **minimal‑viable** workflow that tournament organizers can spin 
 
 ---
 
-## 🏗️ High‑Level Architecture
+🏗️ High‑Level Architecture
 
-```mermaid
 graph TD
   subgraph User
     A[Mobile / Laptop]
   end
   subgraph Frontend
-    B[checkin.html / register.html]<br/>(HTML + JS)
+    B["checkin.html / register.html
+(HTML + JS)"]
   end
-  subgraph n8n[Backend – n8n]
-    C[/checkin‑webhook\n/auto‑register/]
+  subgraph n8n["Backend – n8n"]
+    C["/checkin-webhook
+/auto-register/"]
   end
   subgraph Data
-    D[[CSV files]]
+    D[[CSV files]]
     E[[Airtable]]
   end
   subgraph Extra
     F[(Discord)]
   end
 
-  A -- QR scan --> B
-  B -- identifier --> C
-  C -- look‑up --> D & E
-  C -- status / redirect --> B
-  B -- missing info --> C
-  C -- update --> E
-  C -- notify --> F
-```
+  A -- "QR scan" --> B
+  B -- "identifier" --> C
+  C -- "look-up" --> D & E
+  C -- "status / redirect" --> B
+  B -- "missing info" --> C
+  C -- "update" --> E
+  C -- "notify" --> F
+
 
 > **n8n** orchestrates webhooks, CSV/Airtable look‑ups, and (later) external APIs.
 > **FastAPI** *(optional)* – serves HTML templates or extra REST endpoints when needed.
