@@ -18,8 +18,9 @@ The goal is a **minimal‑viable** workflow that tournament organizers can spin 
 
 ---
 
-🏗️ High‑Level Architecture
+## 🏗️ High‑Level Architecture
 
+```mermaid
 graph TD
   subgraph User
     A[Mobile / Laptop]
@@ -47,7 +48,7 @@ graph TD
   B -- "missing info" --> C
   C -- "update" --> E
   C -- "notify" --> F
-
+```
 
 > **n8n** orchestrates webhooks, CSV/Airtable look‑ups, and (later) external APIs.
 > **FastAPI** *(optional)* – serves HTML templates or extra REST endpoints when needed.
@@ -73,8 +74,6 @@ graph TD
 # FastAPI → http://localhost:8000 (if enabled)
 ```
 
-*First‑time n8n?*  Complete the **owner setup** in your browser; import or rebuild the supplied flows.
-
 ---
 
 ## 🗺️ Road‑map
@@ -88,6 +87,7 @@ graph TD
 | Cloud deploy (Fly.io / Render)                 | ⏳              |
 
 ---
+
 
 ## 📫 Contact
 
