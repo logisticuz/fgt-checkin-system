@@ -1,120 +1,108 @@
-FGT Check‑in System 🏷️
+# FGT Check‑in System 🥊
 
-A lightweight, QR‑driven self‑check‑in platform for fighting‑game events.
+*A lightweight, QR‑driven self‑check‑in platform for fighting‑game events.*
 
-The goal is a minimal‑viable workflow that TOs can spin up locally with Docker while leaving plenty of head‑room for future automation, analytics, and third‑party integrations.
+The goal is a **minimal‑viable** workflow that tournament organizers can spin up locally with Docker, while leaving the door open for future cloud deployments.
 
-✨ Key Features (v0.2 MVP)
+---
 
-Flow
+## ✨ Key Features (v0.2 MVP)
 
-What happens
+|  Flow                    |  What happens                                                                                                                  |  Notes                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| **QR check‑in**          | Player scans an event QR → lands on `checkin.html`, which POSTs an identifier.                                                 | Mobile or kiosk mode.               |
+| **Smart status lookup**  | The webhook cross‑checks: • local CSV fall‑backs (Swish, Start.GG, eBas)• Airtable single source of truth                      | Adds API calls in later milestones. |
+| **Dynamic registration** | If anything is missing (payment, licence ID, …) the user is redirected to `register.html` with only the needed fields visible. | JS toggles form sections.           |
+| **Auto‑register**        | n8n writes data back to Airtable, logs an event and responds with a redirect.                                                  | Webhook → Airtable node.            |
+| **TO dashboard (vNext)** | Airtable views for MVP → can evolve into Streamlit / Next.js dashboard.                                                        | Separate milestone.                 |
 
-Notes
+---
 
-QR check‑in
+## 🏗️ High‑Level Architecture
 
-Player scans the event QR and lands on checkin.html, which POSTs an identifier (email / phone / nick) to an n8n webhook.
+```mermaid
+graph TD
+  subgraph User
+    A[Mobile / Laptop]
+  end
+  subgraph Frontend
+    B[checkin.html / register.html]<br/>(HTML + JS)
+  end
+  subgraph n8n[Backend – n8n]
+    C[/checkin‑webhook\n/auto‑register/]
+  end
+  subgraph Data
+    D[[CSV files]]
+    E[[Airtable]]
+  end
+  subgraph Extra
+    F[(Discord)]
+  end
 
-No login or app installation required.
+  A -- QR scan --> B
+  B -- identifier --> C
+  C -- look‑up --> D & E
+  C -- status / redirect --> B
+  B -- missing info --> C
+  C -- update --> E
+  C -- notify --> F
+```
 
-Smart status lookup
+> **n8n** orchestrates webhooks, CSV/Airtable look‑ups, and (later) external APIs.
+> **FastAPI** *(optional)* – serves HTML templates or extra REST endpoints when needed.
+> **Docker Compose** bundles everything for quick local runs.
 
-The webhook cross‑checks:• local CSV fall‑backs (Swish, Start.gg, eBas)• Airtable “source of truth”.
+---
 
-CSV stubs make offline testing easy; later swapped for live APIs.
+## 🚀 Quick‑start (local dev)
 
-Dynamic registration
+```bash
+# 1 Clone & enter
+   git clone https://github.com/logisticuz/fgt-checkin-system.git
+   cd fgt-checkin-system
 
-If anything is missing (payment, licence ID, …) the user is redirected to register.html; the form only shows the fields that still need input.
-
-Form POSTs to /auto-register (n8n).
-
-Auto‑register
-
-n8n writes data back to Airtable, logs an event, then responds with a redirect to status_ready.html or status_pending.html.
-
-Optional Discord webhook for crew notifications.
-
-TO dashboard (vNext)
-
-Airtable views for MVP → can evolve into a Streamlit / Next.js dashboard.
-
-
-
-🗺️ High‑Level Architecture
-
-User (mobile/laptop)
-        │ 1 QR scan
-Frontend (HTML + JS) ──▶ 2 / checkin‑webhook ──▶ n8n
-                       ▲                       │
-       redirect /status│                       │
-register.html  ──▶ 6 / auto‑register ──▶ Airtable
-                       │                       ▲
-                       └────► Discord (optional)
-
-n8n – orchestrates webhooks, CSV/Airtable look‑ups, and (later) external APIs.
-
-FastAPI (optional) – serves HTML templates or extra REST endpoints when needed.
-
-Docker Compose – bundles everything for quick local runs.
-
-📂 Repo Layout
-
-.
-├── backend/              # optional FastAPI app
-│   ├── data/             # CSV stubs (ebas, startgg, swish…)
-│   ├── templates/        # checkin / register / status pages
-│   └── main.py
-├── n8n/config/           # n8n.env  +  starter workflows
-├── docker-compose.dev.yml
-├── docker-compose.prod.yml
-└── README.md
-
-🚀 Quick Start
-
-# 1 Clone
-$ git clone https://github.com/logisticuz/fgt-checkin-system.git
-$ cd fgt-checkin-system
-
-# 2 Secrets
-$ cp .env.example .env                   # Airtable API key, etc.
-$ cp n8n/config/n8n.sample.env n8n/config/n8n.env
+# 2 Copy env samples & add secrets
+   cp .env.sample .env            # Airtable API key, etc.
+   cp n8n/config/n8n.sample.env n8n/config/n8n.env
 
 # 3 Boot the dev stack
-$ docker compose -f docker-compose.dev.yml up --build
+   docker compose -f docker-compose.dev.yml up --build
 
-# n8n      → http://localhost:5678
-# FastAPI  → http://localhost:8000  (if enabled)
+# n8n     → http://localhost:5678
+# FastAPI → http://localhost:8000 (if enabled)
+```
 
+*First‑time n8n?*  Complete the **owner setup** in your browser; import or rebuild the supplied flows.
 
-🗓️ Road‑map
+---
 
-Milestone
+## 🗺️ Road‑map
 
-Status
+|  Milestone                                     |  Status        |
+| ---------------------------------------------- | -------------- |
+| CSV lookup, Airtable sync, basic pages (MVP)   | 🟣 in progress |
+| Swap CSV for live Swish / Start.GG / eBas APIs | ⏳              |
+| Streamlit / Next.js TO dashboard               | ⏳              |
+| CI pipeline (lint + pytest + Docker build)     | ⏳              |
+| Cloud deploy (Fly.io / Render)                 | ⏳              |
 
-CSV lookup, Airtable sync, basic pages (MVP)
+---
 
-✔ in progress
+## 🤝 Contributing
 
-Swap CSV for live Swish / Start.gg / eBas APIs
+1. **Create a feature branch** – `feat/short-desc`.
+2. **Commit small, focused changes**; run `pre‑commit` if installed.
+3. **Open a pull request** – the `main-protect` ruleset enforces PR review and squash merge.
 
-⏳
+---
 
-Streamlit / Next.js TO dashboard
+## 📜 License
 
-⏳
+MIT — see `LICENSE` (coming soon).
 
-CI pipeline (lint + pytest + Docker build)
+---
 
-⏳
+## 📫 Contact
 
-Cloud deploy (Fly.io / Render)
-
-⏳
-
-
-🙋 Contact
-
-Built with ❤️ by Viktor Molina (@logisticuz) 
+Built with ❤️ by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)) & ChatGPT‑dev‑assistant.
+Questions or suggestions? Open an issue or ping us on Discord!
