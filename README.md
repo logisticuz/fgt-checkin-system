@@ -88,21 +88,7 @@ graph TD
 
 ---
 
-## 🤝 Contributing
-
-1. **Create a feature branch** – `feat/short-desc`.
-2. **Commit small, focused changes**; run `pre‑commit` if installed.
-3. **Open a pull request** – the `main-protect` ruleset enforces PR review and squash merge.
-
----
-
-## 📜 License
-
-MIT — see `LICENSE` (coming soon).
-
----
-
 ## 📫 Contact
 
-Built with ❤️ by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)) & ChatGPT‑dev‑assistant.
+Built with ❤️ by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)).
 Questions or suggestions? Open an issue or ping us on Discord!
