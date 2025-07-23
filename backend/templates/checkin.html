@@ -1,0 +1,49 @@
+<form id="checkin-form">
+  <label for="namn">Namn:</label>
+  <input type="text" id="namn" name="namn" required>
+
+  <label for="telefon">Telefonnummer:</label>
+  <input type="tel" id="telefon" name="telefon" required>
+
+  <label for="tag">Tag / Alias:</label>
+  <input type="text" id="tag" name="tag" required>
+
+  <button type="submit">Checka in</button>
+</form>
+
+<script>
+  document.getElementById("checkin-form").addEventListener("submit", async function(e) {
+    e.preventDefault();
+
+    const namn = document.getElementById("namn").value.trim();
+    const telefon = document.getElementById("telefon").value.trim();
+    const tag = document.getElementById("tag").value.trim();
+
+    // 🧠 Spara i localStorage
+    localStorage.setItem("telefon", telefon);
+    localStorage.setItem("tag", tag);
+
+    const response = await fetch("http://localhost:5678/webhook/checkin", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ namn, telefon, tag })
+    });
+
+    const data = await response.json();
+
+    if (data.klar) {
+      window.location.href = `/status_ready.html?namn=${encodeURIComponent(namn)}`;
+    } else {
+      const saknas = data.saknas.map(s => {
+        if (s.includes("Swish")) return "swish=true";
+        if (s.includes("Medlemskap")) return "ebas=true";
+        if (s.includes("Start")) return "startgg=false";
+        return "";
+      }).filter(Boolean).join("&");
+
+      window.location.href = `/register.html?namn=${encodeURIComponent(namn)}&${saknas}`;
+    }
+  });
+</script>

@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    env_file:
+      - ./n8n/config/n8n.env   # alla N8N_* sätts här
+      - .env                   # bara Airtable/andra hemligheter
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./backend/data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - fgt-net
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                  # Backend läser sina nycklar här
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - fgt-net
+
+volumes:
+  n8n_data:
+
+networks:
+  fgt-net:

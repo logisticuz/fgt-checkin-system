@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>Väntar på bekräftelse...</title>
+  <style>
+    body {
+      background-color: #000;
+      color: #58aaff;
+      font-family: 'Segoe UI', sans-serif;
+      text-align: center;
+      padding-top: 8vh;
+    }
+    .pulse {
+      font-size: 4rem;
+      animation: pulse 1.5s infinite;
+      margin-bottom: 1rem;
+    }
+    h1 {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+    }
+    h2 {
+      font-size: 1.2rem;
+      margin-bottom: 2rem;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+      font-size: 1.1rem;
+    }
+    li {
+      margin: 8px 0;
+    }
+    .green { color: #00cc66; }
+    .yellow { color: #ffcc00; }
+    .red { color: #ff4444; }
+
+    @keyframes pulse {
+      0% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.1); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+  </style>
+</head>
+<body>
+  <div class="pulse" id="statusEmoji">🌀</div>
+  <h1 id="namn">...</h1>
+  <h2 id="statusText">Hämtar status...</h2>
+
+  <ul>
+    <li id="match-startgg">Start.gg-registrerad: ⏳</li>
+    <li id="match-medlem">Medlem i föreningen: ⏳</li>
+    <li id="match-swish">Betalat via Swish: ⏳</li>
+  </ul>
+
+  <div id="saknas-block" style="margin-top: 2rem;"></div>
+
+  <p style="margin-top: 2rem;">Sidan uppdateras automatiskt var 10:e sekund.</p>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const namn = params.get("namn");
+    const telefon = localStorage.getItem("telefon");
+    const tag = localStorage.getItem("tag");
+
+    async function updateStatus() {
+      const res = await fetch("/webhook/checkin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ namn, telefon, tag })
+      });
+
+      const data = await res.json();
+
+      if (data.klar) {
+        localStorage.removeItem("telefon");
+        localStorage.removeItem("tag");
+        window.location.href = `/status_ready.html?namn=${encodeURIComponent(data.namn)}`;
+        return;
+      }
+
+      // Visa namn och status
+      document.getElementById("namn").textContent = data.namn || namn;
+      document.getElementById("statusText").textContent = data.status;
+
+      const emoji = data.status.startsWith("✅") ? "✅" :
+                    data.status.startsWith("🟡") ? "🟡" : "❌";
+      document.getElementById("statusEmoji").textContent = emoji;
+      document.getElementById("statusEmoji").className = "pulse " +
+        (emoji === "✅" ? "green" : emoji === "🟡" ? "yellow" : "red");
+
+      // Visa matchstatus
+      const show = (id, val) => {
+        const el = document.getElementById(id);
+        el.innerHTML = el.innerHTML.split(":")[0] + ": " + (val ? "✅" : "❌");
+        el.className = val ? "green" : "red";
+      };
+
+      show("match-startgg", data.match?.startgg);
+      show("match-medlem", data.match?.medlem);
+      show("match-swish", data.match?.swish);
+
+      // Saknas-lista
+      const saknas = data.saknas || [];
+      const block = document.getElementById("saknas-block");
+      if (saknas.length > 0) {
+        block.innerHTML = `<p class="yellow">🔍 Saknas:</p><ul>` +
+          saknas.map(s => `<li class="red">${s}</li>`).join("") +
+          `</ul>`;
+      } else {
+        block.innerHTML = "";
+      }
+    }
+
+    updateStatus();
+    setInterval(updateStatus, 10000);
+  </script>
+</body>
+</html>

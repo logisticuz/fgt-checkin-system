@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>Klar för deltagande!</title>
+  <style>
+    body {
+      background-color: #000;
+      color: #58aaff;
+      font-family: 'Segoe UI', sans-serif;
+      text-align: center;
+      padding-top: 10vh;
+    }
+    h1 {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      animation: blink 1.2s infinite;
+    }
+    h2 {
+      font-size: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .logo {
+      margin-top: 2rem;
+      max-width: 400px;
+    }
+    @keyframes blink {
+      0%, 100% { color: #58aaff; }
+      50% { color: #89cfff; transform: scale(1.05); }
+    }
+  </style>
+</head>
+<body>
+  <h1 id="namn">✅ Klar för deltagande!</h1>
+  <h2>Välkommen till turneringen – du är incheckad och godkänd.</h2>
+  <img src="/static/logo.png" alt="FGC Trollhättan" class="logo" />
+
+  <!-- Ljudklipp -->
+  <audio id="klarLjud" autoplay>
+    <source src="/static/clear.mp3" type="audio/mpeg">
+    Ditt system stöder inte ljuduppspelning.
+  </audio>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const namn = params.get("namn") || "Deltagaren";
+    document.getElementById("namn").innerText = `✅ ${namn} är klar för deltagande!`;
+  </script>
+</body>
+</html>

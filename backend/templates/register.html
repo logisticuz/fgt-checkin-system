@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>Registrera dig till FGC</title>
+  <style>
+    body {
+      background-color: #000;
+      color: #58aaff;
+      font-family: 'Segoe UI', sans-serif;
+      text-align: center;
+      padding: 2rem;
+    }
+    form {
+      display: inline-block;
+      text-align: left;
+      max-width: 400px;
+      width: 100%;
+    }
+    label {
+      display: block;
+      margin-top: 1rem;
+      font-weight: bold;
+    }
+    input, select {
+      width: 100%;
+      padding: 0.5rem;
+      margin-top: 0.3rem;
+      border-radius: 5px;
+      border: none;
+    }
+    button {
+      margin-top: 2rem;
+      padding: 0.8rem 1.2rem;
+      background-color: #58aaff;
+      color: #000;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      width: 100%;
+    }
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>📝 Registrering</h1>
+  <form method="POST" action="http://localhost:5678/webhook/auto-register">
+    <label for="namn">Fullständigt namn*</label>
+    <input type="text" id="namn" name="namn" required>
+
+    <label for="personnummer">Personnummer*</label>
+    <input type="text" id="personnummer" name="personnummer" required>
+
+    <label for="email">E-postadress*</label>
+    <input type="email" id="email" name="email" required>
+
+    <label for="telefon">Telefonnummer*</label>
+    <input type="tel" id="telefon" name="telefon" required>
+
+    <label for="nick">Tagg / Alias*</label>
+    <input type="text" id="nick" name="nick" required>
+
+    <div id="spel-val">
+      <label for="spel">Vilka spel deltar du i?*</label>
+      <select id="spel" name="spel" multiple required>
+        <option value="SF6">Street Fighter 6</option>
+        <option value="Smash">Super Smash Bros. Ultimate</option>
+        <option value="Tekken">Tekken 8</option>
+        <option value="Doubles">Doubles</option>
+      </select>
+    </div>
+
+    <label for="discord">Discord (valfritt)</label>
+    <input type="text" id="discord" name="discord">
+
+    <!-- Swish info -->
+    <div id="swish-info" class="hidden">
+      <p><strong>💰 Swish-belopp:</strong> 25 kr per spel.</p>
+      <p>Swisha till <strong>123 456 789</strong> och ange ditt namn.</p>
+      <img src="/static/swish_qr.png" alt="Swish QR" style="width:200px; margin-top:1rem;">
+    </div>
+
+    <!-- eBas info -->
+    <div id="ebas-info" class="hidden">
+      <p>👤 Du behöver vara medlem i FGC Trollhättan.<br>
+      <a href="https://ebas.sverok.se/signups/index/12345" target="_blank" style="color:#89cfff;">Klicka här för att registrera dig gratis</a></p>
+    </div>
+
+    <button type="submit">Registrera mig</button>
+  </form>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+
+    if (params.get("swish") === "true") {
+      document.getElementById("swish-info").classList.remove("hidden");
+    }
+
+    if (params.get("startgg") !== "false") {
+      document.getElementById("spel-val").classList.remove("hidden");
+    } else {
+      document.getElementById("spel-val").classList.add("hidden");
+    }
+
+    if (params.get("ebas") === "true") {
+      document.getElementById("ebas-info").classList.remove("hidden");
+    }
+
+    // 🧠 Fyll i från localStorage
+    const telefon = localStorage.getItem("telefon");
+    const tag = localStorage.getItem("tag");
+
+    if (telefon) {
+      document.getElementById("telefon").value = telefon;
+    }
+
+    if (tag) {
+      document.getElementById("nick").value = tag;
+    }
+
+    // 🧹 Rensa när användaren lämnar sidan (valfritt)
+    window.addEventListener("beforeunload", () => {
+      localStorage.removeItem("telefon");
+      localStorage.removeItem("tag");
+    });
+  </script>
+</body>
+</html>

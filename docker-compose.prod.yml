@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=supersecure
+      - N8N_HOST=localhost
+      - TZ=Europe/Stockholm
+      - N8N_RUNNERS_ENABLED=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./backend/data:/app/data  # Endast läsning från backend-data
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - fgt-net
+
+  backend:
+    image: fgt-checkin-system-backend:latest
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend/data:/app/data  # valfritt om du skriver till disk
+    working_dir: /app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    networks:
+      - fgt-net
+
+volumes:
+  n8n_data:
+
+networks:
+  fgt-net:

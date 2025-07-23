@@ -1,0 +1,23 @@
+@'
+# –– Docker & n8n –––––––––––––––––––––––
+n8n_data/
+backend/n8n/.n8n_data*
+*.log
+*.sqlite
+
+# –– Python ––––––––––––––––––––––––––––
+__pycache__/
+*.pyc
+.env          # hemligheter – committas aldrig
+
+# –– Node / Husky ––––––––––––––––––––––
+node_modules/
+
+# –– VS Code –––––––––––––––––––––––––––
+.vscode/
+
+# –– OS-filer ––––––––––––––––––––––––––
+Thumbs.db
+'@ | Out-File .gitignore -Encoding utf8 -Force
+
+.env
