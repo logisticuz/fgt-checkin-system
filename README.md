@@ -64,8 +64,8 @@ graph TD
    cd fgt-checkin-system
 
 # 2 Copy env samples & add secrets
-   cp .env.sample .env            # Airtable API key, etc.
-   cp n8n/config/n8n.sample.env n8n/config/n8n.env
+   cp .env.example .env            # Airtable API key, etc.
+   cp n8n/config/n8n.env.example n8n/config/n8n.env
 
 # 3 Boot the dev stack
    docker compose -f docker-compose.dev.yml up --build
