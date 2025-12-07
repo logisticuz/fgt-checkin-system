@@ -1,7 +1,7 @@
 services:
   # n8n automation server
   n8n:
-    image: n8nio/n8n:1.106.3
+    image: n8nio/n8n:1.122.5
     ports: ["5678:5678"]
     env_file:
       - ./n8n/config/n8n.env
