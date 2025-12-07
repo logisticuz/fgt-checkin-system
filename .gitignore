@@ -1,23 +1,50 @@
 # –– Docker & n8n –––––––––––––––––––––––
 n8n_data/
 backend/n8n/.n8n_data*
-n8n/config/n8n.env     # ignore real secrets
+n8n/config/n8n.env
 *.log
 *.sqlite
+*.db
+data/
+backup/
+*.tar.gz
+*.tgz
+*.zip
+*.json
 
 # –– Python ––––––––––––––––––––––––––––
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+htmlcov/
+coverage.xml
+dist/
+build/
+venv/
+.venv/
 
-# root-level secrets
+# –– Root-level secrets ––––––––––––––––
 .env
+*.env
+!.env.example
+!n8n/config/n8n.env.example
 
 # –– Node / Husky ––––––––––––––––––––––
 node_modules/
+npm-debug.log*
 
 # –– VS Code –––––––––––––––––––––––––––
 .vscode/
+.history/
 
 # –– OS-files ––––––––––––––––––––––––––
 Thumbs.db
 .DS_Store
+
+# –– Docker meta –––––––––––––––––––––––
+.docker/
+.dockerignore

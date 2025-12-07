@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>Klar för deltagande!</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body {
       background-color: #000;
@@ -23,6 +24,8 @@
     .logo {
       margin-top: 2rem;
       max-width: 400px;
+      width: 90%;
+      height: auto;
     }
     @keyframes blink {
       0%, 100% { color: #58aaff; }
@@ -31,20 +34,31 @@
   </style>
 </head>
 <body>
-  <h1 id="namn">✅ Klar för deltagande!</h1>
+  <!-- Confirmation text (server-injected name via Jinja2/FastAPI) -->
+  <h1 id="namn">✅ {{ namn }} är klar för deltagande!</h1>
   <h2>Välkommen till turneringen – du är incheckad och godkänd.</h2>
+
+  <!-- Logo -->
   <img src="/static/logo.png" alt="FGC Trollhättan" class="logo" />
 
-  <!-- Ljudklipp -->
+  <!-- Sound clip that plays upon arrival -->
   <audio id="klarLjud" autoplay>
     <source src="/static/clear.mp3" type="audio/mpeg">
-    Ditt system stöder inte ljuduppspelning.
+    Din webbläsare stöder inte ljuduppspelning.
   </audio>
 
   <script>
-    const params = new URLSearchParams(location.search);
-    const namn = params.get("namn") || "Deltagaren";
-    document.getElementById("namn").innerText = `✅ ${namn} är klar för deltagande!`;
+    // Audio: set volume and handle autoplay errors
+    const audioEl = document.getElementById("klarLjud");
+    audioEl.volume = 0.8;
+
+    // Optional: log if playback fails (e.g., user gesture required on some browsers)
+    audioEl.addEventListener("error", () => {
+      console.warn("❌ Could not play the confirmation sound.");
+    });
+
+    // Optional fallback: try replay after a short delay if needed
+    // setTimeout(() => audioEl.play().catch(() => {}), 1200);
   </script>
 </body>
 </html>

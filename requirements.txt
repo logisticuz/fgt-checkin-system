@@ -1,5 +1,16 @@
+# Backend
 fastapi
 uvicorn
+
+# Dashboard
+dash
+dash-bootstrap-components
+
+# shared
 pandas
 requests
 python-dotenv
+aiohttp         # async HTTP
+plotly          
+pyairtable
+httpx==0.27.2

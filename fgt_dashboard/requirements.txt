@@ -1,0 +1,12 @@
+dash
+dash-bootstrap-components
+plotly
+pandas
+requests
+python-dotenv
+aiohttp
+httpx==0.27.2
+fastapi
+uvicorn
+starlette
+

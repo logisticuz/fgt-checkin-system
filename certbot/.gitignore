@@ -1,0 +1,9 @@
+# Ignore all generated certbot state (real certs/keys/config)
+conf/**
+www/**
+
+# Keep placeholders/docs
+!conf/.gitkeep
+!www/.gitkeep
+!.gitignore
+!README.md

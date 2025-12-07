@@ -1,35 +1,99 @@
-version: "3.8"
-
 services:
+  # n8n automation server
   n8n:
-    image: n8nio/n8n:latest
-    ports:
-      - "5678:5678"
+    image: n8nio/n8n:1.106.3
+    ports: ["5678:5678"]
     env_file:
-      - ./n8n/config/n8n.env   # alla N8N_* sätts här
-      - .env                   # bara Airtable/andra hemligheter
+      - ./n8n/config/n8n.env
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_LOG_LEVEL=debug
     volumes:
       - n8n_data:/home/node/.n8n
       - ./backend/data:/app/data
     restart: unless-stopped
-    depends_on:
-      - backend
-    networks:
-      - fgt-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5678/healthz',res=>{if(res.statusCode<500)process.exit(0);process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [fgt-net]
 
+  # FastAPI backend (proxy to n8n)
   backend:
     build:
       context: ./backend
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env                  # Backend läser sina nycklar här
+    ports: ["8000:8000"]
+    env_file: [.env]
+    environment:
+      - PYTHONPATH=/app:/app/shared
+      - N8N_INTERNAL_URL=http://n8n:5678
     volumes:
       - ./backend:/app
+      - ./shared:/app/shared
     working_dir: /app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    networks:
-      - fgt-net
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [fgt-net]
+
+  # Dash + FastAPI (admin UI)
+  fgt_dashboard:
+    # Build from repo root so Dockerfile can COPY fgt_dashboard/ and shared/
+    build:
+      context: .
+      dockerfile: fgt_dashboard/Dockerfile
+    ports: ["8050:8050"]
+    env_file: [.env]
+    environment:
+      - PYTHONPATH=/app:/app/shared
+    volumes:
+      # Hot-reload for dev
+      - ./fgt_dashboard:/app
+      - ./shared:/app/shared
+    working_dir: /app
+    # Run FastAPI that mounts Dash at /admin (see api.py)
+    command: uvicorn api:app --host 0.0.0.0 --port 8050 --reload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8050/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [fgt-net]
+
+  nginx:
+    image: nginx:latest
+    ports: ["80:80","443:443"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+      - ./nginx/htpasswd:/etc/nginx/.htpasswd:ro
+    depends_on:
+      - backend
+      - fgt_dashboard
+      - n8n
+    restart: unless-stopped
+    networks: [fgt-net]
+
+  certbot:
+    image: certbot/certbot
+    entrypoint: ""
+    command: tail -f /dev/null
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    restart: unless-stopped
+    networks: [fgt-net]
 
 volumes:
   n8n_data:

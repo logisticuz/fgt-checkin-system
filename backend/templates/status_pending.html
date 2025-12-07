@@ -1,9 +1,11 @@
 <!DOCTYPE html>
-<html lang="sv">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Väntar på bekräftelse...</title>
+  <meta charset="UTF-8" />
+  <title>Waiting for confirmation...</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    /* Base page styling */
     body {
       background-color: #000;
       color: #58aaff;
@@ -11,31 +13,18 @@
       text-align: center;
       padding-top: 8vh;
     }
-    .pulse {
-      font-size: 4rem;
-      animation: pulse 1.5s infinite;
-      margin-bottom: 1rem;
-    }
-    h1 {
-      font-size: 2.5rem;
-      margin-bottom: 0.5rem;
-    }
-    h2 {
-      font-size: 1.2rem;
-      margin-bottom: 2rem;
-    }
-    ul {
-      list-style: none;
-      padding: 0;
-      font-size: 1.1rem;
-    }
-    li {
-      margin: 8px 0;
+    .pulse { font-size: 4rem; animation: pulse 1.5s infinite; margin-bottom: 1rem; }
+    h1 { font-size: 2.2rem; margin-bottom: 0.5rem; }
+    h2 { font-size: 1.1rem; margin-bottom: 2rem; }
+    ul { list-style: none; padding: 0; font-size: 1.05rem; }
+    li { margin: 8px 0; }
+    button {
+      margin-top: 1rem; padding: 0.5rem 1rem; background-color: #222; color: #58aaff;
+      border: 1px solid #58aaff; border-radius: 5px; cursor: pointer;
     }
     .green { color: #00cc66; }
     .yellow { color: #ffcc00; }
     .red { color: #ff4444; }
-
     @keyframes pulse {
       0% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.5; transform: scale(1.1); }
@@ -44,75 +33,164 @@
   </style>
 </head>
 <body>
+  <!-- Status display -->
   <div class="pulse" id="statusEmoji">🌀</div>
   <h1 id="namn">...</h1>
-  <h2 id="statusText">Hämtar status...</h2>
+  <h2 id="statusText">Fetching status...</h2>
 
+  <!-- Match checks -->
   <ul>
-    <li id="match-startgg">Start.gg-registrerad: ⏳</li>
-    <li id="match-medlem">Medlem i föreningen: ⏳</li>
-    <li id="match-swish">Betalat via Swish: ⏳</li>
+    <li id="match-startgg">Registered on Start.gg: ⏳</li>
+    <li id="match-medlem">FGC Trollhättan member: ⏳</li>
+    <li id="match-payment">Payment confirmed: ⏳</li> <!-- was Swish -->
   </ul>
 
+  <!-- Events + missing -->
+  <ul id="matched-events-list" style="margin-top: 2rem;"></ul>
   <div id="saknas-block" style="margin-top: 2rem;"></div>
 
-  <p style="margin-top: 2rem;">Sidan uppdateras automatiskt var 10:e sekund.</p>
+  <button id="refreshBtn" onclick="updateStatus()">🔄 Refresh manually</button>
+  <p style="margin-top: 2rem;">This page refreshes every 10 seconds automatically.</p>
 
   <script>
+    // Local state (prefer localStorage; query param optional)
     const params = new URLSearchParams(location.search);
-    const namn = params.get("namn");
-    const telefon = localStorage.getItem("telefon");
-    const tag = localStorage.getItem("tag");
+    const namn = params.get("namn") || localStorage.getItem("namn") || "";
+    const telefon = localStorage.getItem("telefon") || "";
+    const tag = localStorage.getItem("tag") || "";
+    const eventIds = JSON.parse(localStorage.getItem("eventIds") || "[]");
+    const event_slug = localStorage.getItem("event_slug") || "current";
 
-    async function updateStatus() {
-      const res = await fetch("/webhook/checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namn, telefon, tag })
-      });
+    // Guard to avoid overlapping polls
+    let inFlight = false;
 
-      const data = await res.json();
+    // Helpers
+    const setText = (id, text) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    };
 
-      if (data.klar) {
-        localStorage.removeItem("telefon");
-        localStorage.removeItem("tag");
-        window.location.href = `/status_ready.html?namn=${encodeURIComponent(data.namn)}`;
-        return;
+    // Update a ✅/❌ row preserving its left label
+    const setCheck = (id, ok) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const label = el.textContent.split(":")[0];
+      el.textContent = `${label}: ${ok ? "✅" : "❌"}`;
+      el.className = ok ? "green" : "red";
+    };
+
+    // Decide redirects according to MVP rules
+    function handleRedirect(resp) {
+      const missingRaw = Array.isArray(resp?.saknas) ? resp.saknas : [];
+      // Normalize to lowercase for matching
+      const missing = missingRaw.map(x => String(x).toLowerCase());
+
+      const needsStartGG = missing.some(x => x.includes("startgg"));
+      const needsEbas    = missing.some(x => x.includes("medlemskap"));
+      const needsPayment = missing.some(x => x.includes("payment") || x.includes("betalning"));
+
+      // If anything is missing -> go to combined register page with flags
+      if (needsStartGG || needsEbas || needsPayment) {
+        const qs = new URLSearchParams({
+          namn: resp?.namn || namn || ''
+        });
+        if (needsStartGG) qs.set('startgg', 'false');
+        if (needsEbas)    qs.set('ebas',   'true');
+        if (needsPayment) qs.set('payment','true');
+
+        window.location.href = `/register.html?${qs.toString()}`;
+        return true;
       }
 
-      // Visa namn och status
-      document.getElementById("namn").textContent = data.namn || namn;
-      document.getElementById("statusText").textContent = data.status;
+      // If both Start.gg & membership are OK -> go to server-side status page
+      if (resp?.match?.startgg && resp?.match?.medlem) {
+        const targetName = encodeURIComponent(resp?.namn || namn || '');
+        window.location.href = `/status/${targetName}`;
+        return true;
+      }
 
-      const emoji = data.status.startsWith("✅") ? "✅" :
-                    data.status.startsWith("🟡") ? "🟡" : "❌";
-      document.getElementById("statusEmoji").textContent = emoji;
-      document.getElementById("statusEmoji").className = "pulse " +
-        (emoji === "✅" ? "green" : emoji === "🟡" ? "yellow" : "red");
+      return false; // stay on pending
+    }
 
-      // Visa matchstatus
-      const show = (id, val) => {
-        const el = document.getElementById(id);
-        el.innerHTML = el.innerHTML.split(":")[0] + ": " + (val ? "✅" : "❌");
-        el.className = val ? "green" : "red";
-      };
+    async function updateStatus() {
+      if (inFlight) return;
+      inFlight = true;
+      document.getElementById("refreshBtn").disabled = true;
 
-      show("match-startgg", data.match?.startgg);
-      show("match-medlem", data.match?.medlem);
-      show("match-swish", data.match?.swish);
+      try {
+        const res = await fetch("/n8n/webhook/checkin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ namn, telefon, tag, eventIds, event_slug }),
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
 
-      // Saknas-lista
-      const saknas = data.saknas || [];
-      const block = document.getElementById("saknas-block");
-      if (saknas.length > 0) {
-        block.innerHTML = `<p class="yellow">🔍 Saknas:</p><ul>` +
-          saknas.map(s => `<li class="red">${s}</li>`).join("") +
-          `</ul>`;
-      } else {
-        block.innerHTML = "";
+        const data = await res.json();
+
+        // Try redirects first (blocking steps)
+        if (handleRedirect(data)) {
+          // Optional: cleanup when fully done
+          if (data?.match?.startgg && data?.match?.medlem) {
+            localStorage.removeItem("telefon");
+            localStorage.removeItem("tag");
+            localStorage.removeItem("eventIds");
+          }
+          return;
+        }
+
+        // Render current state
+        setText("namn", data?.namn ?? namn ?? "Unknown");
+        setText("statusText", data?.status ?? "Pending…");
+
+        const status = data?.status || "";
+        const emoji =
+          status.startsWith("✅") ? "✅" :
+          status.startsWith("🟡") ? "🟡" : "❌";
+
+        const emojiEl = document.getElementById("statusEmoji");
+        emojiEl.textContent = emoji;
+        emojiEl.className = "pulse " + (emoji === "✅" ? "green" : emoji === "🟡" ? "yellow" : "red");
+
+        setCheck("match-startgg", !!data?.match?.startgg);
+        setCheck("match-medlem",  !!data?.match?.medlem);
+        setCheck("match-payment", !!data?.match?.payment); // ✅ payment (was swish)
+
+        // Matched events
+        const eventsList = document.getElementById("matched-events-list");
+        if (Array.isArray(data?.matchadeEvents) && data.matchadeEvents.length > 0) {
+          eventsList.innerHTML =
+            `<p class="green">✅ You are registered in:</p>` +
+            data.matchadeEvents.map(ev => `<li class="green">${ev}</li>`).join("");
+        } else {
+          eventsList.innerHTML = "";
+        }
+
+        // Missing items
+        const missing = Array.isArray(data?.saknas) ? data.saknas : [];
+        const block = document.getElementById("saknas-block");
+        if (missing.length > 0) {
+          block.innerHTML =
+            `<p class="yellow">🔍 Missing:</p><ul>` +
+            missing.map(s => `<li class="red">${s}</li>`).join("") +
+            `</ul>`;
+        } else {
+          block.innerHTML = "";
+        }
+
+      } catch (err) {
+        setText("statusText", "❌ Could not connect to server.");
+        const emojiEl = document.getElementById("statusEmoji");
+        emojiEl.textContent = "❌";
+        emojiEl.className = "pulse red";
+        console.error("updateStatus failed:", err);
+      } finally {
+        inFlight = false;
+        document.getElementById("refreshBtn").disabled = false;
       }
     }
 
+    // Kick off + auto-refresh every 10s
     updateStatus();
     setInterval(updateStatus, 10000);
   </script>

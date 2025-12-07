@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Registrera dig till FGC</title>
+  <title>Register for FGC</title>
   <style>
     body {
       background-color: #000;
@@ -43,28 +43,37 @@
     .hidden {
       display: none;
     }
+    a { color:#89cfff; }
   </style>
 </head>
 <body>
-  <h1>📝 Registrering</h1>
-  <form method="POST" action="http://localhost:5678/webhook/auto-register">
-    <label for="namn">Fullständigt namn*</label>
+  <h1>📝 Registration</h1>
+
+  <!-- Main registration form -->
+  <form method="POST" action="/n8n/webhook/register">
+    <!-- Full name -->
+    <label for="namn">Full name*</label>
     <input type="text" id="namn" name="namn" required>
 
-    <label for="personnummer">Personnummer*</label>
+    <!-- Personal ID / Social security number -->
+    <label for="personnummer">Personal ID*</label>
     <input type="text" id="personnummer" name="personnummer" required>
 
-    <label for="email">E-postadress*</label>
+    <!-- Email address -->
+    <label for="email">Email address*</label>
     <input type="email" id="email" name="email" required>
 
-    <label for="telefon">Telefonnummer*</label>
+    <!-- Phone number -->
+    <label for="telefon">Phone number*</label>
     <input type="tel" id="telefon" name="telefon" required>
 
-    <label for="nick">Tagg / Alias*</label>
+    <!-- Gamer tag / alias -->
+    <label for="nick">Tag / Alias*</label>
     <input type="text" id="nick" name="nick" required>
 
+    <!-- Game selection, will be shown/hidden dynamically -->
     <div id="spel-val">
-      <label for="spel">Vilka spel deltar du i?*</label>
+      <label for="spel">Which games are you entering?*</label>
       <select id="spel" name="spel" multiple required>
         <option value="SF6">Street Fighter 6</option>
         <option value="Smash">Super Smash Bros. Ultimate</option>
@@ -73,58 +82,71 @@
       </select>
     </div>
 
-    <label for="discord">Discord (valfritt)</label>
+    <!-- Discord is optional -->
+    <label for="discord">Discord (optional)</label>
     <input type="text" id="discord" name="discord">
 
-    <!-- Swish info -->
-    <div id="swish-info" class="hidden">
-      <p><strong>💰 Swish-belopp:</strong> 25 kr per spel.</p>
-      <p>Swisha till <strong>123 456 789</strong> och ange ditt namn.</p>
-      <img src="/static/swish_qr.png" alt="Swish QR" style="width:200px; margin-top:1rem;">
+    <!-- Payment instructions (shown if payment=true in query string) -->
+    <div id="payment-info" class="hidden">
+      <p><strong>💰 Payment:</strong> 25 SEK per game.</p>
+      <!-- For MVP we keep Swish QR; later you can branch to Stripe/Swish dynamically -->
+      <p>Send via Swish to <strong>123 456 789</strong> and include your name in the message.</p>
+      <img src="/static/swish_qr.png" alt="Payment QR" style="width:200px; margin-top:1rem;">
     </div>
 
-    <!-- eBas info -->
+    <!-- Membership reminder via Sverok's Ebas -->
     <div id="ebas-info" class="hidden">
-      <p>👤 Du behöver vara medlem i FGC Trollhättan.<br>
-      <a href="https://ebas.sverok.se/signups/index/12345" target="_blank" style="color:#89cfff;">Klicka här för att registrera dig gratis</a></p>
+      <p>👤 You need to be a member of FGC Trollhättan.<br>
+      <a href="https://ebas.sverok.se/signups/index/12345" target="_blank">
+        Click here to register for free via Sverok
+      </a></p>
     </div>
 
-    <button type="submit">Registrera mig</button>
+    <!-- Final submission -->
+    <button type="submit">Register me</button>
   </form>
 
   <script>
+    // Extract URL query parameters
     const params = new URLSearchParams(window.location.search);
 
-    if (params.get("swish") === "true") {
-      document.getElementById("swish-info").classList.remove("hidden");
+    // Show Payment section if payment=true
+    if (params.get("payment") === "true") {
+      document.getElementById("payment-info").classList.remove("hidden");
     }
 
+    // Hide game selection if start.gg data already exists (startgg=false)
     if (params.get("startgg") !== "false") {
       document.getElementById("spel-val").classList.remove("hidden");
     } else {
       document.getElementById("spel-val").classList.add("hidden");
     }
 
+    // Show Ebas section if membership is missing
     if (params.get("ebas") === "true") {
       document.getElementById("ebas-info").classList.remove("hidden");
     }
 
-    // 🧠 Fyll i från localStorage
-    const telefon = localStorage.getItem("telefon");
-    const tag = localStorage.getItem("tag");
+    // Pre-fill form fields from localStorage (saved from check-in step)
+    const ls = {
+      namn: localStorage.getItem("namn"),
+      personnummer: localStorage.getItem("personnummer"),
+      telefon: localStorage.getItem("telefon"),
+      tag: localStorage.getItem("tag")
+    };
 
-    if (telefon) {
-      document.getElementById("telefon").value = telefon;
-    }
+    if (ls.namn) document.getElementById("namn").value = ls.namn;
+    if (ls.personnummer) document.getElementById("personnummer").value = ls.personnummer;
+    if (ls.telefon) document.getElementById("telefon").value = ls.telefon;
+    if (ls.tag) document.getElementById("nick").value = ls.tag;
 
-    if (tag) {
-      document.getElementById("nick").value = tag;
-    }
-
-    // 🧹 Rensa när användaren lämnar sidan (valfritt)
+    // Optional: clear only non-essential items on page leave (keep namn/personnummer if you want)
     window.addEventListener("beforeunload", () => {
       localStorage.removeItem("telefon");
       localStorage.removeItem("tag");
+      // If you'd also like to clear these, uncomment:
+      // localStorage.removeItem("namn");
+      // localStorage.removeItem("personnummer");
     });
   </script>
 </body>
