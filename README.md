@@ -1,95 +1,69 @@
-# FGT Check‑in System 🥊
+# FGT Check-in System 🥊
 
-*A lightweight, QR‑driven self‑check‑in platform for fighting‑game events.*
-
-The goal is a **minimal‑viable** workflow that tournament organizers can spin up locally with Docker, while leaving the door open for future cloud deployments.
+An automated, self-service check-in system for local gaming tournaments, designed to be run locally with Docker. It streamlines the check-in process by integrating with external services like Start.gg and Sverok eBas.
 
 ---
 
-## ✨ Key Features (v0.2 MVP)
+## 📚 Documentation
 
-|  Flow                    |  What happens                                                                                                                  |  Notes                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
-| **QR check‑in**          | Player scans an event QR → lands on `checkin.html`, which POSTs an identifier.                                                 | Mobile or kiosk mode.               |
-| **Smart status lookup**  | The webhook cross‑checks: • local CSV fall‑backs (Swish, Start.GG, eBas)• Airtable single source of truth                      | Adds API calls in later milestones. |
-| **Dynamic registration** | If anything is missing (payment, licence ID, …) the user is redirected to `register.html` with only the needed fields visible. | JS toggles form sections.           |
-| **Auto‑register**        | n8n writes data back to Airtable, logs an event and responds with a redirect.                                                  | Webhook → Airtable node.            |
-| **TO dashboard (vNext)** | Airtable views for MVP → can evolve into Streamlit / Next.js dashboard.                                                        | Separate milestone.                 |
+This project has extensive documentation available in both Swedish and English. For a complete understanding of the architecture, data flows, and setup, please refer to the documents in the `docs/` folders.
+
+*   🇸🇪 **[View Swedish Documentation](./docs/README.md)**
+*   🇬🇧 **[View English Documentation](./docs-en/README.md)**
 
 ---
 
-## 🏗️ High‑Level Architecture
+## ✨ Key Features
 
-```mermaid
-graph TD
-  subgraph User
-    A[Mobile / Laptop]
-  end
-  subgraph Frontend
-    B["checkin.html / register.html
-(HTML + JS)"]
-  end
-  subgraph n8n["Backend – n8n"]
-    C["/checkin-webhook
-/auto-register/"]
-  end
-  subgraph Data
-    D[[CSV files]]
-    E[[Airtable]]
-  end
-  subgraph Extra
-    F[(Discord)]
-  end
-
-  A -- "QR scan" --> B
-  B -- "identifier" --> C
-  C -- "look-up" --> D & E
-  C -- "status / redirect" --> B
-  B -- "missing info" --> C
-  C -- "update" --> E
-  C -- "notify" --> F
-```
-
-> **n8n** orchestrates webhooks, CSV/Airtable look‑ups, and (later) external APIs.
-> **FastAPI** *(optional)* – serves HTML templates or extra REST endpoints when needed.
-> **Docker Compose** bundles everything for quick local runs.
+*   **Automated Check-in:** Participants can check themselves in via a simple web form. The system automatically verifies:
+    *   Membership status via the Sverok eBas API.
+    *   Tournament registration via the Start.gg API.
+    *   Payment status.
+*   **Real-time Admin Dashboard:** A comprehensive dashboard built with Plotly Dash allows Tournament Organizers (TOs) to monitor check-in status in real-time, configure the active event, and see which participants need assistance.
+*   **Dynamic Registration Flow:** If a participant is missing any requirements, they are automatically guided to a page where they can complete the necessary steps.
+*   **Microservice Architecture:** The system is fully containerized using Docker and consists of several independent services, including a FastAPI backend, a Dash dashboard, and an n8n instance for workflow automation.
 
 ---
 
-## 🚀 Quick‑start (local dev)
+## 🚀 Quick-start (Local Development)
 
-```bash
-# 1 Clone & enter
-   git clone https://github.com/logisticuz/fgt-checkin-system.git
-   cd fgt-checkin-system
+The installation instructions are still valid. Make sure you have Docker installed.
 
-# 2 Copy env samples & add secrets
-   cp .env.example .env            # Airtable API key, etc.
-   cp n8n/config/n8n.env.example n8n/config/n8n.env
+1.  **Clone & enter repository**
+    ```bash
+    git clone https://github.com/logisticuz/fgt-checkin-system.git
+    cd fgt-checkin-system
+    ```
 
-# 3 Boot the dev stack
-   docker compose -f docker-compose.dev.yml up --build
+2.  **Copy env samples & add secrets**
+    ```bash
+    cp .env.example .env
+    cp n8n/config/n8n.env.example n8n/config/n8n.env
+    ```
+    *Edit `.env` and `n8n/config/n8n.env` with your API keys and credentials.*
 
-# n8n     → http://localhost:5678
-# FastAPI → http://localhost:8000 (if enabled)
-```
+3.  **Boot the dev stack**
+    ```bash
+    docker-compose -f docker-compose.dev.yml up --build
+    ```
 
----
-
-## 🗺️ Road‑map
-
-|  Milestone                                     |  Status        |
-| ---------------------------------------------- | -------------- |
-| CSV lookup, Airtable sync, basic pages (MVP)   | 🟣 in progress |
-| Swap CSV for live Swish / Start.GG / eBas APIs | ⏳              |
-| Streamlit / Next.js TO dashboard               | ⏳              |
-| CI pipeline (lint + pytest + Docker build)     | ⏳              |
-| Cloud deploy (Fly.io / Render)                 | ⏳              |
+4.  **Access the services:**
+    *   **Check-in Page:** [http://localhost](http://localhost)
+    *   **Admin Dashboard:** [http://localhost/admin/](http://localhost/admin/)
+    *   **N8N Interface:** [http://localhost:5678](http://localhost:5678)
 
 ---
 
+## 🗺️ Roadmap & Tasks
+
+The project's roadmap and a list of pending tasks are maintained in the following files. Please refer to them for planned improvements and future features.
+
+*   🇸🇪 **[TODOLIST.md](./TODOLIST.md)** (Swedish)
+*   🇬🇧 **[TASKS.md](./TASKS.md)** (English)
+
+---
 
 ## 📫 Contact
 
-Built with ❤️ by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)).
-Questions or suggestions? Open an issue or ping us on Discord!
+Built with ❤️ by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)).
+Questions or suggestions? Open an issue or ping us on Discord!
