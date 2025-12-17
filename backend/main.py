@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from airtable_api import get_players as airtable_get_players, get_event_history as airtable_get_event_history
+from validation import sanitize_checkin_payload, validate_checkin_payload
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ STARTGG_REDIRECT_URI = "https://checkin.fgctrollhattan.se/auth/callback"
 OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/data
 OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
+N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
 
 # If n8n is protected with Basic Auth, set these for proxy + health
 N8N_BASIC_AUTH_USER = os.getenv("N8N_BASIC_AUTH_USER")
@@ -115,6 +117,7 @@ async def proxy_n8n(path: str, request: Request):
     - Do NOT stream the upstream response (avoid chunk/encoding mismatch).
     - Drop hop-by-hop and now-invalid headers (Content-Length, Content-Encoding, ETag, Date, etc).
     - Inject Basic Auth when configured and no Authorization header present.
+    - Optional: enforce a shared webhook token if N8N_WEBHOOK_TOKEN is set.
     """
     url = f"{N8N_INTERNAL}/{path}"
 
@@ -134,7 +137,39 @@ async def proxy_n8n(path: str, request: Request):
         token = base64.b64encode(f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()).decode()
         headers["authorization"] = f"Basic {token}"
 
+    # Optional shared secret for webhook endpoints
+    if N8N_WEBHOOK_TOKEN:
+        # Only enforce for webhook paths to avoid breaking UI API calls
+        if path.startswith("webhook") or "/webhook" in path:
+            supplied = request.query_params.get("token") or request.headers.get("x-n8n-token")
+            if supplied != N8N_WEBHOOK_TOKEN:
+                raise HTTPException(status_code=401, detail="Invalid webhook token")
+
     body = await request.body()
+
+    # Validate and sanitize JSON payloads for webhook POST requests
+    if request.method == "POST" and body and (path.startswith("webhook") or "/webhook" in path):
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                payload = json.loads(body)
+
+                # Validate
+                errors = validate_checkin_payload(payload)
+                if errors:
+                    logger.warning(f"Validation errors: {errors}")
+                    raise HTTPException(status_code=400, detail={"errors": errors})
+
+                # Sanitize
+                sanitized = sanitize_checkin_payload(payload)
+                body = json.dumps(sanitized).encode("utf-8")
+
+                # Update content-length header
+                headers["content-length"] = str(len(body))
+                logger.debug(f"Sanitized payload: {sanitized}")
+
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     try:
         resp = await httpx_client.request(
@@ -162,39 +197,63 @@ async def proxy_n8n(path: str, request: Request):
         raise HTTPException(status_code=502, detail=f"n8n proxy error: {e}")
 
 # === Domain logic ===
-def check_participant_status(namn: str) -> dict:
+def get_active_settings() -> dict:
     """
-    Fetch and evaluate a participant’s registration status from Airtable.
-    Uses flexible match on name/gametag (english fields) and keeps Swedish keys in the JSON for frontend compatibility.
+    Fetch active event settings from Airtable settings table.
+    Returns dict with swish_number, swish_expected_per_game, active_event_slug, etc.
+    """
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/settings?filterByFormula={{is_active}}=TRUE()&maxRecords=1"
+
+    r = safe_get(url, headers=headers)
+    if not r:
+        logger.warning("Could not fetch settings from Airtable")
+        return {}
+
+    try:
+        records = r.json().get("records", [])
+        if records:
+            fields = records[0].get("fields", {})
+            return {
+                "swish_number": fields.get("swish_number", "123 456 78 90"),
+                "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
+                "active_event_slug": fields.get("active_event_slug", ""),
+                "startgg_event_ids": fields.get("startgg_event_ids", []),
+            }
+    except Exception as e:
+        logger.warning(f"Settings parse error: {e}")
+
+    return {"swish_number": "123 456 78 90", "swish_expected_per_game": 25}
+
+
+def check_participant_status(name: str) -> dict:
+    """
+    Fetch and evaluate a participant's registration status from Airtable.
+    Uses flexible match on name/gametag fields.
     """
     status = {
-        "namn": namn,
-        "summary": "❌ Saknas helt",
-        "medlem": False,   # frontend-kontrakt
-        "swish": False,    # frontend-kontrakt (betalning ok)
-        "startgg": False,  # frontend-kontrakt
+        "name": name,
+        "summary": "Not found",
+        "member": False,
+        "payment": False,
+        "startgg": False,
     }
 
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
-    # Escape for Airtable formula (double single-quotes), + lower-case match
+    # Escape for Airtable formula (double single-quotes) + lower-case match
     def _esc_for_formula(s: str) -> str:
         return (s or "").replace("'", "''").lower()
 
-    q = _esc_for_formula(namn)
+    q = _esc_for_formula(name)
 
-    # Match both name and gametag
-    formula = (
-        "OR("
-        f"LOWER(name)='{q}',"
-        f"LOWER(gametag)='{q}'"
-        ")"
-    )
+    # Match both name and tag fields
+    formula = f"OR(LOWER(name)='{q}',LOWER(tag)='{q}')"
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}"
     r = safe_get(url, headers=headers)
     if not r:
-        status["summary"] = "⚠️ Airtable-fel"
+        status["summary"] = "Airtable error"
         return status
 
     try:
@@ -202,10 +261,10 @@ def check_participant_status(namn: str) -> dict:
         if records:
             f = records[0].get("fields", {}) or {}
 
-            # English field -> our Swedish keys
-            status["medlem"] = bool(f.get("member"))
+            # Check membership status
+            status["member"] = bool(f.get("member"))
 
-            # Start.gg – ok if flag or event_id exists
+            # Check Start.gg registration
             startgg_ok = False
             for key in ("startgg", "startgg_registered", "startgg_event_id"):
                 val = f.get(key)
@@ -217,39 +276,66 @@ def check_participant_status(namn: str) -> dict:
                     break
             status["startgg"] = startgg_ok
 
-            # --- CHANGED: use _to_float for robust parsing ---
+            # Check payment status
             amt = _to_float(f.get("payment_amount"))
             exp = _to_float(f.get("payment_expected"))
-            swish_ok = (f.get("payment_valid") is True) or (exp > 0 and amt >= exp)
-            status["swish"] = swish_ok
-            # --- /CHANGED ---
+            payment_ok = (f.get("payment_valid") is True) or (exp > 0 and amt >= exp)
+            status["payment"] = payment_ok
 
-            # Summary
-            if all([status["medlem"], status["swish"], status["startgg"]]):
-                status["summary"] = "✅ Klar för deltagande"
-            elif not status["medlem"]:
-                status["summary"] = "⏳ Saknar medlemskap"
-            elif not status["swish"]:
-                status["summary"] = "⏳ Saknar betalning"
+            # Build summary
+            if all([status["member"], status["payment"], status["startgg"]]):
+                status["summary"] = "Ready"
+            elif not status["member"]:
+                status["summary"] = "Missing membership"
+            elif not status["payment"]:
+                status["summary"] = "Missing payment"
             elif not status["startgg"]:
-                status["summary"] = "⏳ Saknar turneringsregistrering"
+                status["summary"] = "Missing tournament registration"
             else:
-                status["summary"] = "🟡 Delvis komplett"
+                status["summary"] = "Partially complete"
     except Exception as e:
         logger.warning(f"Airtable parse error: {e}")
-        status["summary"] = "⚠️ Airtable-fel"
+        status["summary"] = "Airtable error"
 
     return status
 
 # === Health ===
 @app.get("/health", tags=["System"])
 async def health_check():
+    """
+    Lightweight health check for Docker/orchestration.
+    Does NOT call external APIs (Airtable) to avoid burning API quota.
+    Use /health/deep for full diagnostics.
+    """
+    # n8n health – Basic Auth if enabled; only 2xx is OK
+    try:
+        auth = None
+        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+            auth = (N8N_BASIC_AUTH_USER, N8N_BASIC_AUTH_PASSWORD)
+        resp = await httpx_client.get(f"{N8N_INTERNAL}/healthz", auth=auth)
+        n8n_ok = 200 <= resp.status_code < 300
+    except Exception:
+        n8n_ok = False
+
+    return {
+        "status": "ok" if n8n_ok else "degraded",
+        "components": {"checkin": True, "dashboard": True, "n8n": n8n_ok},
+        "version": "1.0.0",
+    }
+
+
+@app.get("/health/deep", tags=["System"])
+async def health_check_deep():
+    """
+    Full health check including external APIs.
+    Use this manually for diagnostics – NOT for automated polling.
+    """
     # Airtable check
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
     test_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?maxRecords=1"
     airtable_ok = bool(safe_get(test_url, headers=headers))
 
-    # n8n health – Basic Auth if enabled; only 2xx is OK
+    # n8n health
     try:
         auth = None
         if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
@@ -266,31 +352,154 @@ async def health_check():
     }
 
 # === Views ===
-@app.get("/status/{namn}", response_class=HTMLResponse, tags=["Checkin"])
-async def status_view(request: Request, namn: str):
-    status = check_participant_status(namn)
-    template_name = "status_ready.html" if status["medlem"] and status["swish"] else "status_pending.html"
-    return templates.TemplateResponse(template_name, {"request": request, "namn": namn, "status": status})
+def get_participant_details(namn: str) -> dict:
+    """
+    Fetch full participant details from Airtable for status display.
+    Returns tag, event_name, games, etc.
+    """
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+
+    def _esc(s: str) -> str:
+        return (s or "").replace("'", "''").lower()
+
+    q = _esc(namn)
+    formula = f"OR(LOWER(name)='{q}',LOWER(tag)='{q}')"
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}"
+
+    r = safe_get(url, headers=headers)
+    if not r:
+        return {}
+
+    try:
+        records = r.json().get("records", [])
+        if records:
+            f = records[0].get("fields", {})
+            games = f.get("tournament_games_registered", [])
+            if isinstance(games, str):
+                games = [g.strip() for g in games.split(",") if g.strip()]
+            return {
+                "tag": f.get("tag", ""),
+                "event_name": f.get("event_slug", "FGC Weekly").replace("-", " ").title(),
+                "games": games,
+            }
+    except Exception as e:
+        logger.warning(f"get_participant_details error: {e}")
+
+    return {}
+
+
+@app.get("/status/{name}", response_class=HTMLResponse, tags=["Checkin"])
+async def status_view(request: Request, name: str):
+    status = check_participant_status(name)
+    details = get_participant_details(name)
+    # Show ready page if member and payment are OK
+    template_name = "status_ready.html" if status["member"] and status["payment"] else "status_pending.html"
+    return templates.TemplateResponse(
+        template_name,
+        {
+            "request": request,
+            "name": name,
+            "status": status,
+            "tag": details.get("tag", name),
+            "event_name": details.get("event_name", "FGC Weekly"),
+            "games": details.get("games", []),
+            "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        },
+    )
+
+@app.get("/api/participant/{name}/status", tags=["API"])
+async def api_participant_status(name: str):
+    """
+    JSON API endpoint for polling participant status.
+    Used by status_pending.html to check if all requirements are met.
+    """
+    status = check_participant_status(name)
+    details = get_participant_details(name)
+
+    # Build missing list
+    missing = []
+    if not status.get("member"):
+        missing.append("Membership")
+    if not status.get("payment"):
+        missing.append("Payment")
+    if not status.get("startgg"):
+        missing.append("Start.gg")
+
+    ready = len(missing) == 0
+
+    return {
+        "ready": ready,
+        "status": "Ready" if ready else "Pending",
+        "missing": missing,
+        "member": status.get("member", False),
+        "payment": status.get("payment", False),
+        "startgg": status.get("startgg", False),
+        "name": name,
+        "tag": details.get("tag", name),
+        "startgg_events": details.get("games", []),
+    }
+
 
 @app.get("/", response_class=HTMLResponse, tags=["Checkin"])
 async def root(request: Request):
-    return templates.TemplateResponse("checkin.html", {"request": request})
+    return templates.TemplateResponse("checkin.html", {"request": request, "n8n_token": N8N_WEBHOOK_TOKEN or ""})
 
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
+    settings = get_active_settings()
+    return templates.TemplateResponse("register.html", {
+        "request": request,
+        "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        "swish_number": settings.get("swish_number", "123 456 78 90"),
+        "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+    })
 
-# --- CHANGED ---
 # Legacy alias so /register.html keeps working (old links/bookmarks)
 @app.get("/register.html", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form_alias(request: Request):
     """Alias to support legacy links to /register.html."""
-    return templates.TemplateResponse("register.html", {"request": request})
+    settings = get_active_settings()
+    return templates.TemplateResponse("register.html", {
+        "request": request,
+        "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        "swish_number": settings.get("swish_number", "123 456 78 90"),
+        "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+    })
 # --- /CHANGED ---
 
 @app.get("/players", tags=["Dashboard"])
 async def get_players():
     return airtable_get_players()
+
+
+@app.patch("/players/{record_id}/payment", tags=["Dashboard"])
+async def update_payment_status(record_id: str, request: Request):
+    """
+    Update payment_valid status for a player in Airtable.
+    Body: { "payment_valid": true/false }
+    Used by TO dashboard to mark Swish payments.
+    """
+    try:
+        body = await request.json()
+        payment_valid = body.get("payment_valid", False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}/{record_id}"
+    payload = {"fields": {"payment_valid": payment_valid}}
+
+    try:
+        resp = SESSION.patch(url, json=payload, headers=headers, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        return {"success": True, "record_id": record_id, "payment_valid": payment_valid}
+    except requests.RequestException as e:
+        logger.error(f"Airtable update failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Airtable update failed: {e}")
 
 @app.get("/event-history", tags=["Dashboard"])
 async def get_event_history():

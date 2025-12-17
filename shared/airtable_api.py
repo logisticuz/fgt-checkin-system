@@ -125,7 +125,7 @@ def get_checkins(slug: str) -> List[Dict[str, Any]]:
 
     # ✅ Only request fields that exist in your table
     fields = [
-        "name", "email", "telephone", "gametag",
+        "name", "email", "telephone", "tag",
         "payment_amount", "payment_expected", "payment_valid",
         "member", "startgg", "status",
         "tournament_games_registered",
@@ -155,7 +155,7 @@ def get_checkins(slug: str) -> List[Dict[str, Any]]:
             # Player info
             "name": f.get("name"),
             "email": f.get("email"),
-            "gametag": f.get("gametag"),
+            "tag": f.get("tag"),
             "telephone": f.get("telephone"),
 
             # Extras
@@ -193,10 +193,10 @@ def get_all_event_slugs() -> List[str]:
 def get_players() -> List[Dict[str, Any]]:
     """
     Return players with new field names:
-      - name, email, gametag, telephone
+      - name, email, tag, telephone
     """
     # --- CHANGED: we don't need 'createdTime' in fields; it's record-level ---
-    fields = ["name", "email", "gametag", "telephone"]
+    fields = ["name", "email", "tag", "telephone"]
     recs = _list_records(PLAYERS_TABLE, fields=fields)
 
     result = []
@@ -206,7 +206,7 @@ def get_players() -> List[Dict[str, Any]]:
             "id": r.get("id"),
             "name": f.get("name"),
             "email": f.get("email"),
-            "gametag": f.get("gametag"),
+            "tag": f.get("tag"),
             "telephone": f.get("telephone"),
             "created": r.get("createdTime"),  # <-- correct
         })

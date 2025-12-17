@@ -35,34 +35,31 @@
 <body>
   <!-- Status display -->
   <div class="pulse" id="statusEmoji">🌀</div>
-  <h1 id="namn">...</h1>
+  <h1 id="playerName">...</h1>
   <h2 id="statusText">Fetching status...</h2>
 
   <!-- Match checks -->
   <ul>
     <li id="match-startgg">Registered on Start.gg: ⏳</li>
-    <li id="match-medlem">FGC Trollhättan member: ⏳</li>
+    <li id="match-member">FGC Trollhättan member: ⏳</li>
     <li id="match-payment">Payment confirmed: ⏳</li> <!-- was Swish -->
   </ul>
 
   <!-- Events + missing -->
   <ul id="matched-events-list" style="margin-top: 2rem;"></ul>
-  <div id="saknas-block" style="margin-top: 2rem;"></div>
+  <div id="missing-block" style="margin-top: 2rem;"></div>
 
   <button id="refreshBtn" onclick="updateStatus()">🔄 Refresh manually</button>
   <p style="margin-top: 2rem;">This page refreshes every 10 seconds automatically.</p>
 
   <script>
-    // Local state (prefer localStorage; query param optional)
-    const params = new URLSearchParams(location.search);
-    const namn = params.get("namn") || localStorage.getItem("namn") || "";
-    const telefon = localStorage.getItem("telefon") || "";
-    const tag = localStorage.getItem("tag") || "";
-    const eventIds = JSON.parse(localStorage.getItem("eventIds") || "[]");
-    const event_slug = localStorage.getItem("event_slug") || "current";
+    // Name is passed from backend template
+    const name = "{{ name }}";
 
     // Guard to avoid overlapping polls
     let inFlight = false;
+    let pollCount = 0;
+    const MAX_POLLS = 30; // 30 * 10s = 5 minutes max
 
     // Helpers
     const setText = (id, text) => {
@@ -70,108 +67,76 @@
       if (el) el.textContent = text;
     };
 
-    // Update a ✅/❌ row preserving its left label
+    // Update a check row preserving its left label
     const setCheck = (id, ok) => {
       const el = document.getElementById(id);
       if (!el) return;
       const label = el.textContent.split(":")[0];
-      el.textContent = `${label}: ${ok ? "✅" : "❌"}`;
+      el.textContent = `${label}: ${ok ? "✓" : "✗"}`;
       el.className = ok ? "green" : "red";
     };
 
-    // Decide redirects according to MVP rules
-    function handleRedirect(resp) {
-      const missingRaw = Array.isArray(resp?.saknas) ? resp.saknas : [];
-      // Normalize to lowercase for matching
-      const missing = missingRaw.map(x => String(x).toLowerCase());
-
-      const needsStartGG = missing.some(x => x.includes("startgg"));
-      const needsEbas    = missing.some(x => x.includes("medlemskap"));
-      const needsPayment = missing.some(x => x.includes("payment") || x.includes("betalning"));
-
-      // If anything is missing -> go to combined register page with flags
-      if (needsStartGG || needsEbas || needsPayment) {
-        const qs = new URLSearchParams({
-          namn: resp?.namn || namn || ''
-        });
-        if (needsStartGG) qs.set('startgg', 'false');
-        if (needsEbas)    qs.set('ebas',   'true');
-        if (needsPayment) qs.set('payment','true');
-
-        window.location.href = `/register.html?${qs.toString()}`;
-        return true;
-      }
-
-      // If both Start.gg & membership are OK -> go to server-side status page
-      if (resp?.match?.startgg && resp?.match?.medlem) {
-        const targetName = encodeURIComponent(resp?.namn || namn || '');
-        window.location.href = `/status/${targetName}`;
-        return true;
-      }
-
-      return false; // stay on pending
-    }
-
     async function updateStatus() {
       if (inFlight) return;
+
+      // Check polling timeout
+      pollCount++;
+      if (pollCount > MAX_POLLS) {
+        setText("statusText", "Timeout - please refresh manually");
+        return;
+      }
+
       inFlight = true;
       document.getElementById("refreshBtn").disabled = true;
 
       try {
-        const res = await fetch("/n8n/webhook/checkin", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ namn, telefon, tag, eventIds, event_slug }),
+        // Poll backend API endpoint (checks Airtable for member/payment/startgg)
+        const res = await fetch(`/api/participant/${encodeURIComponent(name)}/status`, {
+          method: "GET",
           cache: "no-store",
         });
         if (!res.ok) throw new Error(`Server responded ${res.status}`);
 
         const data = await res.json();
 
-        // Try redirects first (blocking steps)
-        if (handleRedirect(data)) {
-          // Optional: cleanup when fully done
-          if (data?.match?.startgg && data?.match?.medlem) {
-            localStorage.removeItem("telefon");
-            localStorage.removeItem("tag");
-            localStorage.removeItem("eventIds");
-          }
+        // If ready -> redirect to success page
+        if (data?.ready) {
+          // Cleanup sensitive data on success
+          localStorage.removeItem("personnummer");
+          localStorage.removeItem("telefon");
+          window.location.href = `/status/${encodeURIComponent(name)}`;
           return;
         }
 
         // Render current state
-        setText("namn", data?.namn ?? namn ?? "Unknown");
-        setText("statusText", data?.status ?? "Pending…");
+        setText("playerName", data?.name ?? name ?? "Unknown");
+        setText("statusText", data?.status ?? "Pending...");
 
-        const status = data?.status || "";
-        const emoji =
-          status.startsWith("✅") ? "✅" :
-          status.startsWith("🟡") ? "🟡" : "❌";
-
+        const isReady = data?.status === "Ready";
         const emojiEl = document.getElementById("statusEmoji");
-        emojiEl.textContent = emoji;
-        emojiEl.className = "pulse " + (emoji === "✅" ? "green" : emoji === "🟡" ? "yellow" : "red");
+        emojiEl.textContent = isReady ? "✓" : "...";
+        emojiEl.className = "pulse " + (isReady ? "green" : "yellow");
 
-        setCheck("match-startgg", !!data?.match?.startgg);
-        setCheck("match-medlem",  !!data?.match?.medlem);
-        setCheck("match-payment", !!data?.match?.payment); // ✅ payment (was swish)
+        setCheck("match-startgg", !!data?.startgg);
+        setCheck("match-member", !!data?.member);
+        setCheck("match-payment", !!data?.payment);
 
-        // Matched events
+        // Registered events
         const eventsList = document.getElementById("matched-events-list");
-        if (Array.isArray(data?.matchadeEvents) && data.matchadeEvents.length > 0) {
+        if (Array.isArray(data?.startgg_events) && data.startgg_events.length > 0) {
           eventsList.innerHTML =
-            `<p class="green">✅ You are registered in:</p>` +
-            data.matchadeEvents.map(ev => `<li class="green">${ev}</li>`).join("");
+            `<p class="green">Registered in:</p>` +
+            data.startgg_events.map(ev => `<li class="green">${ev}</li>`).join("");
         } else {
           eventsList.innerHTML = "";
         }
 
         // Missing items
-        const missing = Array.isArray(data?.saknas) ? data.saknas : [];
-        const block = document.getElementById("saknas-block");
+        const missing = Array.isArray(data?.missing) ? data.missing : [];
+        const block = document.getElementById("missing-block");
         if (missing.length > 0) {
           block.innerHTML =
-            `<p class="yellow">🔍 Missing:</p><ul>` +
+            `<p class="yellow">Missing:</p><ul>` +
             missing.map(s => `<li class="red">${s}</li>`).join("") +
             `</ul>`;
         } else {
@@ -179,9 +144,9 @@
         }
 
       } catch (err) {
-        setText("statusText", "❌ Could not connect to server.");
+        setText("statusText", "Could not connect to server");
         const emojiEl = document.getElementById("statusEmoji");
-        emojiEl.textContent = "❌";
+        emojiEl.textContent = "✗";
         emojiEl.className = "pulse red";
         console.error("updateStatus failed:", err);
       } finally {
@@ -190,7 +155,7 @@
       }
     }
 
-    // Kick off + auto-refresh every 10s
+    // Start polling (10s interval, max 5 minutes)
     updateStatus();
     setInterval(updateStatus, 10000);
   </script>

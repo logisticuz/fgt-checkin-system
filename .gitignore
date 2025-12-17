@@ -41,10 +41,16 @@ npm-debug.log*
 .vscode/
 .history/
 
-# –– OS-files ––––––––––––––––––––––––––
+# -- OS-files --------------------------
 Thumbs.db
 .DS_Store
 
-# –– Docker meta –––––––––––––––––––––––
+# -- Docker meta -----------------------
 .docker/
 .dockerignore
+
+# -- Local-only docs -------------------
+docs/5_Forbattringsforslag.md
+docs-en/5_Improvement_Suggestions.md
+TODOLIST.md
+TASKS.md

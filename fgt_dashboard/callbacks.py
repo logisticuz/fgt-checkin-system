@@ -35,8 +35,9 @@ def register_callbacks(app):
         Output("checkins-table", "columns"),
         Input("event-dropdown", "value"),
         Input("interval-refresh", "n_intervals"),
+        Input("btn-refresh", "n_clicks"),
     )
-    def update_table(selected_slug, _):
+    def update_table(selected_slug, _interval, _clicks):
         """
         Refresh the check-ins table when:
         - user selects a different event slug
@@ -312,3 +313,63 @@ def register_callbacks(app):
         help_text = "Games populated from Airtable (default_game)."
 
         return options, value, help_text, mapping
+
+    # -------------------------------------------------------------------------
+    # Populate "Needs Attention" section with players missing requirements
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("needs-attention-list", "children"),
+        Input("checkins-table", "data"),
+    )
+    def update_needs_attention(table_data):
+        """
+        Build a list of players who are missing membership, payment, or start.gg registration.
+        Shows what each player is missing to help TOs prioritize assistance.
+        """
+        from dash import html
+
+        if not table_data:
+            return html.P("No players checked in yet.", style={"color": "#888"})
+
+        needs_help = []
+        for row in table_data:
+            missing = []
+
+            # Check membership status
+            member_val = row.get("member") or row.get("medlem")
+            if not member_val or str(member_val).lower() in ("false", "0", "no"):
+                missing.append("Membership")
+
+            # Check payment status
+            payment_val = row.get("payment_valid") or row.get("swish_valid")
+            if not payment_val or str(payment_val).lower() in ("false", "0", "no"):
+                missing.append("Payment")
+
+            # Check start.gg registration
+            startgg_val = row.get("startgg")
+            if not startgg_val or str(startgg_val).lower() in ("false", "0", "no"):
+                missing.append("Start.gg")
+
+            if missing:
+                name = row.get("name") or row.get("tag") or "Unknown"
+                needs_help.append({
+                    "name": name,
+                    "missing": missing,
+                    "record_id": row.get("record_id", ""),
+                })
+
+        if not needs_help:
+            return html.P("All players are ready!", style={"color": "#4caf50"})
+
+        # Build list of players needing help
+        items = []
+        for player in needs_help:
+            missing_str = ", ".join(player["missing"])
+            items.append(
+                html.Div([
+                    html.Strong(player["name"], style={"color": "#fff"}),
+                    html.Span(f" - Missing: {missing_str}", style={"color": "#ff9800"}),
+                ], style={"padding": "0.3rem 0"})
+            )
+
+        return items

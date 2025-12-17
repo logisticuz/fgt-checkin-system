@@ -2,152 +2,485 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Register for FGC</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Register - FGC Trollhattan</title>
   <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background-color: #000;
-      color: #58aaff;
-      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    header {
       text-align: center;
-      padding: 2rem;
+      padding: 1.5rem 0;
     }
-    form {
-      display: inline-block;
-      text-align: left;
-      max-width: 400px;
-      width: 100%;
+    header h1 {
+      color: #58aaff;
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
     }
+    .status-summary {
+      background: rgba(88, 170, 255, 0.1);
+      border: 1px solid rgba(88, 170, 255, 0.3);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0;
+    }
+    .status-icon { font-size: 1.2rem; }
+    .status-ok { color: #4caf50; }
+    .status-missing { color: #ff9800; }
+
+    /* Sections */
+    .section {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .section h2 {
+      color: #58aaff;
+      font-size: 1.1rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .section.hidden { display: none; }
+
+    /* Form elements */
     label {
       display: block;
-      margin-top: 1rem;
-      font-weight: bold;
+      font-size: 0.9rem;
+      color: #aaa;
+      margin-bottom: 0.3rem;
     }
     input, select {
       width: 100%;
-      padding: 0.5rem;
-      margin-top: 0.3rem;
-      border-radius: 5px;
-      border: none;
+      padding: 0.75rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.3);
+      color: #fff;
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
     }
-    button {
-      margin-top: 2rem;
-      padding: 0.8rem 1.2rem;
-      background-color: #58aaff;
-      color: #000;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-      font-weight: bold;
+    input:focus, select:focus {
+      outline: none;
+      border-color: #58aaff;
+    }
+    select[multiple] {
+      min-height: 100px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: block;
       width: 100%;
+      padding: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
     }
-    .hidden {
-      display: none;
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary {
+      background: #58aaff;
+      color: #000;
     }
-    a { color:#89cfff; }
+    .btn-success {
+      background: #4caf50;
+      color: #fff;
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #58aaff;
+      border: 1px solid #58aaff;
+    }
+
+    /* Payment QR */
+    .swish-container {
+      text-align: center;
+      padding: 1rem;
+    }
+    .swish-qr {
+      background: #fff;
+      padding: 1rem;
+      border-radius: 12px;
+      display: inline-block;
+      margin: 1rem 0;
+    }
+    .swish-qr img {
+      width: 180px;
+      height: 180px;
+    }
+    .swish-number {
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: #58aaff;
+      letter-spacing: 2px;
+    }
+    .swish-amount {
+      font-size: 1.2rem;
+      color: #4caf50;
+      margin: 0.5rem 0;
+    }
+
+    /* Messages */
+    .message {
+      padding: 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    .message.success {
+      background: rgba(76, 175, 80, 0.2);
+      border: 1px solid #4caf50;
+      color: #4caf50;
+    }
+    .message.error {
+      background: rgba(244, 67, 54, 0.2);
+      border: 1px solid #f44336;
+      color: #f44336;
+    }
+    .message.info {
+      background: rgba(88, 170, 255, 0.2);
+      border: 1px solid #58aaff;
+      color: #58aaff;
+    }
+
+    /* Loading spinner */
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 0.5rem;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 2rem 0 1rem;
+      color: #666;
+      font-size: 0.8rem;
+    }
+    footer a { color: #58aaff; }
   </style>
 </head>
 <body>
-  <h1>📝 Registration</h1>
+  <div class="container">
+    <header>
+      <h1>FGC Trollhattan</h1>
+      <p>Complete your registration</p>
+    </header>
 
-  <!-- Main registration form -->
-  <form method="POST" action="/n8n/webhook/register">
-    <!-- Full name -->
-    <label for="namn">Full name*</label>
-    <input type="text" id="namn" name="namn" required>
+    <!-- Status Summary -->
+    <div class="status-summary">
+      <div class="status-item" id="status-startgg">
+        <span class="status-icon">-</span>
+        <span>Start.gg</span>
+      </div>
+      <div class="status-item" id="status-member">
+        <span class="status-icon">-</span>
+        <span>Sverok Member</span>
+      </div>
+      <div class="status-item" id="status-payment">
+        <span class="status-icon">-</span>
+        <span>Payment</span>
+      </div>
+    </div>
 
-    <!-- Personal ID / Social security number -->
-    <label for="personnummer">Personal ID*</label>
-    <input type="text" id="personnummer" name="personnummer" required>
+    <!-- Messages container -->
+    <div id="messages"></div>
 
-    <!-- Email address -->
-    <label for="email">Email address*</label>
-    <input type="email" id="email" name="email" required>
+    <!-- Section: eBas Membership -->
+    <section id="section-ebas" class="section hidden">
+      <h2>Become a Sverok Member</h2>
+      <p style="margin-bottom: 1rem; color: #aaa;">
+        Membership is free and only takes a few seconds. We use SPAR to fetch your details automatically.
+      </p>
 
-    <!-- Phone number -->
-    <label for="telefon">Phone number*</label>
-    <input type="tel" id="telefon" name="telefon" required>
+      <label for="pnr-ebas">Personal ID (YYYYMMDDXXXX)</label>
+      <input type="text" id="pnr-ebas" placeholder="199001011234" pattern="\d{10,12}">
 
-    <!-- Gamer tag / alias -->
-    <label for="nick">Tag / Alias*</label>
-    <input type="text" id="nick" name="nick" required>
+      <label for="email-ebas">Email</label>
+      <input type="email" id="email-ebas" placeholder="your@email.com">
 
-    <!-- Game selection, will be shown/hidden dynamically -->
-    <div id="spel-val">
-      <label for="spel">Which games are you entering?*</label>
-      <select id="spel" name="spel" multiple required>
+      <label for="phone-ebas">Phone (optional)</label>
+      <input type="tel" id="phone-ebas" placeholder="0701234567">
+
+      <button type="button" id="btn-register-ebas" class="btn btn-primary">
+        Register as Member
+      </button>
+    </section>
+
+    <!-- Section: Payment -->
+    <section id="section-payment" class="section hidden">
+      <h2>Payment</h2>
+      <div class="swish-container">
+        <p>Swish to:</p>
+        <div class="swish-number" id="swish-number">{{ swish_number | default('123 456 78 90') }}</div>
+        <div class="swish-amount" id="swish-amount">Amount: <strong>0 kr</strong></div>
+
+        <div class="swish-qr">
+          <img src="/static/swish_qr.png" alt="Swish QR" id="swish-qr-img">
+        </div>
+
+        <p style="color: #aaa; font-size: 0.85rem;">
+          Write your <strong>name</strong> or <strong>tag</strong> in the message.
+        </p>
+      </div>
+
+      <button type="button" id="btn-payment-done" class="btn btn-success">
+        I Have Paid
+      </button>
+    </section>
+
+    <!-- Section: Start.gg Games -->
+    <section id="section-startgg" class="section hidden">
+      <h2>Select Games</h2>
+      <p style="margin-bottom: 1rem; color: #aaa;">
+        You are not registered on Start.gg for this event. Select which games you want to enter:
+      </p>
+
+      <label for="games">Games</label>
+      <select id="games" multiple>
         <option value="SF6">Street Fighter 6</option>
-        <option value="Smash">Super Smash Bros. Ultimate</option>
-        <option value="Tekken">Tekken 8</option>
-        <option value="Doubles">Doubles</option>
+        <option value="T8">Tekken 8</option>
+        <option value="SSBU">Super Smash Bros. Ultimate</option>
+        <option value="GG">Guilty Gear Strive</option>
       </select>
-    </div>
 
-    <!-- Discord is optional -->
-    <label for="discord">Discord (optional)</label>
-    <input type="text" id="discord" name="discord">
+      <button type="button" id="btn-confirm-games" class="btn btn-primary">
+        Confirm Selection
+      </button>
+    </section>
 
-    <!-- Payment instructions (shown if payment=true in query string) -->
-    <div id="payment-info" class="hidden">
-      <p><strong>💰 Payment:</strong> 25 SEK per game.</p>
-      <!-- For MVP we keep Swish QR; later you can branch to Stripe/Swish dynamically -->
-      <p>Send via Swish to <strong>123 456 789</strong> and include your name in the message.</p>
-      <img src="/static/swish_qr.png" alt="Payment QR" style="width:200px; margin-top:1rem;">
-    </div>
+    <!-- Final Submit -->
+    <section id="section-final" class="section hidden">
+      <button type="button" id="btn-final-checkin" class="btn btn-success">
+        Complete Check-in
+      </button>
+    </section>
 
-    <!-- Membership reminder via Sverok's Ebas -->
-    <div id="ebas-info" class="hidden">
-      <p>👤 You need to be a member of FGC Trollhättan.<br>
-      <a href="https://ebas.sverok.se/signups/index/12345" target="_blank">
-        Click here to register for free via Sverok
-      </a></p>
-    </div>
+    <footer>
+      <p>Problems? Talk to a tournament organizer.</p>
+      <p><a href="/">Back to start</a></p>
+    </footer>
+  </div>
 
-    <!-- Final submission -->
-    <button type="submit">Register me</button>
-  </form>
-
+  <script src="/static/js/validation.js"></script>
   <script>
-    // Extract URL query parameters
+    // Config
+    const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
+    const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
+    const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
+
+    // State from URL params
     const params = new URLSearchParams(window.location.search);
-
-    // Show Payment section if payment=true
-    if (params.get("payment") === "true") {
-      document.getElementById("payment-info").classList.remove("hidden");
-    }
-
-    // Hide game selection if start.gg data already exists (startgg=false)
-    if (params.get("startgg") !== "false") {
-      document.getElementById("spel-val").classList.remove("hidden");
-    } else {
-      document.getElementById("spel-val").classList.add("hidden");
-    }
-
-    // Show Ebas section if membership is missing
-    if (params.get("ebas") === "true") {
-      document.getElementById("ebas-info").classList.remove("hidden");
-    }
-
-    // Pre-fill form fields from localStorage (saved from check-in step)
-    const ls = {
-      namn: localStorage.getItem("namn"),
-      personnummer: localStorage.getItem("personnummer"),
-      telefon: localStorage.getItem("telefon"),
-      tag: localStorage.getItem("tag")
+    const state = {
+      needsEbas: params.get("ebas") === "true",
+      needsPayment: params.get("payment") === "true",
+      needsStartgg: params.get("startgg") === "false",
+      name: params.get("name") || localStorage.getItem("namn") || "",
+      personnummer: localStorage.getItem("personnummer") || "",
+      phone: localStorage.getItem("telefon") || "",
+      tag: localStorage.getItem("tag") || "",
+      gamesCount: parseInt(params.get("games") || "1", 10),
+      eventSlug: params.get("event") || localStorage.getItem("eventSlug") || ""
     };
 
-    if (ls.namn) document.getElementById("namn").value = ls.namn;
-    if (ls.personnummer) document.getElementById("personnummer").value = ls.personnummer;
-    if (ls.telefon) document.getElementById("telefon").value = ls.telefon;
-    if (ls.tag) document.getElementById("nick").value = ls.tag;
+    // UI helpers
+    function showMessage(text, type = "info") {
+      const container = document.getElementById("messages");
+      container.innerHTML = `<div class="message ${type}">${text}</div>`;
+    }
 
-    // Optional: clear only non-essential items on page leave (keep namn/personnummer if you want)
-    window.addEventListener("beforeunload", () => {
-      localStorage.removeItem("telefon");
-      localStorage.removeItem("tag");
-      // If you'd also like to clear these, uncomment:
-      // localStorage.removeItem("namn");
-      // localStorage.removeItem("personnummer");
+    function clearMessages() {
+      document.getElementById("messages").innerHTML = "";
+    }
+
+    function setStatus(id, ok) {
+      const el = document.getElementById(id);
+      const icon = el.querySelector(".status-icon");
+      if (ok) {
+        icon.textContent = "✓";
+        icon.classList.add("status-ok");
+        icon.classList.remove("status-missing");
+      } else {
+        icon.textContent = "✗";
+        icon.classList.add("status-missing");
+        icon.classList.remove("status-ok");
+      }
+    }
+
+    function setButtonLoading(btn, loading) {
+      if (loading) {
+        btn.disabled = true;
+        btn.dataset.originalText = btn.textContent;
+        btn.innerHTML = '<span class="spinner"></span>Loading...';
+      } else {
+        btn.disabled = false;
+        btn.textContent = btn.dataset.originalText || btn.textContent;
+      }
+    }
+
+    // Initialize UI based on state
+    function initUI() {
+      // Set initial status icons
+      setStatus("status-startgg", !state.needsStartgg);
+      setStatus("status-member", !state.needsEbas);
+      setStatus("status-payment", !state.needsPayment);
+
+      // Show relevant sections
+      if (state.needsEbas) {
+        document.getElementById("section-ebas").classList.remove("hidden");
+        // Pre-fill from localStorage
+        if (state.personnummer) document.getElementById("pnr-ebas").value = state.personnummer;
+      }
+
+      if (state.needsPayment) {
+        document.getElementById("section-payment").classList.remove("hidden");
+        const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
+        document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+      }
+
+      if (state.needsStartgg) {
+        document.getElementById("section-startgg").classList.remove("hidden");
+      }
+
+      // Show final button if nothing is needed
+      updateFinalButton();
+    }
+
+    function updateFinalButton() {
+      const allDone = !state.needsEbas && !state.needsPayment && !state.needsStartgg;
+      if (allDone) {
+        document.getElementById("section-final").classList.remove("hidden");
+      }
+    }
+
+    // eBas Registration
+    document.getElementById("btn-register-ebas").addEventListener("click", async function() {
+      const btn = this;
+      const pnr = document.getElementById("pnr-ebas").value.trim();
+      const email = document.getElementById("email-ebas").value.trim();
+      const phone = document.getElementById("phone-ebas").value.trim();
+
+      if (!pnr || pnr.length < 10) {
+        showMessage("Please enter a valid personal ID", "error");
+        return;
+      }
+
+      setButtonLoading(btn, true);
+      clearMessages();
+
+      try {
+        const response = await fetch(`/n8n/webhook/ebas/register${tokenParam}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ personnummer: pnr, email, telephone: phone })
+        });
+
+        const data = await response.json();
+
+        if (data.success || data.already_member) {
+          showMessage(data.already_member
+            ? "You are already a member - perfect!"
+            : "Membership registered!", "success");
+          state.needsEbas = false;
+          setStatus("status-member", true);
+          document.getElementById("section-ebas").classList.add("hidden");
+          updateFinalButton();
+        } else {
+          showMessage(data.message || "Could not register membership", "error");
+        }
+      } catch (err) {
+        console.error("eBas error:", err);
+        showMessage("Something went wrong. Please try again.", "error");
+      } finally {
+        setButtonLoading(btn, false);
+      }
     });
+
+    // Payment confirmation
+    document.getElementById("btn-payment-done").addEventListener("click", function() {
+      // For MVP: Trust user and mark as done
+      // In production: This would poll/verify actual payment
+      showMessage("Payment noted - we will verify manually.", "success");
+      state.needsPayment = false;
+      setStatus("status-payment", true);
+      document.getElementById("section-payment").classList.add("hidden");
+      updateFinalButton();
+    });
+
+    // Game selection
+    document.getElementById("btn-confirm-games").addEventListener("click", function() {
+      const select = document.getElementById("games");
+      const selected = Array.from(select.selectedOptions).map(o => o.value);
+
+      if (selected.length === 0) {
+        showMessage("Please select at least one game", "error");
+        return;
+      }
+
+      // Store selection
+      localStorage.setItem("selectedGames", JSON.stringify(selected));
+      state.gamesCount = selected.length;
+      state.needsStartgg = false;
+
+      // Update payment amount if payment section is visible
+      if (document.getElementById("section-payment").classList.contains("hidden") === false) {
+        const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
+        document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+      }
+
+      showMessage(`${selected.length} game(s) selected`, "success");
+      setStatus("status-startgg", true);
+      document.getElementById("section-startgg").classList.add("hidden");
+      updateFinalButton();
+    });
+
+    // Final check-in
+    document.getElementById("btn-final-checkin").addEventListener("click", async function() {
+      const btn = this;
+      setButtonLoading(btn, true);
+
+      try {
+        // Redirect to status page
+        const name = state.name || localStorage.getItem("namn");
+        window.location.href = `/status/${encodeURIComponent(name)}`;
+      } catch (err) {
+        console.error("Final checkin error:", err);
+        showMessage("Something went wrong. Please try again.", "error");
+        setButtonLoading(btn, false);
+      }
+    });
+
+    // Initialize on load
+    initUI();
   </script>
 </body>
 </html>

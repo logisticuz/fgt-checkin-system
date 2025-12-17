@@ -62,7 +62,7 @@ def create_layout():
         ]),
 
         html.Div(id="tabs-content", children=[
-            # Tab 1 – Live check-ins
+            # Tab 1: Live check-ins
             html.Div(id="tab-checkins-content", children=[
                 html.H2("FGC Check-in Dashboard"),
                 html.P(f"Active event: {active_slug}" if active_slug else "No active event found"),
@@ -73,25 +73,66 @@ def create_layout():
                     clearable=False
                 ),
                 html.Br(),
-                dcc.Interval(id="interval-refresh", interval=10 * 1000, n_intervals=0),
+                html.Button("Refresh", id="btn-refresh", n_clicks=0, style={"marginBottom": "1rem"}),
+                dcc.Interval(id="interval-refresh", interval=30 * 1000, n_intervals=0),  # 30 sec auto-refresh
+
+                # Section showing players who need TO assistance
+                html.Div(id="needs-attention-section", style={
+                    "background": "#2a1a1a",
+                    "border": "1px solid #ff6b6b",
+                    "borderRadius": "8px",
+                    "padding": "1rem",
+                    "marginBottom": "1rem",
+                }, children=[
+                    html.H3("Needs Attention", style={"color": "#ff6b6b", "margin": "0 0 0.5rem 0"}),
+                    html.Div(id="needs-attention-list", children=[
+                        html.P("Loading...", style={"color": "#888"})
+                    ])
+                ]),
+
+                # Main checkins table
                 dcc.Loading(
                     type="default",
                     children=dash_table.DataTable(
                         id="checkins-table",
                         columns=columns,
                         data=data,
-                        page_size=10,
+                        page_size=15,
                         style_table={"overflowX": "auto"},
+                        style_header={
+                            "backgroundColor": "#1a1a2e",
+                            "color": "#fff",
+                            "fontWeight": "bold",
+                        },
+                        style_cell={
+                            "backgroundColor": "#0a0a0a",
+                            "color": "#e0e0e0",
+                            "border": "1px solid #333",
+                            "padding": "8px",
+                        },
                         style_data_conditional=[
                             {
                                 "if": {"column_id": "info"},
                                 "textAlign": "center",
                                 "color": "gray",
                                 "fontStyle": "italic",
-                            }
+                            },
+                            # Highlight ready players in green
+                            {
+                                "if": {"filter_query": "{status} = 'Ready'"},
+                                "backgroundColor": "#1a2e1a",
+                            },
+                            # Highlight pending players in yellow
+                            {
+                                "if": {"filter_query": "{status} = 'Pending'"},
+                                "backgroundColor": "#2e2a1a",
+                            },
                         ],
                     ),
                 ),
+
+                # Feedback container for payment updates
+                html.Div(id="payment-update-feedback", style={"marginTop": "0.5rem"}),
             ]),
 
             # Tab 2 – Settings

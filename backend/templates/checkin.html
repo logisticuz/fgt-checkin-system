@@ -1,119 +1,342 @@
-<!-- Check-in form for event participation -->
-<form id="checkin-form">
-  <!-- Full name input (required) -->
-  <label for="namn">Name:</label>
-  <input type="text" id="namn" name="namn" required>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Check-in - FGC Trollhattan</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  <!-- Phone number input -->
-  <label for="telefon">Phone number:</label>
-  <input type="tel" id="telefon" name="telefon" required>
-
-  <!-- Tag / Alias -->
-  <label for="tag">Tag / Alias:</label>
-  <input type="text" id="tag" name="tag" required>
-
-  <!-- Social security number -->
-  <label for="personnummer">Personal ID (YYYYMMDDXXXX):</label>
-  <input type="text" id="personnummer" name="personnummer" required pattern="\d{10,12}">
-
-  <!-- Event dropdown -->
-  <label for="events">Select Event(s):</label>
-  <select id="events" name="events" multiple required>
-    <option>Loading events...</option>
-  </select>
-
-  <!-- Consent -->
-  <label>
-    <input type="checkbox" required>
-    I consent to my data being used to validate membership via Sverok’s Ebas and for tournament registration.
-  </label>
-
-  <!-- Submit -->
-  <button type="submit">Check in</button>
-</form>
-
-<script>
-  // Fetch event list dynamically
-  async function populateEvents() {
-    try {
-      const res = await fetch("/n8n/webhook/get-events");
-      if (!res.ok) throw new Error("Failed to fetch events");
-      const json = await res.json();
-
-      const eventSelect = document.getElementById("events");
-      eventSelect.innerHTML = "";
-      (json || []).forEach(ev => {
-        const option = document.createElement("option");
-        option.value = ev.id;
-        option.textContent = ev.name;
-        eventSelect.appendChild(option);
-      });
-    } catch (err) {
-      console.error("Event load error:", err);
-      const eventSelect = document.getElementById("events");
-      eventSelect.innerHTML = "<option disabled>Failed to load events</option>";
+    body {
+      background: #000;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem;
     }
-  }
 
-  populateEvents();
+    .container {
+      max-width: 420px;
+      width: 100%;
+    }
 
-  document.getElementById("checkin-form").addEventListener("submit", async function(e) {
-    e.preventDefault();
+    header {
+      text-align: center;
+      padding: 1.5rem 0;
+    }
 
-    const namn = document.getElementById("namn").value.trim();
-    const telefon = document.getElementById("telefon").value.trim();
-    const tag = document.getElementById("tag").value.trim();
-    const personnummer = document.getElementById("personnummer").value.trim();
-    const eventSelect = document.getElementById("events");
-    const eventIds = Array.from(eventSelect.selectedOptions).map(opt => opt.value);
+    .logo {
+      max-width: 280px;
+      width: 80%;
+      margin-bottom: 1rem;
+    }
 
-    // Persist to localStorage for pending/register flows
-    localStorage.setItem("namn", namn);
-    localStorage.setItem("telefon", telefon);
-    localStorage.setItem("tag", tag);
-    localStorage.setItem("personnummer", personnummer);
-    localStorage.setItem("eventIds", JSON.stringify(eventIds));
+    h1 {
+      color: #58aaff;
+      font-size: 1.3rem;
+      font-weight: 400;
+      letter-spacing: 1px;
+    }
 
-    try {
-      const response = await fetch("/n8n/webhook/validate-multitag", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namn, telefon, tag, personnummer, eventIds })
-      });
+    /* Form styling */
+    form {
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
 
-      if (!response.ok) {
-        throw new Error(`Validate failed with status ${response.status}`);
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: #58aaff;
+      margin-bottom: 0.4rem;
+      font-weight: 500;
+    }
+
+    input[type="text"],
+    input[type="tel"],
+    select {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid rgba(88, 170, 255, 0.3);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.5);
+      color: #fff;
+      font-size: 1rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    input:focus,
+    select:focus {
+      outline: none;
+      border-color: #58aaff;
+      box-shadow: 0 0 0 3px rgba(88, 170, 255, 0.15);
+    }
+
+    input::placeholder {
+      color: #666;
+    }
+
+    select {
+      min-height: 80px;
+      cursor: pointer;
+    }
+
+    select option {
+      background: #111;
+      color: #fff;
+      padding: 0.5rem;
+    }
+
+    /* Consent checkbox */
+    .consent {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6rem;
+      margin: 1.2rem 0;
+      font-size: 0.8rem;
+      color: #888;
+      line-height: 1.4;
+    }
+
+    .consent input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      accent-color: #58aaff;
+      cursor: pointer;
+    }
+
+    /* Submit button */
+    .btn-submit {
+      width: 100%;
+      padding: 1rem;
+      border: none;
+      border-radius: 8px;
+      background: #58aaff;
+      color: #000;
+      font-size: 1.1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, background 0.2s;
+    }
+
+    .btn-submit:hover {
+      background: #6bb5ff;
+    }
+
+    .btn-submit:active {
+      transform: scale(0.98);
+    }
+
+    .btn-submit:disabled {
+      background: #333;
+      color: #666;
+      cursor: not-allowed;
+    }
+
+    /* Error messages */
+    .error-container {
+      background: rgba(255, 68, 68, 0.1);
+      border: 1px solid #ff4444;
+      border-radius: 8px;
+      padding: 0.75rem;
+      margin-bottom: 1rem;
+      display: none;
+    }
+
+    .error-container.show {
+      display: block;
+    }
+
+    .error-container p {
+      color: #ff4444;
+      font-size: 0.85rem;
+      margin: 0.2rem 0;
+    }
+
+    /* Loading state */
+    .loading .btn-submit {
+      background: #333;
+      color: #888;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 1.5rem 0;
+      color: #444;
+      font-size: 0.75rem;
+    }
+
+    footer a {
+      color: #58aaff;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <img src="/static/logo.png" alt="FGC Trollhattan" class="logo">
+      <h1>EVENT CHECK-IN</h1>
+    </header>
+
+    <form id="checkin-form">
+      <div id="error-container" class="error-container"></div>
+
+      <div class="form-group">
+        <label for="namn">Name</label>
+        <input type="text" id="namn" name="namn" placeholder="Your full name" required>
+      </div>
+
+      <div class="form-group">
+        <label for="telefon">Phone Number</label>
+        <input type="tel" id="telefon" name="telefon" placeholder="07X XXX XX XX" required>
+      </div>
+
+      <div class="form-group">
+        <label for="tag">Tag / Gamertag</label>
+        <input type="text" id="tag" name="tag" placeholder="Your player tag" required>
+      </div>
+
+      <div class="form-group">
+        <label for="personnummer">Personal ID (YYYYMMDDXXXX)</label>
+        <input type="text" id="personnummer" name="personnummer" placeholder="199001011234" required pattern="\d{10,12}">
+      </div>
+
+      <div class="consent">
+        <input type="checkbox" id="consent" required>
+        <span>I consent to my data being used to validate membership and tournament registration.</span>
+      </div>
+
+      <button type="submit" class="btn-submit">Check In</button>
+    </form>
+
+    <footer>
+      <p>Problems? Talk to a tournament organizer.</p>
+    </footer>
+  </div>
+
+  <script src="/static/js/validation.js"></script>
+  <script>
+    const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
+    const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
+
+    // Error display helpers
+    function showErrors(errors) {
+      const container = document.getElementById("error-container");
+      container.innerHTML = errors.map(e => `<p>${e}</p>`).join("");
+      container.classList.add("show");
+    }
+
+    function clearErrors() {
+      const container = document.getElementById("error-container");
+      container.innerHTML = "";
+      container.classList.remove("show");
+    }
+
+    // Form submission
+    document.getElementById("checkin-form").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      clearErrors();
+
+      const btn = this.querySelector(".btn-submit");
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Validating...';
+
+      // Gather input
+      const rawData = {
+        namn: document.getElementById("namn").value,
+        telefon: document.getElementById("telefon").value,
+        tag: document.getElementById("tag").value,
+        personnummer: document.getElementById("personnummer").value,
+      };
+
+      // Validate
+      if (typeof Validation !== "undefined") {
+        const errors = Validation.validateForm(rawData);
+        if (errors.length > 0) {
+          showErrors(errors);
+          btn.disabled = false;
+          btn.textContent = originalText;
+          return;
+        }
       }
 
-      const data = await response.json();
+      // Sanitize
+      const sanitized = typeof Validation !== "undefined"
+        ? Validation.sanitizeFormData(rawData)
+        : rawData;
 
-      if (data.klar) {
-        // ✅ Let the server decide ready/pending via SSR
-        window.location.href = `/status/${encodeURIComponent(namn)}`;
-      } else {
-        const missing = Array.isArray(data.saknas) ? data.saknas : [];
-        // Map "saknas" to query flags (case-insensitive)
-        const flags = missing.map(s => {
-          const t = String(s).toLowerCase();
-          if (t.includes("payment") || t.includes("betalning")) return "payment=true";
-          if (t.includes("medlemskap")) return "ebas=true";
-          if (t.includes("startgg")) return "startgg=false";
-          return "";
-        }).filter(Boolean).join("&");
+      // Persist to localStorage
+      localStorage.setItem("namn", sanitized.namn);
+      localStorage.setItem("telefon", sanitized.telefon);
+      localStorage.setItem("tag", sanitized.tag);
+      localStorage.setItem("personnummer", sanitized.personnummer);
 
-        const qs = `namn=${encodeURIComponent(namn)}${flags ? "&" + flags : ""}`;
-        window.location.href = `/register.html?${qs}`;
+      try {
+        const response = await fetch(`/n8n/webhook/checkin/validate${tokenParam}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sanitized)
+        });
+
+        if (!response.ok) {
+          throw new Error(`Server error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.ready) {
+          // Player is ready - go to success page
+          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}`;
+        } else {
+          // Something missing - go to register page
+          const missing = Array.isArray(data.missing) ? data.missing : [];
+          const flags = missing.map(s => {
+            const t = String(s).toLowerCase();
+            if (t.includes("payment")) return "payment=true";
+            if (t.includes("membership")) return "ebas=true";
+            if (t.includes("start")) return "startgg=false";
+            return "";
+          }).filter(Boolean).join("&");
+
+          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}`;
+          window.location.href = `/register?${qs}`;
+        }
+      } catch (err) {
+        console.error("Validation error:", err);
+        showErrors(["Something went wrong. Please try again."]);
+        btn.disabled = false;
+        btn.textContent = originalText;
       }
-    } catch (err) {
-      console.error("Validation error:", err);
-      alert("Something went wrong during validation. Please try again.");
-    }
-  });
-</script>
-
-<!--
-Notes:
-- Redirects: 'klar' -> /status/{namn}; otherwise -> /register.html?flags
-- Flags supported: payment=true, ebas=true, startgg=false
-- LocalStorage keys used by pending/register: namn, telefon, tag, personnummer, eventIds
--->
+    });
+  </script>
+</body>
+</html>
