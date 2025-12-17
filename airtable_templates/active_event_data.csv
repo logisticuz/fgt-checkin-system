@@ -1,0 +1,2 @@
+external_id,event_slug,name,telephone,tag,email,status,medlem,startgg,swish_valid,swish_amount,swish_expected,tournament_games_registered,UUID
+fgc-weekly-1:testspelare,fgc-weekly-1,Test Spelare,0701234567,testplayer,test@example.com,Ej klar,false,false,false,0,25,"SF6",test-uuid-123

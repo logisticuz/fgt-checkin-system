@@ -1,50 +1,182 @@
 <!DOCTYPE html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Klar för deltagande!</title>
+  <title>Ready!</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background-color: #000;
-      color: #58aaff;
-      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #0a0a0a 0%, #0d1f0d 100%);
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
       text-align: center;
-      padding-top: 10vh;
     }
+
+    .success-icon {
+      font-size: 4rem;
+      animation: pop 0.6s ease-out;
+    }
+
+    @keyframes pop {
+      0% { transform: scale(0); opacity: 0; }
+      50% { transform: scale(1.2); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
     h1 {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      animation: blink 1.2s infinite;
+      color: #4caf50;
+      font-size: 2rem;
+      margin: 1rem 0;
+      animation: glow 2s ease-in-out infinite alternate;
     }
-    h2 {
-      font-size: 1.5rem;
-      margin-bottom: 2rem;
+
+    @keyframes glow {
+      from { text-shadow: 0 0 10px rgba(76, 175, 80, 0.5); }
+      to { text-shadow: 0 0 20px rgba(76, 175, 80, 0.8), 0 0 30px rgba(76, 175, 80, 0.4); }
     }
+
+    .player-tag {
+      font-size: 2.5rem;
+      font-weight: bold;
+      color: #58aaff;
+      margin: 0.5rem 0 1.5rem;
+    }
+
+    .info-card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(76, 175, 80, 0.3);
+      border-radius: 16px;
+      padding: 1.5rem;
+      max-width: 400px;
+      width: 100%;
+      margin: 1rem 0;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .info-row:last-child { border-bottom: none; }
+
+    .info-label {
+      color: #888;
+    }
+
+    .info-value {
+      color: #fff;
+      font-weight: 500;
+    }
+
+    .games-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-top: 1rem;
+    }
+
+    .game-badge {
+      background: rgba(88, 170, 255, 0.2);
+      border: 1px solid #58aaff;
+      color: #58aaff;
+      padding: 0.4rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.9rem;
+    }
+
+    .status-badges {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      margin: 1rem 0;
+    }
+
+    .badge {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.85rem;
+    }
+    .badge-ok { color: #4caf50; }
+
     .logo {
       margin-top: 2rem;
-      max-width: 400px;
+      max-width: 200px;
+      width: 60%;
+      height: auto;
+      opacity: 0.8;
     }
-    @keyframes blink {
-      0%, 100% { color: #58aaff; }
-      50% { color: #89cfff; transform: scale(1.05); }
+
+    footer {
+      margin-top: 2rem;
+      color: #666;
+      font-size: 0.8rem;
     }
   </style>
 </head>
 <body>
-  <h1 id="namn">✅ Klar för deltagande!</h1>
-  <h2>Välkommen till turneringen – du är incheckad och godkänd.</h2>
-  <img src="/static/logo.png" alt="FGC Trollhättan" class="logo" />
+  <div class="success-icon">✓</div>
 
-  <!-- Ljudklipp -->
-  <audio id="klarLjud" autoplay>
+  <h1>Checked In!</h1>
+
+  <div class="player-tag">{{ tag | default(name) }}</div>
+
+  <div class="status-badges">
+    <span class="badge badge-ok">Start.gg</span>
+    <span class="badge badge-ok">Member</span>
+    <span class="badge badge-ok">Paid</span>
+  </div>
+
+  <div class="info-card">
+    <div class="info-row">
+      <span class="info-label">Name</span>
+      <span class="info-value">{{ name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Event</span>
+      <span class="info-value">{{ event_name | default('FGC Weekly') }}</span>
+    </div>
+    {% if games %}
+    <div class="info-row">
+      <span class="info-label">Games</span>
+      <span class="info-value">{{ games | length }}</span>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if games %}
+  <div class="games-list">
+    {% for game in games %}
+    <span class="game-badge">{{ game }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <img src="/static/logo.png" alt="FGC Trollhattan" class="logo" />
+
+  <footer>
+    <p>Good luck!</p>
+  </footer>
+
+  <audio id="readySound" autoplay>
     <source src="/static/clear.mp3" type="audio/mpeg">
-    Ditt system stöder inte ljuduppspelning.
   </audio>
 
   <script>
-    const params = new URLSearchParams(location.search);
-    const namn = params.get("namn") || "Deltagaren";
-    document.getElementById("namn").innerText = `✅ ${namn} är klar för deltagande!`;
+    const audioEl = document.getElementById("readySound");
+    audioEl.volume = 0.7;
+    audioEl.addEventListener("error", () => {
+      console.warn("Could not play confirmation sound");
+    });
   </script>
 </body>
 </html>
