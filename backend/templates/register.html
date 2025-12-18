@@ -267,13 +267,16 @@
 
       <label for="games">Games</label>
       <select id="games" multiple>
-        <option value="SF6">Street Fighter 6</option>
-        <option value="T8">Tekken 8</option>
-        <option value="SSBU">Super Smash Bros. Ultimate</option>
-        <option value="GG">Guilty Gear Strive</option>
+        {% if games %}
+          {% for game in games %}
+        <option value="{{ game.id }}">{{ game.name }}</option>
+          {% endfor %}
+        {% else %}
+        <option value="" disabled>No games available - contact TO</option>
+        {% endif %}
       </select>
 
-      <button type="button" id="btn-confirm-games" class="btn btn-primary">
+      <button type="button" id="btn-confirm-games" class="btn btn-primary" {% if not games %}disabled{% endif %}>
         Confirm Selection
       </button>
     </section>

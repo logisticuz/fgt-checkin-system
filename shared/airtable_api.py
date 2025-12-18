@@ -140,7 +140,7 @@ def get_checkins(slug: str) -> List[Dict[str, Any]]:
 
         # --- CHANGED: createdTime comes from record top-level, not fields[] ---
         result.append({
-            "id": r.get("id"),
+            "record_id": r.get("id"),  # Airtable record ID for updates
             "created": r.get("createdTime"),  # correct source
             "event_slug": f.get("event_slug"),
             "status": f.get("status"),

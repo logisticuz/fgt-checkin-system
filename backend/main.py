@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
 import logging
+import time
 from urllib.parse import quote
 
 import httpx
@@ -35,6 +36,7 @@ OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/d
 OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
+STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # for fetching tournament events
 
 # If n8n is protected with Basic Auth, set these for proxy + health
 N8N_BASIC_AUTH_USER = os.getenv("N8N_BASIC_AUTH_USER")
@@ -224,6 +226,102 @@ def get_active_settings() -> dict:
         logger.warning(f"Settings parse error: {e}")
 
     return {"swish_number": "123 456 78 90", "swish_expected_per_game": 25}
+
+
+# === Start.gg Event Cache ===
+# Cache tournament events to avoid excessive API calls (rate limit: 80 req/min)
+STARTGG_CACHE = {}
+STARTGG_CACHE_TTL = 600  # 10 minutes
+
+
+def get_tournament_events(tournament_slug: str) -> list:
+    """
+    Fetch events (games) for a tournament from Start.gg with caching.
+    Returns list of dicts: [{"id": "123", "name": "Street Fighter 6"}, ...]
+
+    Cache TTL: 10 minutes (events don't change during a tournament)
+    Fallback: Returns empty list if API fails or no token configured
+    """
+    if not tournament_slug:
+        logger.warning("No tournament slug provided for event fetch")
+        return []
+
+    if not STARTGG_API_KEY:
+        logger.warning("STARTGG_API_KEY not configured, cannot fetch events")
+        return []
+
+    now = time.time()
+
+    # Check cache
+    if tournament_slug in STARTGG_CACHE:
+        cached_data, timestamp = STARTGG_CACHE[tournament_slug]
+        if now - timestamp < STARTGG_CACHE_TTL:
+            logger.debug(f"Cache hit for tournament: {tournament_slug}")
+            return cached_data
+
+    # Cache miss - fetch from Start.gg
+    logger.info(f"Fetching events from Start.gg for tournament: {tournament_slug}")
+
+    query = {
+        "query": """
+            query TournamentEvents($slug: String!) {
+                tournament(slug: $slug) {
+                    id
+                    name
+                    events {
+                        id
+                        name
+                    }
+                }
+            }
+        """,
+        "variables": {"slug": tournament_slug}
+    }
+
+    headers = {
+        "Authorization": f"Bearer {STARTGG_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        resp = SESSION.post(
+            "https://api.start.gg/gql/alpha",
+            json=query,
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+
+        data = resp.json()
+
+        if "errors" in data:
+            logger.error(f"Start.gg GraphQL errors: {data['errors']}")
+            return []
+
+        tournament = data.get("data", {}).get("tournament")
+        if not tournament:
+            logger.warning(f"Tournament not found: {tournament_slug}")
+            return []
+
+        events = tournament.get("events") or []
+        event_list = [
+            {"id": str(e.get("id")), "name": e.get("name")}
+            for e in events
+            if e.get("id") and e.get("name")
+        ]
+
+        # Store in cache
+        STARTGG_CACHE[tournament_slug] = (event_list, now)
+        logger.info(f"Cached {len(event_list)} events for tournament: {tournament_slug}")
+
+        return event_list
+
+    except requests.RequestException as e:
+        logger.error(f"Start.gg API request failed: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Error parsing Start.gg response: {e}")
+        return []
 
 
 def check_participant_status(name: str) -> dict:
@@ -447,11 +545,14 @@ async def root(request: Request):
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form(request: Request):
     settings = get_active_settings()
+    tournament_slug = settings.get("active_event_slug", "")
+    games = get_tournament_events(tournament_slug)
     return templates.TemplateResponse("register.html", {
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+        "games": games,
     })
 
 # Legacy alias so /register.html keeps working (old links/bookmarks)
@@ -459,11 +560,14 @@ async def register_form(request: Request):
 async def register_form_alias(request: Request):
     """Alias to support legacy links to /register.html."""
     settings = get_active_settings()
+    tournament_slug = settings.get("active_event_slug", "")
+    games = get_tournament_events(tournament_slug)
     return templates.TemplateResponse("register.html", {
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+        "games": games,
     })
 # --- /CHANGED ---
 

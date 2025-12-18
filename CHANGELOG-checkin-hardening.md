@@ -6,7 +6,47 @@ This document summarizes all changes made in the `feat/checkin-hardening` branch
 
 ## Overview
 
-This release focuses on **security hardening**, **input validation**, **language consistency** (Swedish -> English), and **architectural improvements** to the check-in polling system.
+This release focuses on **security hardening**, **input validation**, **language consistency** (Swedish -> English), **architectural improvements** to the check-in polling system, and a **modern esports-themed dashboard redesign**.
+
+---
+
+## 0. Dashboard Redesign & UI Updates (Latest)
+
+### 0.1 Esports-Themed Dashboard
+- **File:** `fgt_dashboard/layout.py`
+- **Changes:**
+  - Complete visual overhaul with esports color palette (neon blue `#58aaff`, purple `#a855f7`, green `#22c55e`)
+  - Gradient header with centered logo
+  - "LIVE" indicator with pulse animation (top right)
+  - Stats cards showing total players, ready count, and needs attention count
+  - Modern table styling with alternating row colors
+  - "Needs Attention" section highlighting players missing requirements
+
+### 0.2 Logo Integration
+- **Files:** `fgt_dashboard/assets/logo.png`, `backend/static/logo.png`
+- **Changes:**
+  - Cropped logo to remove dead space (1080x1080 → 1033x213)
+  - Logo centered in dashboard header (60px height)
+  - Logo added to check-in form footer (320px width)
+
+### 0.3 Check-in Form Styling
+- **File:** `backend/templates/checkin.html`
+- **Changes:**
+  - Enlarged "EVENT CHECK-IN" title (2.5rem, font-weight 700)
+  - Logo positioned in footer below submit button
+  - Fixed CSS max-width issue that was limiting logo size
+
+### 0.4 Dashboard Settings Fixes
+- **File:** `fgt_dashboard/callbacks.py`
+- **Changes:**
+  - Added fallback: `STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")`
+  - Added tab switching callback for Settings/Check-ins tabs visibility
+  - Simplified Airtable update to only save `active_event_slug` and `is_active` (removed redundant fields)
+
+### 0.5 Known Issue: n8n Workflow
+- The "FGC THN - Check-in Orchestrator" workflow in n8n needs manual configuration:
+  - "Save to Airtable" node must use "Airtable Latest" credential
+  - JavaScript in code nodes may need verification if API updates caused escaping issues
 
 ---
 
@@ -184,6 +224,8 @@ This release focuses on **security hardening**, **input validation**, **language
 ### New (to add)
 - [x] `backend/validation.py`
 - [x] `backend/static/js/validation.js`
+- [x] `backend/static/logo.png` (cropped logo for check-in form)
+- [x] `fgt_dashboard/assets/logo.png` (cropped logo for dashboard)
 - [x] `docs/` (Swedish docs)
 - [x] `docs-en/` (English docs)
 - [x] `nginx/`
@@ -200,7 +242,7 @@ This release focuses on **security hardening**, **input validation**, **language
 ## 8. Suggested Commit Message
 
 ```
-feat(checkin): hardening - status API, validation, English UI
+feat(checkin): hardening + esports dashboard redesign
 
 Security:
 - Add webhook token authentication (N8N_WEBHOOK_TOKEN)
@@ -211,6 +253,17 @@ Architecture:
 - Add /api/participant/{name}/status endpoint for reliable polling
 - Add PATCH /players/{id}/payment for TO dashboard
 - Add dynamic settings from Airtable (Swish config)
+
+Dashboard:
+- Redesign with esports theme (neon colors, gradient header)
+- Add centered logo and LIVE indicator
+- Add stats cards and "Needs Attention" section
+- Add tab switching for Settings/Check-ins
+
+UI:
+- Crop and integrate logo in dashboard and check-in form
+- Enlarge "EVENT CHECK-IN" title
+- Add STARTGG_TOKEN fallback for API key
 
 Consistency:
 - Convert all UI and code to English (keep Swedish backward compat)
@@ -231,6 +284,9 @@ Infrastructure:
 1. Airtable: Rename `gametag` column to `tag` in both `active_event_data` and `players` tables
 2. Environment: Add `N8N_WEBHOOK_TOKEN` to production `.env`
 3. n8n: Update flows to use `tag` field (if not already done)
+4. n8n: Verify "FGC THN - Check-in Orchestrator" workflow:
+   - Ensure "Save to Airtable" node uses "Airtable Latest" credential
+   - Check JavaScript code nodes for correct `$node` and `$json` references
 
 ---
 
@@ -243,3 +299,7 @@ Infrastructure:
 - [ ] Webhook token blocks unauthorized requests
 - [ ] Dashboard can mark payments
 - [ ] Swedish input still works (backward compat)
+- [ ] Dashboard loads with esports theme and logo
+- [ ] Dashboard tab switching works (Check-ins / Settings)
+- [ ] Dashboard "Fetch Event Data" saves slug to Airtable
+- [ ] Check-in form shows logo at correct size (320px)
