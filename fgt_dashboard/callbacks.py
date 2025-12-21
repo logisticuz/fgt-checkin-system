@@ -29,26 +29,30 @@ def register_callbacks(app):
     """
 
     # ---------------------------------------------------------------------
-    # Live check-ins table update (with column filtering)
+    # Live check-ins table update (with column filtering, search, and quick filters)
     # ---------------------------------------------------------------------
     @app.callback(
         Output("checkins-table", "data"),
         Output("checkins-table", "columns"),
+        Output("player-count", "children"),
         Input("event-dropdown", "value"),
         Input("interval-refresh", "n_intervals"),
         Input("btn-refresh", "n_clicks"),
         Input("visible-columns-store", "data"),
+        Input("active-filter", "data"),
+        Input("search-input", "value"),
     )
-    def update_table(selected_slug, _interval, _clicks, visible_columns):
+    def update_table(selected_slug, _interval, _clicks, visible_columns, active_filter, search_query):
         """
         Refresh the check-ins table when:
         - user selects a different event slug
         - the interval timer ticks
         - visible columns change
+        - filter or search changes
         """
         if not selected_slug:
             logger.warning("No event slug selected – skipping table update.")
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         # Default columns if none specified
         if not visible_columns:
@@ -59,28 +63,106 @@ def register_callbacks(app):
             data = get_checkins(selected_slug) or []
             if not isinstance(data, list) or not data:
                 logger.info(f"No check-ins found for slug: {selected_slug}")
-                return [], [{"name": "No participants", "id": "info"}]
+                return [], [{"name": "No participants", "id": "info"}], "0 players"
 
             df = pd.DataFrame(data)
+            total_count = len(df)
 
-            # Always include record_id for delete/update operations (hidden from display)
-            all_cols = ["record_id"] + [c for c in visible_columns if c in df.columns]
+            # Game name shortening map
+            GAME_SHORT_NAMES = {
+                "STREET FIGHTER 6 TOURNAMENT": "SF6",
+                "STREET FIGHTER 6": "SF6",
+                "TEKKEN 8 TOURNAMENT": "T8",
+                "TEKKEN 8": "T8",
+                "SMASH SINGLES": "SSBU",
+                "SUPER SMASH BROS": "SSBU",
+            }
+
+            def shorten_game(name):
+                """Shorten game name using mapping, case-insensitive."""
+                return GAME_SHORT_NAMES.get(name.upper().strip(), name) if name else ""
+
+            # Format multi-select fields: shorten names + join with comma
+            if "tournament_games_registered" in df.columns:
+                df["tournament_games_registered"] = df["tournament_games_registered"].apply(
+                    lambda x: ", ".join(shorten_game(g) for g in x) if isinstance(x, list) else shorten_game(x) if x else ""
+                )
+
+            # Store original boolean values for filtering before converting to icons
+            for col in ["member", "startgg", "payment_valid"]:
+                if col in df.columns:
+                    df[f"_{col}_bool"] = df[col].apply(lambda x: x is True or str(x).lower() == "true")
+
+            # Convert booleans to icons ✓/✗
+            for col in ["member", "startgg", "payment_valid"]:
+                if col in df.columns:
+                    df[col] = df[col].apply(lambda x: "✓" if x is True or str(x).lower() == "true" else "✗")
+
+            # Apply quick filter
+            if active_filter == "pending":
+                df = df[df["status"] == "Pending"]
+            elif active_filter == "ready":
+                df = df[df["status"] == "Ready"]
+            elif active_filter == "no-payment":
+                if "_payment_valid_bool" in df.columns:
+                    df = df[df["_payment_valid_bool"] == False]
+
+            # Apply search filter (case-insensitive on name and tag)
+            if search_query:
+                search_lower = search_query.lower()
+                mask = pd.Series([False] * len(df), index=df.index)
+                if "name" in df.columns:
+                    mask = mask | df["name"].str.lower().str.contains(search_lower, na=False)
+                if "tag" in df.columns:
+                    mask = mask | df["tag"].str.lower().str.contains(search_lower, na=False)
+                df = df[mask]
+
+            filtered_count = len(df)
+
+            # Drop helper columns before output
+            helper_cols = [c for c in df.columns if c.startswith("_")]
+            df = df.drop(columns=helper_cols, errors="ignore")
+
+            # Include record_id in data for delete/update operations, but NOT in visible columns
+            visible_cols = [c for c in visible_columns if c in df.columns]
+            # Keep record_id in data but filter it from column list
+            all_cols = ["record_id"] + visible_cols if "record_id" in df.columns else visible_cols
             df_filtered = df[[c for c in all_cols if c in df.columns]]
 
-            # Create column definitions - hide record_id
-            cols = []
-            for c in df_filtered.columns:
-                col_def = {"name": str(c).replace("_", " ").title(), "id": str(c)}
-                if c == "record_id":
-                    col_def["hideable"] = True
-                    col_def["hidden"] = True
-                cols.append(col_def)
+            # Column header display names (shorter/cleaner)
+            COLUMN_HEADERS = {
+                "name": "Name",
+                "tag": "Tag",
+                "status": "Status",
+                "payment_valid": "Payment",
+                "telephone": "Phone",
+                "member": "Member",
+                "startgg": "Start.gg",
+                "tournament_games_registered": "Games",
+                "email": "Email",
+                "UUID": "UUID",
+                "created": "Created",
+            }
 
-            return df_filtered.to_dict("records"), cols
+            # Create column definitions - exclude record_id from display
+            cols = []
+            for c in visible_cols:
+                if c in df_filtered.columns:
+                    header = COLUMN_HEADERS.get(c, str(c).replace("_", " ").title())
+                    col_def = {"name": header, "id": str(c)}
+                    cols.append(col_def)
+
+            # Player count text
+            if filtered_count == total_count:
+                count_text = f"{total_count} players"
+            else:
+                count_text = f"{filtered_count} of {total_count} players"
+
+            return df_filtered.to_dict("records"), cols, count_text
 
         except Exception as e:
             logger.exception(f"Error fetching check-ins for slug '{selected_slug}': {e}")
-            return [], [{"name": "Error fetching data", "id": "error"}]
+            return [], [{"name": "Error fetching data", "id": "error"}], "Error"
 
     # ---------------------------------------------------------------------
     # Sync column visibility dropdown to store
@@ -95,6 +177,79 @@ def register_callbacks(app):
         if not selected_columns:
             return ["name", "tag", "telephone", "member", "startgg", "payment_valid", "status"]
         return selected_columns
+
+    # ---------------------------------------------------------------------
+    # Quick filter buttons - update active filter store
+    # ---------------------------------------------------------------------
+    @app.callback(
+        Output("active-filter", "data"),
+        Input("filter-all", "n_clicks"),
+        Input("filter-pending", "n_clicks"),
+        Input("filter-ready", "n_clicks"),
+        Input("filter-no-payment", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def update_active_filter(all_clicks, pending_clicks, ready_clicks, no_payment_clicks):
+        """Update the active filter based on which button was clicked."""
+        triggered = ctx.triggered_id
+        if triggered == "filter-pending":
+            return "pending"
+        elif triggered == "filter-ready":
+            return "ready"
+        elif triggered == "filter-no-payment":
+            return "no-payment"
+        return "all"
+
+    # ---------------------------------------------------------------------
+    # Update filter button styles based on active filter
+    # ---------------------------------------------------------------------
+    @app.callback(
+        Output("filter-all", "style"),
+        Output("filter-pending", "style"),
+        Output("filter-ready", "style"),
+        Output("filter-no-payment", "style"),
+        Input("active-filter", "data"),
+    )
+    def update_filter_button_styles(active_filter):
+        """Highlight the active filter button."""
+        base_style = {
+            "backgroundColor": "transparent",
+            "border": "1px solid",
+            "borderRadius": "8px",
+            "padding": "0.5rem 1rem",
+            "fontSize": "0.8rem",
+            "fontWeight": "600",
+            "cursor": "pointer",
+        }
+
+        # Define colors for each button
+        colors = {
+            "all": "#00d4ff",      # accent_blue
+            "pending": "#f59e0b",  # accent_yellow
+            "ready": "#10b981",    # accent_green
+            "no-payment": "#ef4444",  # accent_red
+        }
+
+        styles = {}
+        for key in ["all", "pending", "ready", "no-payment"]:
+            color = colors[key]
+            if active_filter == key:
+                # Active: filled background
+                styles[key] = {
+                    **base_style,
+                    "backgroundColor": color,
+                    "borderColor": color,
+                    "color": "#000" if key in ["all", "pending", "ready"] else "#fff",
+                }
+            else:
+                # Inactive: outline only
+                styles[key] = {
+                    **base_style,
+                    "borderColor": color,
+                    "color": color,
+                }
+
+        return styles["all"], styles["pending"], styles["ready"], styles["no-payment"]
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update Airtable settings
@@ -352,52 +507,69 @@ def register_callbacks(app):
     def update_needs_attention(table_data):
         """
         Build a list of players who are missing membership, payment, or start.gg registration.
-        Shows what each player is missing to help TOs prioritize assistance.
+        Shows what each player is missing with icons to help TOs prioritize assistance.
         """
         from dash import html
 
         if not table_data:
             return html.P("No players checked in yet.", style={"color": "#888"})
 
+        # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
+        def is_ok(val):
+            return val == "✓" or val is True or str(val).lower() == "true"
+
         needs_help = []
         for row in table_data:
             missing = []
 
-            # Check membership status
-            member_val = row.get("member") or row.get("medlem")
-            if not member_val or str(member_val).lower() in ("false", "0", "no"):
-                missing.append("Membership")
+            # Check membership status (now using ✓/✗ icons)
+            member_val = row.get("member", "")
+            if not is_ok(member_val):
+                missing.append({"field": "Member", "icon": "🪪"})
 
             # Check payment status
-            payment_val = row.get("payment_valid") or row.get("swish_valid")
-            if not payment_val or str(payment_val).lower() in ("false", "0", "no"):
-                missing.append("Payment")
+            payment_val = row.get("payment_valid", "")
+            if not is_ok(payment_val):
+                missing.append({"field": "Payment", "icon": "💰"})
 
             # Check start.gg registration
-            startgg_val = row.get("startgg")
-            if not startgg_val or str(startgg_val).lower() in ("false", "0", "no"):
-                missing.append("Start.gg")
+            startgg_val = row.get("startgg", "")
+            if not is_ok(startgg_val):
+                missing.append({"field": "Start.gg", "icon": "🎮"})
 
             if missing:
                 name = row.get("name") or row.get("tag") or "Unknown"
+                tag = row.get("tag", "")
                 needs_help.append({
                     "name": name,
+                    "tag": tag,
                     "missing": missing,
                     "record_id": row.get("record_id", ""),
                 })
 
         if not needs_help:
-            return html.P("All players are ready!", style={"color": "#4caf50"})
+            return html.P("✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"})
 
-        # Build list of players needing help
+        # Build list of players needing help with icons
         items = []
         for player in needs_help:
-            missing_str = ", ".join(player["missing"])
+            # Build missing icons string
+            missing_icons = " ".join([m["icon"] for m in player["missing"]])
+            missing_text = ", ".join([m["field"] for m in player["missing"]])
+
+            display_name = player["name"]
+            if player["tag"] and player["tag"] != player["name"]:
+                display_name = f"{player['name']} ({player['tag']})"
+
             items.append(
                 html.Div([
-                    html.Strong(player["name"], style={"color": "#fff"}),
-                    html.Span(f" - Missing: {missing_str}", style={"color": "#ff9800"}),
-                ], style={"padding": "0.3rem 0"})
+                    html.Span(missing_icons, style={"marginRight": "0.5rem"}),
+                    html.Strong(display_name, style={"color": "#fff"}),
+                    html.Span(f" — {missing_text}", style={"color": "#94a3b8", "fontSize": "0.85rem"}),
+                ], style={
+                    "padding": "0.5rem 0",
+                    "borderBottom": "1px solid #1e293b",
+                })
             )
 
         return items
@@ -439,6 +611,10 @@ def register_callbacks(app):
             hidden_style = {"display": "none"}
             return "0", "0", "0", "0", hidden_style
 
+        # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
+        def is_ok(val):
+            return val == "✓" or val is True or str(val).lower() == "true"
+
         total = len(table_data)
         ready = len([d for d in table_data if d.get("status") == "Ready"])
         pending = len([d for d in table_data if d.get("status") == "Pending"])
@@ -447,17 +623,14 @@ def register_callbacks(app):
         needs_attention = 0
         for row in table_data:
             missing_something = False
-            # Check membership
-            member_val = row.get("member") or row.get("medlem")
-            if not member_val or str(member_val).lower() in ("false", "0", "no"):
+            # Check membership (now using ✓/✗ icons)
+            if not is_ok(row.get("member", "")):
                 missing_something = True
             # Check payment
-            payment_val = row.get("payment_valid") or row.get("swish_valid")
-            if not payment_val or str(payment_val).lower() in ("false", "0", "no"):
+            if not is_ok(row.get("payment_valid", "")):
                 missing_something = True
             # Check start.gg
-            startgg_val = row.get("startgg")
-            if not startgg_val or str(startgg_val).lower() in ("false", "0", "no"):
+            if not is_ok(row.get("startgg", "")):
                 missing_something = True
             if missing_something:
                 needs_attention += 1
@@ -514,13 +687,16 @@ def register_callbacks(app):
         if not record_id:
             return html.Span("❌ No record_id found for this player.", style={"color": "#ef4444"}), no_update
 
-        # Toggle payment_valid
+        # Toggle payment_valid (now using ✓/✗ icons)
         current_payment = row.get("payment_valid")
-        new_payment = not (current_payment is True or str(current_payment).lower() == "true")
+        is_currently_paid = current_payment == "✓" or current_payment is True or str(current_payment).lower() == "true"
+        new_payment = not is_currently_paid
 
-        # Determine new status
-        member_ok = row.get("member") is True or str(row.get("member", "")).lower() == "true"
-        startgg_ok = row.get("startgg") is True or str(row.get("startgg", "")).lower() == "true"
+        # Determine new status (check for ✓ icon or boolean true)
+        member_val = row.get("member", "")
+        member_ok = member_val == "✓" or member_val is True or str(member_val).lower() == "true"
+        startgg_val = row.get("startgg", "")
+        startgg_ok = startgg_val == "✓" or startgg_val is True or str(startgg_val).lower() == "true"
         new_status = "Ready" if (new_payment and member_ok and startgg_ok) else "Pending"
 
         # Update Airtable
@@ -540,13 +716,13 @@ def register_callbacks(app):
             resp = requests.patch(airtable_url, json=patch_data, headers=headers, timeout=15)
             resp.raise_for_status()
 
-            # Update local table data for immediate feedback
-            table_data[row_idx]["payment_valid"] = new_payment
+            # Update local table data for immediate feedback (use icons)
+            table_data[row_idx]["payment_valid"] = "✓" if new_payment else "✗"
             table_data[row_idx]["status"] = new_status
 
             status_emoji = "✅" if new_payment else "⏸️"
             feedback = html.Span(
-                f"{status_emoji} {player_name}: payment_valid={new_payment}, status={new_status}",
+                f"{status_emoji} {player_name}: Payment {'approved' if new_payment else 'revoked'}, status={new_status}",
                 style={"color": "#10b981" if new_payment else "#f59e0b"}
             )
             return feedback, table_data

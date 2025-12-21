@@ -76,13 +76,19 @@
       el.className = ok ? "green" : "red";
     };
 
+    // Flag to stop polling (e.g., already checked in - status won't change from polling)
+    let stopPolling = false;
+    let intervalId = null;
+
     async function updateStatus() {
-      if (inFlight) return;
+      if (inFlight || stopPolling) return;
 
       // Check polling timeout
       pollCount++;
       if (pollCount > MAX_POLLS) {
         setText("statusText", "Timeout - please refresh manually");
+        stopPolling = true;
+        if (intervalId) clearInterval(intervalId);
         return;
       }
 
@@ -110,11 +116,23 @@
 
         // Render current state
         setText("playerName", data?.name ?? name ?? "Unknown");
-        setText("statusText", data?.status ?? "Pending...");
+
+        // Check if already checked in - show friendly message and stop polling
+        // (Status won't change from polling - only TO can approve payment)
+        if (data?.already_checked_in || pollCount > 1) {
+          setText("statusText", "Checked in - awaiting TO approval");
+          stopPolling = true;
+          if (intervalId) clearInterval(intervalId);
+          // Update the auto-refresh message
+          document.querySelector("p[style*='margin-top: 2rem']").textContent =
+            "Use the refresh button to check for updates.";
+        } else {
+          setText("statusText", data?.status ?? "Pending...");
+        }
 
         const isReady = data?.status === "Ready";
         const emojiEl = document.getElementById("statusEmoji");
-        emojiEl.textContent = isReady ? "✓" : "...";
+        emojiEl.textContent = isReady ? "✓" : "⏳";
         emojiEl.className = "pulse " + (isReady ? "green" : "yellow");
 
         setCheck("match-startgg", !!data?.startgg);
@@ -155,9 +173,9 @@
       }
     }
 
-    // Start polling (10s interval, max 5 minutes)
+    // Start with one immediate check, then poll every 10s (but stop after first successful response)
     updateStatus();
-    setInterval(updateStatus, 10000);
+    intervalId = setInterval(updateStatus, 10000);
   </script>
 </body>
 </html>

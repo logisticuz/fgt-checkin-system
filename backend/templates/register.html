@@ -440,30 +440,68 @@
     });
 
     // Game selection
-    document.getElementById("btn-confirm-games").addEventListener("click", function() {
+    document.getElementById("btn-confirm-games").addEventListener("click", async function() {
+      const btn = this;
       const select = document.getElementById("games");
-      const selected = Array.from(select.selectedOptions).map(o => o.value);
+      // Get both value (ID) and text (name) of selected options
+      const selectedNames = Array.from(select.selectedOptions).map(o => o.textContent);
 
-      if (selected.length === 0) {
+      if (selectedNames.length === 0) {
         showMessage("Please select at least one game", "error");
         return;
       }
 
-      // Store selection
-      localStorage.setItem("selectedGames", JSON.stringify(selected));
-      state.gamesCount = selected.length;
-      state.needsStartgg = false;
+      setButtonLoading(btn, true);
+      clearMessages();
 
-      // Update payment amount if payment section is visible
-      if (document.getElementById("section-payment").classList.contains("hidden") === false) {
-        const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
-        document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+      // Get slug from settings or localStorage
+      const slug = state.eventSlug || localStorage.getItem("eventSlug") || "";
+      const tag = state.tag || localStorage.getItem("tag") || "";
+
+      if (!slug || !tag) {
+        showMessage("Missing event or player info. Please go back and check in again.", "error");
+        setButtonLoading(btn, false);
+        return;
       }
 
-      showMessage(`${selected.length} game(s) selected`, "success");
-      setStatus("status-startgg", true);
-      document.getElementById("section-startgg").classList.add("hidden");
-      updateFinalButton();
+      try {
+        // POST selected games to backend
+        const response = await fetch("/api/player/games", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tag: tag,
+            slug: slug,
+            games: selectedNames
+          })
+        });
+
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.detail || "Failed to save games");
+        }
+
+        // Store selection locally too
+        localStorage.setItem("selectedGames", JSON.stringify(selectedNames));
+        state.gamesCount = selectedNames.length;
+        state.needsStartgg = false;
+
+        // Update payment amount if payment section is visible
+        if (document.getElementById("section-payment").classList.contains("hidden") === false) {
+          const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
+          document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+        }
+
+        showMessage(`${selectedNames.length} game(s) saved: ${selectedNames.join(", ")}`, "success");
+        setStatus("status-startgg", true);
+        document.getElementById("section-startgg").classList.add("hidden");
+        updateFinalButton();
+      } catch (err) {
+        console.error("Game selection error:", err);
+        showMessage(err.message || "Failed to save games. Please try again.", "error");
+      } finally {
+        setButtonLoading(btn, false);
+      }
     });
 
     // Final check-in

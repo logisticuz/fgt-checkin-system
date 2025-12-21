@@ -180,32 +180,39 @@ def create_layout():
     return html.Div(style=STYLES["page"], children=[
         # Data stores
         dcc.Store(id="events-map-store", data=[]),
-        dcc.Store(id="visible-columns-store", data=["name", "tag", "telephone", "member", "startgg", "payment_valid", "status"]),
-        dcc.Interval(id="interval-refresh", interval=30 * 1000, n_intervals=0),
+        dcc.Store(id="visible-columns-store", data=["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "tournament_games_registered"]),
+        dcc.Store(id="active-filter", data="all"),  # Current filter: all, pending, ready, no-payment
+        dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
+        dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
+        dcc.Interval(id="interval-refresh", interval=300 * 1000, n_intervals=0, disabled=True),  # Fallback: 5 min, disabled by default
 
         # Header
         html.Header(style={**STYLES["header"], "position": "relative"}, children=[
             # Centered logo
             html.Div(style={"display": "flex", "justifyContent": "center"}, children=[
-                html.Img(src="/admin/assets/logo.png", style={"height": "60px", "width": "auto"}),
+                html.Img(src="/assets/logo.png", style={"height": "60px", "width": "auto"}),
             ]),
-            # LIVE indicator (top right)
-            html.Div(style={"position": "absolute", "top": "1.5rem", "right": "2rem", "display": "flex", "alignItems": "center", "gap": "0.5rem"}, children=[
-                html.Div(style={
+            # Connection status indicator (top right)
+            html.Div(id="connection-indicator", style={"position": "absolute", "top": "1.5rem", "right": "2rem", "display": "flex", "alignItems": "center", "gap": "0.5rem"}, children=[
+                html.Div(id="connection-dot", style={
                     "width": "10px",
                     "height": "10px",
-                    "backgroundColor": COLORS["accent_green"],
+                    "backgroundColor": COLORS["accent_yellow"],  # Yellow = connecting
                     "borderRadius": "50%",
-                    "boxShadow": f"0 0 10px {COLORS['accent_green']}",
+                    "boxShadow": f"0 0 10px {COLORS['accent_yellow']}",
+                    "transition": "all 0.3s ease",
                 }),
-                html.Span("LIVE", style={
-                    "color": COLORS["accent_green"],
+                html.Span("Connecting...", id="connection-text", style={
+                    "color": COLORS["accent_yellow"],
                     "fontSize": "0.75rem",
                     "fontWeight": "600",
                     "letterSpacing": "0.1em",
+                    "transition": "all 0.3s ease",
                 }),
             ]),
         ]),
+
+        # SSE JavaScript loaded from assets/sse-client.js automatically by Dash
 
         # Main content
         html.Div(style=STYLES["container"], children=[
@@ -291,9 +298,55 @@ def create_layout():
 
                     # Main checkins table
                     html.Div(style=STYLES["card"], children=[
+                        # Header row with title and player count
                         html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "1rem"}, children=[
                             html.H3("Player List", style={**STYLES["section_title"], "margin": "0"}),
-                            html.Span(f"{len(data)} players", style={"color": COLORS["text_muted"], "fontSize": "0.875rem"}),
+                            html.Span(id="player-count", children=f"{len(data)} players", style={"color": COLORS["text_muted"], "fontSize": "0.875rem"}),
+                        ]),
+
+                        # Search and filter row
+                        html.Div(style={"display": "flex", "gap": "1rem", "marginBottom": "1rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
+                            # Search field
+                            dcc.Input(
+                                id="search-input",
+                                type="text",
+                                placeholder="🔍 Search name or tag...",
+                                style={
+                                    **STYLES["input"],
+                                    "maxWidth": "250px",
+                                    "flex": "1",
+                                },
+                                debounce=True,
+                            ),
+                            # Quick filter buttons
+                            html.Div(style={"display": "flex", "gap": "0.5rem", "flexWrap": "wrap"}, children=[
+                                html.Button("All", id="filter-all", n_clicks=0, style={
+                                    **STYLES["button_secondary"],
+                                    "padding": "0.5rem 1rem",
+                                    "fontSize": "0.8rem",
+                                }),
+                                html.Button("⏳ Pending", id="filter-pending", n_clicks=0, style={
+                                    **STYLES["button_secondary"],
+                                    "padding": "0.5rem 1rem",
+                                    "fontSize": "0.8rem",
+                                    "borderColor": COLORS["accent_yellow"],
+                                    "color": COLORS["accent_yellow"],
+                                }),
+                                html.Button("✓ Ready", id="filter-ready", n_clicks=0, style={
+                                    **STYLES["button_secondary"],
+                                    "padding": "0.5rem 1rem",
+                                    "fontSize": "0.8rem",
+                                    "borderColor": COLORS["accent_green"],
+                                    "color": COLORS["accent_green"],
+                                }),
+                                html.Button("💰 No Payment", id="filter-no-payment", n_clicks=0, style={
+                                    **STYLES["button_secondary"],
+                                    "padding": "0.5rem 1rem",
+                                    "fontSize": "0.8rem",
+                                    "borderColor": COLORS["accent_red"],
+                                    "color": COLORS["accent_red"],
+                                }),
+                            ]),
                         ]),
                         dcc.Loading(
                             type="circle",
@@ -331,18 +384,26 @@ def create_layout():
                                     "border": f"1px solid {COLORS['border']}",
                                 },
                                 style_data_conditional=[
-                                    # Ready status - green highlight
+                                    # Ready status - green row highlight
                                     {
                                         "if": {"filter_query": "{status} = 'Ready'"},
                                         "backgroundColor": "rgba(16, 185, 129, 0.1)",
                                         "borderLeft": f"3px solid {COLORS['accent_green']}",
                                     },
-                                    # Pending status - yellow highlight
+                                    # Pending status - yellow row highlight
                                     {
                                         "if": {"filter_query": "{status} = 'Pending'"},
                                         "backgroundColor": "rgba(245, 158, 11, 0.1)",
                                         "borderLeft": f"3px solid {COLORS['accent_yellow']}",
                                     },
+                                    # Icon cells: ✓ = green
+                                    {"if": {"filter_query": '{member} = "✓"', "column_id": "member"}, "color": COLORS["accent_green"], "fontWeight": "600"},
+                                    {"if": {"filter_query": '{startgg} = "✓"', "column_id": "startgg"}, "color": COLORS["accent_green"], "fontWeight": "600"},
+                                    {"if": {"filter_query": '{payment_valid} = "✓"', "column_id": "payment_valid"}, "color": COLORS["accent_green"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
+                                    # Icon cells: ✗ = yellow/red
+                                    {"if": {"filter_query": '{member} = "✗"', "column_id": "member"}, "color": COLORS["accent_yellow"], "fontWeight": "600"},
+                                    {"if": {"filter_query": '{startgg} = "✗"', "column_id": "startgg"}, "color": COLORS["accent_yellow"], "fontWeight": "600"},
+                                    {"if": {"filter_query": '{payment_valid} = "✗"', "column_id": "payment_valid"}, "color": COLORS["accent_red"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
                                     # Hover effect
                                     {
                                         "if": {"state": "active"},
@@ -425,16 +486,17 @@ def create_layout():
                             options=[
                                 {"label": "Name", "value": "name"},
                                 {"label": "Tag", "value": "tag"},
-                                {"label": "Telephone", "value": "telephone"},
-                                {"label": "Email", "value": "email"},
+                                {"label": "Status", "value": "status"},
+                                {"label": "Payment", "value": "payment_valid"},
+                                {"label": "Phone", "value": "telephone"},
                                 {"label": "Member", "value": "member"},
                                 {"label": "Start.gg", "value": "startgg"},
-                                {"label": "Payment Valid", "value": "payment_valid"},
-                                {"label": "Status", "value": "status"},
+                                {"label": "Games", "value": "tournament_games_registered"},
+                                {"label": "Email", "value": "email"},
                                 {"label": "UUID", "value": "UUID"},
                                 {"label": "Created", "value": "created"},
                             ],
-                            value=["name", "tag", "telephone", "member", "startgg", "payment_valid", "status"],  # Default TO view
+                            value=["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "tournament_games_registered"],  # Default TO view
                             multi=True,
                             clearable=False,
                             style={"backgroundColor": COLORS["bg_dark"]},

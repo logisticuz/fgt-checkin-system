@@ -2,7 +2,7 @@
 
 # Import FastAPI, templating, static files, and other dependencies
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +11,10 @@ import os
 import json
 import logging
 import time
+import asyncio
 from urllib.parse import quote
+from typing import Set
+from contextlib import asynccontextmanager
 
 import httpx
 import requests
@@ -45,6 +48,46 @@ N8N_BASIC_AUTH_PASSWORD = os.getenv("N8N_BASIC_AUTH_PASSWORD")
 assert AIRTABLE_API_KEY, "❌ Missing AIRTABLE_API_KEY in environment!"
 assert AIRTABLE_BASE_ID, "❌ Missing AIRTABLE_BASE_ID in environment!"
 
+# === SSE (Server-Sent Events) for real-time dashboard updates ===
+class SSEManager:
+    """Manages SSE connections and broadcasts events to all connected clients."""
+
+    def __init__(self):
+        self.clients: Set[asyncio.Queue] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self) -> asyncio.Queue:
+        """Register a new SSE client."""
+        queue = asyncio.Queue()
+        async with self._lock:
+            self.clients.add(queue)
+        logger.info(f"SSE client connected. Total clients: {len(self.clients)}")
+        return queue
+
+    async def disconnect(self, queue: asyncio.Queue):
+        """Remove a disconnected SSE client."""
+        async with self._lock:
+            self.clients.discard(queue)
+        logger.info(f"SSE client disconnected. Total clients: {len(self.clients)}")
+
+    async def broadcast(self, event: str, data: dict):
+        """Send an event to all connected clients."""
+        message = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+        async with self._lock:
+            disconnected = []
+            for queue in self.clients:
+                try:
+                    queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    disconnected.append(queue)
+            # Clean up full queues (likely dead connections)
+            for queue in disconnected:
+                self.clients.discard(queue)
+        if self.clients:
+            logger.debug(f"Broadcasted '{event}' to {len(self.clients)} clients")
+
+sse_manager = SSEManager()
+
 # === App ===
 app = FastAPI()
 
@@ -69,7 +112,7 @@ templates = Jinja2Templates(directory="templates")
 
 # === HTTP clients ===
 # httpx for proxy to n8n
-httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
+httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))  # Increased for duplicate check
 
 # requests Session for Airtable with retries
 SESSION = requests.Session()
@@ -609,6 +652,72 @@ async def update_payment_status(record_id: str, request: Request):
 async def get_event_history():
     return airtable_get_event_history()
 
+
+@app.patch("/api/player/games", tags=["Checkin"])
+async def update_player_games(request: Request):
+    """
+    Update tournament_games_registered for a player.
+    Used when player manually selects games in register.html.
+    Body: { "tag": "playertag", "slug": "tournament-slug", "games": ["SF6", "Tekken 8"] }
+    """
+    try:
+        body = await request.json()
+        tag = (body.get("tag") or "").strip().lower()
+        slug = body.get("slug") or ""
+        games = body.get("games") or []
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not tag or not slug:
+        raise HTTPException(status_code=400, detail="tag and slug are required")
+
+    if not isinstance(games, list):
+        raise HTTPException(status_code=400, detail="games must be an array")
+
+    # Find the player record by tag + slug
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+
+    def _esc(s: str) -> str:
+        return (s or "").replace("'", "''")
+
+    formula = f"AND(LOWER({{tag}})='{_esc(tag)}', {{event_slug}}='{_esc(slug)}')"
+    search_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}&maxRecords=1"
+
+    r = safe_get(search_url, headers=headers)
+    if not r:
+        raise HTTPException(status_code=500, detail="Failed to search Airtable")
+
+    records = r.json().get("records", [])
+    if not records:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    record_id = records[0]["id"]
+
+    # Update the record with games
+    update_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}/{record_id}"
+    update_headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # Airtable multi-select: send array + typecast to auto-create options
+    payload = {
+        "fields": {},
+        "typecast": True  # Auto-create new multi-select options if they don't exist
+    }
+    if games:
+        payload["fields"]["tournament_games_registered"] = games
+
+    try:
+        resp = SESSION.patch(update_url, json=payload, headers=update_headers, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        logger.info(f"Updated games for {tag}: {games}")
+        return {"success": True, "tag": tag, "games": games}
+    except requests.RequestException as e:
+        logger.error(f"Airtable update failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Airtable update failed: {e}")
+
+
 # === Start.gg OAuth (Admin Only) ===
 @app.get("/login", tags=["OAuth"])
 async def login(admin_key: str):
@@ -656,6 +765,89 @@ async def auth_callback(code: str, admin_key: str):
         json.dump(tokens, f, indent=2)
 
     return HTMLResponse("<h1>✅ OAuth success</h1><p>Token saved successfully.</p>")
+
+# === SSE Endpoints ===
+@app.get("/api/events/stream", tags=["SSE"])
+async def sse_stream(request: Request):
+    """
+    Server-Sent Events endpoint for real-time dashboard updates.
+    Clients connect here and receive events when check-ins happen.
+    """
+    async def event_generator():
+        queue = await sse_manager.connect()
+        try:
+            # Send initial connection confirmation
+            yield f"event: connected\ndata: {json.dumps({'status': 'connected'})}\n\n"
+
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    # Wait for events with timeout (sends keepalive)
+                    message = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield message
+                except asyncio.TimeoutError:
+                    # Send keepalive comment to prevent connection timeout
+                    yield ": keepalive\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await sse_manager.disconnect(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
+
+
+@app.post("/api/notify/checkin", tags=["SSE"])
+async def notify_checkin(request: Request):
+    """
+    Endpoint for n8n to call after a check-in is saved.
+    Broadcasts a 'checkin' event to all connected dashboard clients.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    # Broadcast to all connected SSE clients
+    await sse_manager.broadcast("checkin", {
+        "type": "new_checkin",
+        "name": data.get("name", "Unknown"),
+        "tag": data.get("tag", ""),
+        "status": data.get("status", "Pending"),
+        "timestamp": time.time(),
+    })
+
+    logger.info(f"Broadcasted checkin event for: {data.get('name', 'Unknown')}")
+    return {"success": True, "clients_notified": len(sse_manager.clients)}
+
+
+@app.post("/api/notify/update", tags=["SSE"])
+async def notify_update(request: Request):
+    """
+    Generic update notification endpoint.
+    Use for payment approvals, status changes, etc.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    event_type = data.get("event_type", "update")
+    await sse_manager.broadcast(event_type, data)
+
+    return {"success": True, "clients_notified": len(sse_manager.clients)}
+
 
 # === Shutdown ===
 @app.on_event("shutdown")

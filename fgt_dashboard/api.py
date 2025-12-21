@@ -8,15 +8,8 @@ from app import app as dash_app
 # Create FastAPI app
 app = FastAPI()
 
-# Mount Dash under the same prefix as defined in app.py ("/admin/")
-app.mount("/admin", WSGIMiddleware(dash_app.server))
-
-@app.get("/")
-def read_root():
-    """
-    Root endpoint for the dashboard container.
-    """
-    return {"msg": "FGT Dashboard is live!"}
+# Mount Dash at root - dashboard is the main app
+app.mount("/", WSGIMiddleware(dash_app.server))
 
 @app.get("/health")
 def health_check():

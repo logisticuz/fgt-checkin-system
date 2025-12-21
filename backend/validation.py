@@ -178,6 +178,15 @@ def validate_checkin_payload(data: dict) -> list[str]:
     if not has_name:
         errors.append("Name is required")
 
+    # Tag is required and must not be empty
+    tag_fields = ["tag", "nick"]
+    has_tag = any(
+        field in data and isinstance(data[field], str) and data[field].strip()
+        for field in tag_fields
+    )
+    if not has_tag:
+        errors.append("Tag/gamertag is required")
+
     # Validate personnummer format (if provided)
     for field in ["personnummer", "personal_id"]:
         if field in data and data[field]:

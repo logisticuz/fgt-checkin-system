@@ -247,10 +247,15 @@
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
 
-    // Error display helpers
+    // Error display helpers (using textContent to prevent XSS)
     function showErrors(errors) {
       const container = document.getElementById("error-container");
-      container.innerHTML = errors.map(e => `<p>${e}</p>`).join("");
+      container.innerHTML = "";  // Clear existing
+      errors.forEach(e => {
+        const p = document.createElement("p");
+        p.textContent = e;  // Safe - escapes HTML
+        container.appendChild(p);
+      });
       container.classList.add("show");
     }
 
@@ -294,11 +299,11 @@
         ? Validation.sanitizeFormData(rawData)
         : rawData;
 
-      // Persist to localStorage
+      // Persist to localStorage (excluding sensitive data like personnummer)
       localStorage.setItem("namn", sanitized.namn);
       localStorage.setItem("telefon", sanitized.telefon);
       localStorage.setItem("tag", sanitized.tag);
-      localStorage.setItem("personnummer", sanitized.personnummer);
+      // NOTE: personnummer is NOT stored for privacy/security reasons
 
       try {
         const response = await fetch(`/n8n/webhook/checkin/validate${tokenParam}`, {
@@ -317,6 +322,11 @@
           // Player is ready - go to success page
           window.location.href = `/status/${encodeURIComponent(sanitized.namn)}`;
         } else {
+          // Store event slug for register page
+          if (data.slug) {
+            localStorage.setItem("eventSlug", data.slug);
+          }
+
           // Something missing - go to register page
           const missing = Array.isArray(data.missing) ? data.missing : [];
           const flags = missing.map(s => {
@@ -327,7 +337,9 @@
             return "";
           }).filter(Boolean).join("&");
 
-          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}`;
+          // Include event slug in URL for register page
+          const eventSlug = data.slug ? `&event=${encodeURIComponent(data.slug)}` : "";
+          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}`;
           window.location.href = `/register?${qs}`;
         }
       } catch (err) {

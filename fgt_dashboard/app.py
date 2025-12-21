@@ -3,8 +3,8 @@ from dash import Dash
 from layout import create_layout
 from callbacks import register_callbacks
 
-# Create Dash instance with URL prefix for embedding in FastAPI under /admin
-app = Dash(__name__, requests_pathname_prefix='/admin/')
+# Create Dash instance (mounted at root in production)
+app = Dash(__name__, requests_pathname_prefix='/')
 
 # Layout is built internally by layout.py (no preloaded args)
 app.layout = create_layout()
