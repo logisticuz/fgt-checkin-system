@@ -59,3 +59,15 @@ TODO*.md
 CHANGELOG*.md
 context/
 todoishhh.txt
+
+# -- Local-only files ------------------
+fix_events_null.py
+image.png
+n8n-backup-*/
+nul
+
+# -- Agent files -----------------------
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
