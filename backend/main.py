@@ -21,7 +21,15 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from airtable_api import get_players as airtable_get_players, get_event_history as airtable_get_event_history
+from airtable_api import (
+    get_players as airtable_get_players,
+    get_event_history as airtable_get_event_history,
+    get_active_settings as airtable_get_active_settings,
+    get_checkin_by_name,
+    get_checkin_by_tag,
+    update_checkin,
+    delete_checkin,
+)
 from validation import sanitize_checkin_payload, validate_checkin_payload
 
 logging.basicConfig(level=logging.INFO)
@@ -246,29 +254,15 @@ def get_active_settings() -> dict:
     """
     Fetch active event settings from Airtable settings table.
     Returns dict with swish_number, swish_expected_per_game, active_event_slug, etc.
+    Uses shared airtable_api module.
     """
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/settings?filterByFormula={{is_active}}=TRUE()&maxRecords=1"
-
-    r = safe_get(url, headers=headers)
-    if not r:
-        logger.warning("Could not fetch settings from Airtable")
-        return {}
-
-    try:
-        records = r.json().get("records", [])
-        if records:
-            fields = records[0].get("fields", {})
-            return {
-                "swish_number": fields.get("swish_number", "123 456 78 90"),
-                "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
-                "active_event_slug": fields.get("active_event_slug", ""),
-                "startgg_event_ids": fields.get("startgg_event_ids", []),
-            }
-    except Exception as e:
-        logger.warning(f"Settings parse error: {e}")
-
-    return {"swish_number": "123 456 78 90", "swish_expected_per_game": 25}
+    fields = airtable_get_active_settings() or {}
+    return {
+        "swish_number": fields.get("swish_number", "123 456 78 90"),
+        "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
+        "active_event_slug": fields.get("active_event_slug", ""),
+        "startgg_event_ids": fields.get("startgg_event_ids", []),
+    }
 
 
 # === Start.gg Event Cache ===
@@ -632,29 +626,20 @@ async def update_payment_status(record_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    # Update payment using shared airtable_api
+    result = update_checkin(record_id, {"payment_valid": payment_valid})
 
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}/{record_id}"
-    payload = {"fields": {"payment_valid": payment_valid}}
+    if not result:
+        raise HTTPException(status_code=500, detail="Airtable update failed")
 
-    try:
-        resp = SESSION.patch(url, json=payload, headers=headers, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
+    # Broadcast SSE update to all connected clients (including player status pages)
+    await sse_manager.broadcast("update", {
+        "type": "payment_updated",
+        "record_id": record_id,
+        "payment_valid": payment_valid
+    })
 
-        # Broadcast SSE update to all connected clients (including player status pages)
-        await sse_manager.broadcast("update", {
-            "type": "payment_updated",
-            "record_id": record_id,
-            "payment_valid": payment_valid
-        })
-
-        return {"success": True, "record_id": record_id, "payment_valid": payment_valid}
-    except requests.RequestException as e:
-        logger.error(f"Airtable update failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Airtable update failed: {e}")
+    return {"success": True, "record_id": record_id, "payment_valid": payment_valid}
 
 @app.get("/event-history", tags=["Dashboard"])
 async def get_event_history():
@@ -682,48 +667,22 @@ async def update_player_games(request: Request):
     if not isinstance(games, list):
         raise HTTPException(status_code=400, detail="games must be an array")
 
-    # Find the player record by tag + slug
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    def _esc(s: str) -> str:
-        return (s or "").replace("'", "''")
-
-    formula = f"AND(LOWER({{tag}})='{_esc(tag)}', {{event_slug}}='{_esc(slug)}')"
-    search_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}&maxRecords=1"
-
-    r = safe_get(search_url, headers=headers)
-    if not r:
-        raise HTTPException(status_code=500, detail="Failed to search Airtable")
-
-    records = r.json().get("records", [])
-    if not records:
+    # Find the player record by tag + slug using shared airtable_api
+    checkin = get_checkin_by_tag(tag, slug)
+    if not checkin:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    record_id = records[0]["id"]
+    record_id = checkin["record_id"]
 
-    # Update the record with games
-    update_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}/{record_id}"
-    update_headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    # Update the record with games using shared airtable_api
+    fields = {"tournament_games_registered": games} if games else {}
+    result = update_checkin(record_id, fields, typecast=True)
 
-    # Airtable multi-select: send array + typecast to auto-create options
-    payload = {
-        "fields": {},
-        "typecast": True  # Auto-create new multi-select options if they don't exist
-    }
-    if games:
-        payload["fields"]["tournament_games_registered"] = games
+    if not result:
+        raise HTTPException(status_code=500, detail="Airtable update failed")
 
-    try:
-        resp = SESSION.patch(update_url, json=payload, headers=update_headers, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        logger.info(f"Updated games for {tag}: {games}")
-        return {"success": True, "tag": tag, "games": games}
-    except requests.RequestException as e:
-        logger.error(f"Airtable update failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Airtable update failed: {e}")
+    logger.info(f"Updated games for {tag}: {games}")
+    return {"success": True, "tag": tag, "games": games}
 
 
 # === Start.gg OAuth (Admin Only) ===

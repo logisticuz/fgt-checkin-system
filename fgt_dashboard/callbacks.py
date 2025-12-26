@@ -1,7 +1,13 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State
 from dash import no_update, html, ctx
-from shared.airtable_api import get_checkins  # single source of truth
+from shared.airtable_api import (
+    get_checkins,
+    get_active_settings_with_id,
+    update_settings,
+    update_checkin,
+    delete_checkin,
+)
 import pandas as pd
 import requests
 import os
@@ -370,33 +376,12 @@ def register_callbacks(app):
         ]
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
-        # 3) Find active settings row
-        settings_url = f"https://api.airtable.com/v0/{BASE_ID}/{SETTINGS_TABLE}"
-        headers_airtable = {
-            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        try:
-            q = requests.get(
-                settings_url,
-                headers=headers_airtable,
-                params={"filterByFormula": "{is_active}=TRUE()", "maxRecords": 1},
-                timeout=20,
-            )
-            q.raise_for_status()
-            records = q.json().get("records", [])
-            if not records:
-                # Fallback: take the very first record
-                q2 = requests.get(settings_url, headers=headers_airtable, params={"maxRecords": 1}, timeout=20)
-                q2.raise_for_status()
-                records = q2.json().get("records", [])
-            if not records:
-                return "❌ No settings record found in Airtable."
-            settings_id = records[0]["id"]
-            current_fields = records[0].get("fields", {}) or {}
-        except Exception as e:
-            logger.exception("Airtable read failed")
-            return f"❌ Airtable read failed: {e}"
+        # 3) Find active settings row using shared airtable_api
+        settings_data = get_active_settings_with_id()
+        if not settings_data:
+            return "❌ No settings record found in Airtable."
+        settings_id = settings_data["record_id"]
+        current_fields = settings_data.get("fields", {}) or {}
 
         # 4) Preserve TO selection & merge with new games
         current_selected = current_fields.get("default_game") or []  # list[str]
@@ -425,47 +410,24 @@ def register_callbacks(app):
             seen = set(keep)
             new_selected = keep + [n for n in new_candidates if n not in seen]
 
-        # 5) Patch Airtable settings - only store slug, fetch rest from Start.gg when needed
+        # 5) Patch Airtable settings using shared airtable_api
         patch_fields = {
             "active_event_slug": slug,
             "is_active": True,
         }
-        try:
-            patch = requests.patch(
-                f"{settings_url}/{settings_id}",
-                json={"fields": patch_fields},
-                headers=headers_airtable,
-                timeout=20,
-            )
-            patch.raise_for_status()
-        except Exception as e:
-            logger.exception("Airtable update failed")
-            return f"❌ Airtable update failed: {e}"
+        result = update_settings(settings_id, patch_fields)
+        if not result:
+            return "❌ Airtable update failed"
 
         logger.info(f"Updated settings in Airtable for slug: {slug}")
         return f"✅ Updated {tournament['name']} • {len(events)} events • Visible in form: {len(new_selected)}"
 
     # ---------------------------------------------------------------------
-    # Helper: read active settings.fields from Airtable
+    # Helper: read active settings.fields from Airtable (uses shared airtable_api)
     # ---------------------------------------------------------------------
     def _get_active_settings_fields():
-        url = f"https://api.airtable.com/v0/{BASE_ID}/{SETTINGS_TABLE}"
-        headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-        try:
-            r = requests.get(
-                url,
-                headers=headers,
-                params={"filterByFormula": "{is_active}=TRUE()", "maxRecords": 1},
-                timeout=15,
-            )
-            r.raise_for_status()
-            recs = r.json().get("records", [])
-            if not recs:
-                return None
-            return recs[0].get("fields", {})
-        except Exception as e:
-            logger.exception(f"Airtable settings fetch failed: {e}")
-            return None
+        result = get_active_settings_with_id()
+        return result.get("fields") if result else None
 
     # ---------------------------------------------------------------------
     # Populate game-dropdown from Airtable (default_game) + mapping store
@@ -718,23 +680,10 @@ def register_callbacks(app):
         startgg_ok = startgg_val == "✓" or startgg_val is True or str(startgg_val).lower() == "true"
         new_status = "Ready" if (new_payment and member_ok and startgg_ok) else "Pending"
 
-        # Update Airtable
-        airtable_url = f"https://api.airtable.com/v0/{BASE_ID}/{CHECKINS_TABLE}/{record_id}"
-        headers = {
-            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        patch_data = {
-            "fields": {
-                "payment_valid": new_payment,
-                "status": new_status,
-            }
-        }
+        # Update Airtable using shared airtable_api
+        result = update_checkin(record_id, {"payment_valid": new_payment, "status": new_status})
 
-        try:
-            resp = requests.patch(airtable_url, json=patch_data, headers=headers, timeout=15)
-            resp.raise_for_status()
-
+        if result:
             # Update local table data for immediate feedback (use icons)
             table_data[row_idx]["payment_valid"] = "✓" if new_payment else "✗"
             table_data[row_idx]["status"] = new_status
@@ -745,10 +694,9 @@ def register_callbacks(app):
                 style={"color": "#10b981" if new_payment else "#f59e0b"}
             )
             return feedback, table_data
-
-        except Exception as e:
-            logger.exception(f"Failed to update payment for {player_name}: {e}")
-            return html.Span(f"❌ Failed to update: {e}", style={"color": "#ef4444"}), no_update
+        else:
+            logger.error(f"Failed to update payment for {player_name}")
+            return html.Span("❌ Failed to update payment", style={"color": "#ef4444"}), no_update
 
     # -------------------------------------------------------------------------
     # Delete selected player from check-ins
@@ -779,14 +727,8 @@ def register_callbacks(app):
         if not record_id:
             return html.Span("❌ No record_id found for this player.", style={"color": "#ef4444"}), no_update
 
-        # Delete from Airtable
-        airtable_url = f"https://api.airtable.com/v0/{BASE_ID}/{CHECKINS_TABLE}/{record_id}"
-        headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-        try:
-            resp = requests.delete(airtable_url, headers=headers, timeout=15)
-            resp.raise_for_status()
-
+        # Delete from Airtable using shared airtable_api
+        if delete_checkin(record_id):
             # Remove from local table data
             table_data = [r for i, r in enumerate(table_data) if i != row_idx]
 
@@ -795,7 +737,6 @@ def register_callbacks(app):
                 style={"color": "#ef4444"}
             )
             return feedback, table_data
-
-        except Exception as e:
-            logger.exception(f"Failed to delete {player_name}: {e}")
-            return html.Span(f"❌ Failed to delete: {e}", style={"color": "#ef4444"}), no_update
+        else:
+            logger.error(f"Failed to delete {player_name}")
+            return html.Span("❌ Failed to delete from Airtable", style={"color": "#ef4444"}), no_update

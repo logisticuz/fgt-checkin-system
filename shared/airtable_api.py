@@ -264,3 +264,129 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         })
     logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
     return result
+
+
+# -----------------------------
+# Generic update/delete helpers
+# -----------------------------
+def _update_record(
+    table: str, record_id: str, fields: Dict[str, Any], typecast: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Update a single record in Airtable. Returns updated record or None on error.
+
+    Args:
+        typecast: If True, Airtable will auto-create multi-select options that don't exist.
+    """
+    url = f"{BASE_URL}/{table}/{record_id}"
+    payload = {"fields": fields}
+    if typecast:
+        payload["typecast"] = True
+    try:
+        resp = session.patch(url, json=payload, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(f"✅ Updated record {record_id} in '{table}'")
+        return data
+    except requests.RequestException as e:
+        logger.error(f"❌ Failed to update record {record_id} in '{table}': {e}")
+        return None
+
+
+def _delete_record(table: str, record_id: str) -> bool:
+    """Delete a single record from Airtable. Returns True on success."""
+    url = f"{BASE_URL}/{table}/{record_id}"
+    try:
+        resp = session.delete(url, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        logger.info(f"🗑️ Deleted record {record_id} from '{table}'")
+        return True
+    except requests.RequestException as e:
+        logger.error(f"❌ Failed to delete record {record_id} from '{table}': {e}")
+        return False
+
+
+# -----------------------------
+# Settings operations
+# -----------------------------
+def get_active_settings_with_id() -> Optional[Dict[str, Any]]:
+    """Return the active settings row with its record_id included."""
+    recs = _list_records(
+        SETTINGS_TABLE,
+        filter_formula="{is_active}=TRUE()",
+        max_records=1,
+    )
+    if not recs:
+        logger.warning("⚠️ No active settings row found.")
+        return None
+    rec = recs[0]
+    return {
+        "record_id": rec.get("id"),
+        "fields": rec.get("fields", {}),
+    }
+
+
+def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Update fields on a settings record."""
+    return _update_record(SETTINGS_TABLE, record_id, fields)
+
+
+# -----------------------------
+# Checkin operations (active_event_data)
+# -----------------------------
+def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Find a checkin record by name (case-insensitive).
+    Optionally filter by event_slug.
+    Returns dict with record_id and fields, or None if not found.
+    """
+    safe_name = (name or "").replace("'", "''")
+    formula = f"LOWER({{name}}) = LOWER('{safe_name}')"
+    if slug:
+        safe_slug = slug.replace("'", "''")
+        formula = f"AND({formula}, {{event_slug}} = '{safe_slug}')"
+
+    recs = _list_records(CHECKINS_TABLE, filter_formula=formula, max_records=1)
+    if not recs:
+        return None
+
+    rec = recs[0]
+    return {
+        "record_id": rec.get("id"),
+        "fields": rec.get("fields", {}),
+    }
+
+
+def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
+    """
+    Find a checkin record by tag + event_slug (case-insensitive tag match).
+    Returns dict with record_id and fields, or None if not found.
+    """
+    safe_tag = (tag or "").replace("'", "''")
+    safe_slug = (slug or "").replace("'", "''")
+    formula = f"AND(LOWER({{tag}})=LOWER('{safe_tag}'), {{event_slug}}='{safe_slug}')"
+
+    recs = _list_records(CHECKINS_TABLE, filter_formula=formula, max_records=1)
+    if not recs:
+        return None
+
+    rec = recs[0]
+    return {
+        "record_id": rec.get("id"),
+        "fields": rec.get("fields", {}),
+    }
+
+
+def update_checkin(
+    record_id: str, fields: Dict[str, Any], typecast: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Update fields on a checkin record (e.g., payment_valid, status).
+
+    Args:
+        typecast: If True, auto-create multi-select options (for tournament_games_registered).
+    """
+    return _update_record(CHECKINS_TABLE, record_id, fields, typecast=typecast)
+
+
+def delete_checkin(record_id: str) -> bool:
+    """Delete a checkin record."""
+    return _delete_record(CHECKINS_TABLE, record_id)
