@@ -264,23 +264,43 @@ def create_layout():
                         html.Button("Refresh", id="btn-refresh", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
                     ]),
 
-                    # Stats cards
+                    # Stats cards (clickable as filters)
                     html.Div(id="stats-cards", style={"display": "flex", "gap": "1rem", "marginBottom": "1.5rem", "flexWrap": "wrap"}, children=[
-                        html.Div(style={**STYLES["stat_card"], "borderTop": f"3px solid {COLORS['accent_blue']}"}, children=[
+                        html.Div(id="filter-all", n_clicks=0, style={
+                            **STYLES["stat_card"],
+                            "borderTop": f"3px solid {COLORS['accent_blue']}",
+                            "cursor": "pointer",
+                            "transition": "all 0.2s",
+                        }, children=[
                             html.P(str(len(data)), id="stat-total", style={**STYLES["stat_value"], "color": COLORS["accent_blue"]}),
-                            html.P("Total Players", style=STYLES["stat_label"]),
+                            html.P("Total", style=STYLES["stat_label"]),
                         ]),
-                        html.Div(style={**STYLES["stat_card"], "borderTop": f"3px solid {COLORS['accent_green']}"}, children=[
+                        html.Div(id="filter-ready", n_clicks=0, style={
+                            **STYLES["stat_card"],
+                            "borderTop": f"3px solid {COLORS['accent_green']}",
+                            "cursor": "pointer",
+                            "transition": "all 0.2s",
+                        }, children=[
                             html.P(str(len([d for d in data if d.get("status") == "Ready"])), id="stat-ready", style={**STYLES["stat_value"], "color": COLORS["accent_green"]}),
                             html.P("Ready", style=STYLES["stat_label"]),
                         ]),
-                        html.Div(style={**STYLES["stat_card"], "borderTop": f"3px solid {COLORS['accent_yellow']}"}, children=[
+                        html.Div(id="filter-pending", n_clicks=0, style={
+                            **STYLES["stat_card"],
+                            "borderTop": f"3px solid {COLORS['accent_yellow']}",
+                            "cursor": "pointer",
+                            "transition": "all 0.2s",
+                        }, children=[
                             html.P(str(len([d for d in data if d.get("status") == "Pending"])), id="stat-pending", style={**STYLES["stat_value"], "color": COLORS["accent_yellow"]}),
                             html.P("Pending", style=STYLES["stat_label"]),
                         ]),
-                        html.Div(style={**STYLES["stat_card"], "borderTop": f"3px solid {COLORS['accent_red']}"}, children=[
+                        html.Div(id="filter-no-payment", n_clicks=0, style={
+                            **STYLES["stat_card"],
+                            "borderTop": f"3px solid {COLORS['accent_red']}",
+                            "cursor": "pointer",
+                            "transition": "all 0.2s",
+                        }, children=[
                             html.P("0", id="stat-attention", style={**STYLES["stat_value"], "color": COLORS["accent_red"]}),
-                            html.P("Need Attention", style=STYLES["stat_label"]),
+                            html.P("No Payment", style=STYLES["stat_label"]),
                         ]),
                     ]),
 
@@ -304,13 +324,13 @@ def create_layout():
                             html.Span(id="player-count", children=f"{len(data)} players", style={"color": COLORS["text_muted"], "fontSize": "0.875rem"}),
                         ]),
 
-                        # Search and filter row
+                        # Search and game filter row
                         html.Div(style={"display": "flex", "gap": "1rem", "marginBottom": "1rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
                             # Search field
                             dcc.Input(
                                 id="search-input",
                                 type="text",
-                                placeholder="🔍 Search name or tag...",
+                                placeholder="Search name or tag...",
                                 style={
                                     **STYLES["input"],
                                     "maxWidth": "250px",
@@ -318,34 +338,16 @@ def create_layout():
                                 },
                                 debounce=True,
                             ),
-                            # Quick filter buttons
-                            html.Div(style={"display": "flex", "gap": "0.5rem", "flexWrap": "wrap"}, children=[
-                                html.Button("All", id="filter-all", n_clicks=0, style={
-                                    **STYLES["button_secondary"],
-                                    "padding": "0.5rem 1rem",
-                                    "fontSize": "0.8rem",
-                                }),
-                                html.Button("⏳ Pending", id="filter-pending", n_clicks=0, style={
-                                    **STYLES["button_secondary"],
-                                    "padding": "0.5rem 1rem",
-                                    "fontSize": "0.8rem",
-                                    "borderColor": COLORS["accent_yellow"],
-                                    "color": COLORS["accent_yellow"],
-                                }),
-                                html.Button("✓ Ready", id="filter-ready", n_clicks=0, style={
-                                    **STYLES["button_secondary"],
-                                    "padding": "0.5rem 1rem",
-                                    "fontSize": "0.8rem",
-                                    "borderColor": COLORS["accent_green"],
-                                    "color": COLORS["accent_green"],
-                                }),
-                                html.Button("💰 No Payment", id="filter-no-payment", n_clicks=0, style={
-                                    **STYLES["button_secondary"],
-                                    "padding": "0.5rem 1rem",
-                                    "fontSize": "0.8rem",
-                                    "borderColor": COLORS["accent_red"],
-                                    "color": COLORS["accent_red"],
-                                }),
+                            # Game filter dropdown
+                            html.Div(style={"minWidth": "140px"}, children=[
+                                dcc.Dropdown(
+                                    id="game-filter",
+                                    options=[],  # Populated dynamically
+                                    value=None,
+                                    placeholder="All games",
+                                    clearable=True,
+                                    style={"backgroundColor": COLORS["bg_dark"], "minWidth": "140px"},
+                                ),
                             ]),
                         ]),
                         dcc.Loading(
@@ -357,7 +359,7 @@ def create_layout():
                                 data=data,
                                 page_size=20,
                                 sort_action="native",
-                                filter_action="native",
+                                row_selectable="single",
                                 style_table={"overflowX": "auto"},
                                 style_header={
                                     "backgroundColor": COLORS["bg_dark"],
@@ -378,11 +380,6 @@ def create_layout():
                                     "fontSize": "0.875rem",
                                     "textAlign": "left",
                                 },
-                                style_filter={
-                                    "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
-                                    "border": f"1px solid {COLORS['border']}",
-                                },
                                 style_data_conditional=[
                                     # Ready status - green row highlight
                                     {
@@ -400,14 +397,20 @@ def create_layout():
                                     {"if": {"filter_query": '{member} = "✓"', "column_id": "member"}, "color": COLORS["accent_green"], "fontWeight": "600"},
                                     {"if": {"filter_query": '{startgg} = "✓"', "column_id": "startgg"}, "color": COLORS["accent_green"], "fontWeight": "600"},
                                     {"if": {"filter_query": '{payment_valid} = "✓"', "column_id": "payment_valid"}, "color": COLORS["accent_green"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    # Icon cells: ✗ = yellow/red
-                                    {"if": {"filter_query": '{member} = "✗"', "column_id": "member"}, "color": COLORS["accent_yellow"], "fontWeight": "600"},
-                                    {"if": {"filter_query": '{startgg} = "✗"', "column_id": "startgg"}, "color": COLORS["accent_yellow"], "fontWeight": "600"},
+                                    # Icon cells: ✗ = red (clearly shows missing)
+                                    {"if": {"filter_query": '{member} = "✗"', "column_id": "member"}, "color": COLORS["accent_red"], "fontWeight": "600"},
+                                    {"if": {"filter_query": '{startgg} = "✗"', "column_id": "startgg"}, "color": COLORS["accent_red"], "fontWeight": "600"},
                                     {"if": {"filter_query": '{payment_valid} = "✗"', "column_id": "payment_valid"}, "color": COLORS["accent_red"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    # Hover effect
+                                    # Hover/active effect - keep text readable
                                     {
                                         "if": {"state": "active"},
-                                        "backgroundColor": COLORS["bg_card_hover"],
+                                        "backgroundColor": "#1e293b",
+                                        "color": "#ffffff",
+                                    },
+                                    {
+                                        "if": {"state": "selected"},
+                                        "backgroundColor": "#1e293b",
+                                        "color": "#ffffff",
                                     },
                                     # Row striping
                                     {
@@ -447,7 +450,7 @@ def create_layout():
                 # ========== TAB 2: Settings ==========
                 html.Div(id="tab-settings-content", style={"display": "none"}, children=[
                     html.Div(style=STYLES["card"], children=[
-                        html.H3("🎮 Event Configuration", style=STYLES["section_title"]),
+                        html.H3("Event Configuration", style=STYLES["section_title"]),
 
                         html.Div(style={"marginBottom": "1.5rem"}, children=[
                             html.Label("Start.gg Tournament Link", style={"fontSize": "0.875rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
@@ -463,23 +466,15 @@ def create_layout():
                         html.Div(id="settings-output", style={"marginTop": "1rem", "padding": "1rem", "borderRadius": "8px", "backgroundColor": COLORS["bg_dark"]}),
                     ]),
 
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("🕹️ Active Games", style=STYLES["section_title"]),
-                        html.P("Select which games are active for the current event.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
-                        dcc.Dropdown(
-                            id="game-dropdown",
-                            options=[],
-                            value=None,
-                            clearable=False,
-                            multi=True,
-                            style={"backgroundColor": COLORS["bg_dark"]},
-                        ),
-                        html.Div(id="game-help", style={"marginTop": "0.5rem", "color": COLORS["text_muted"], "fontSize": "0.875rem"}),
+                    # Hidden elements to satisfy callback dependencies
+                    html.Div(style={"display": "none"}, children=[
+                        dcc.Dropdown(id="game-dropdown", options=[], value=None),
+                        html.Div(id="game-help"),
                     ]),
 
                     # Column visibility settings
                     html.Div(style=STYLES["card"], children=[
-                        html.H3("📋 Table Columns", style=STYLES["section_title"]),
+                        html.H3("Table Columns", style=STYLES["section_title"]),
                         html.P("Choose which columns to display in the check-ins table.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
                         dcc.Dropdown(
                             id="column-visibility-dropdown",

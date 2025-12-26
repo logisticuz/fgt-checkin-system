@@ -81,8 +81,43 @@
       outline: none;
       border-color: #58aaff;
     }
-    select[multiple] {
-      min-height: 100px;
+    /* Checkbox game selection */
+    .game-checkboxes {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .game-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .game-checkbox:hover {
+      border-color: #58aaff;
+      background: rgba(88, 170, 255, 0.1);
+    }
+    .game-checkbox.selected {
+      border-color: #4caf50;
+      background: rgba(76, 175, 80, 0.15);
+    }
+    .game-checkbox input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      accent-color: #4caf50;
+      cursor: pointer;
+    }
+    .game-checkbox label {
+      margin: 0;
+      cursor: pointer;
+      color: #fff;
+      font-size: 1rem;
     }
 
     /* Buttons */
@@ -265,16 +300,18 @@
         You are not registered on Start.gg for this event. Select which games you want to enter:
       </p>
 
-      <label for="games">Games</label>
-      <select id="games" multiple>
+      <div id="games" class="game-checkboxes">
         {% if games %}
           {% for game in games %}
-        <option value="{{ game.id }}">{{ game.name }}</option>
+        <div class="game-checkbox" onclick="this.classList.toggle('selected'); this.querySelector('input').checked = !this.querySelector('input').checked;">
+          <input type="checkbox" id="game-{{ game.id }}" value="{{ game.id }}" data-name="{{ game.name }}">
+          <label for="game-{{ game.id }}">{{ game.name }}</label>
+        </div>
           {% endfor %}
         {% else %}
-        <option value="" disabled>No games available - contact TO</option>
+        <p style="color: #aaa;">No games available - contact TO</p>
         {% endif %}
-      </select>
+      </div>
 
       <button type="button" id="btn-confirm-games" class="btn btn-primary" {% if not games %}disabled{% endif %}>
         Confirm Selection
@@ -442,9 +479,9 @@
     // Game selection
     document.getElementById("btn-confirm-games").addEventListener("click", async function() {
       const btn = this;
-      const select = document.getElementById("games");
-      // Get both value (ID) and text (name) of selected options
-      const selectedNames = Array.from(select.selectedOptions).map(o => o.textContent);
+      // Get selected checkboxes
+      const checkboxes = document.querySelectorAll('#games input[type="checkbox"]:checked');
+      const selectedNames = Array.from(checkboxes).map(cb => cb.dataset.name);
 
       if (selectedNames.length === 0) {
         showMessage("Please select at least one game", "error");

@@ -28,6 +28,7 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 ## 2. Tabell: `active_event_data`
 
 *   **Syfte:** Lagrar **live-data** för varje deltagares incheckning för det aktiva eventet. Denna tabell uppdateras primärt av **N8N** och läses av både **Backend** och **FGT Dashboard**.
+*   **Viktig underhållsnotering:** Funktionen `get_checkins` i `shared/airtable_api.py`, som läser från denna tabell, använder en statisk fältlista. Om ett nytt fält läggs till i denna tabell i Airtable måste det även läggas till manuellt i fältlistan i den funktionen för att datan ska hämtas.
 *   **Viktiga Fält:**
 
 | Fältnamn                      | Typ              | Beskrivning                                                              | Exempel                                    |
@@ -48,7 +49,7 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 | `payment_expected`            | `Number`         | Förväntat betalningsbelopp.                                              | `100`                                      |
 | `payment_valid`               | `Checkbox`       | `[x]` om betalningen har verifierats och är korrekt.                     | `[x]`                                      |
 | `status`                      | `Single select`  | Övergripande status för deltagaren: `Ready`, `Pending`, `Missing Membership`, `Missing Payment`, `Missing Start.gg`. | `Ready`                                    |
-| `created`                     | `Created time`   | Tidstämpel för när incheckningsraden skapades.                           | `2025-12-17T11:30:00.000Z`                 |
+| `created`                     | `Created time`   | Tidstämpel för när incheckningsraden skapades. **Notering:** Detta är ett metadata-fält från Airtable (`createdTime`) och kan inte redigeras manuellt. | `2025-12-17T11:30:00.000Z`                 |
 
 ---
 
@@ -70,26 +71,4 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 
 ### Fältnamn: `tag` (inte `gametag` eller `gamerTag`)
 
-Systemet använder **`tag`** som standardnamn för spelarens "gamer-tag" eller "nick". Detta beslut togs för att uppnå konsekvens över hela kodbasen:
-
-| Plats | Fältnamn | Status |
-|-------|----------|--------|
-| Frontend (HTML/JS) | `tag` | ✅ Standard |
-| Backend (Python) | `tag` | ✅ Standard |
-| Airtable | `tag` | ✅ Standard |
-| shared/airtable_api.py | `tag` | ✅ Standard |
-| N8N workflows | `tag` | ✅ Standard |
-| Start.gg API | `gamerTag` | ⚠️ Extern standard (kan ej ändras) |
-
-**Varför `tag`?**
-1. Kort och universellt - alla i FGC säger "what's your tag?"
-2. Fungerar i alla språk och kontexter (Python, JS, SQL)
-3. Ingen förvirring med Start.gg:s `gamerTag` - de jämförs bara, inte blandas
-
-**Jämförelse med Start.gg:**
-```javascript
-// Vårt fält heter 'tag', deras heter 'gamerTag' - ingen konflikt
-participant.gamerTag.toLowerCase() === ourData.tag.toLowerCase()
-```
-
-> **OBS:** Om du hittar `gametag` någonstans i koden är det en rest som bör bytas till `tag`.
+Systemet använder **`tag`** som standardnamn för spelarens "gamer-tag". Detta är konsekvent över hela kodbasen för att undvika förvirring. Namnet `tag` är kort, universellt och fungerar i alla tekniska kontexter (Python, JS, etc.).

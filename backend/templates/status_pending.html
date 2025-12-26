@@ -176,6 +176,50 @@
     // Start with one immediate check, then poll every 10s (but stop after first successful response)
     updateStatus();
     intervalId = setInterval(updateStatus, 10000);
+
+    // === SSE for real-time updates from TO ===
+    let eventSource = null;
+
+    function connectSSE() {
+      const sseUrl = '/api/events/stream';
+      console.log('Connecting to SSE for real-time updates...');
+
+      try {
+        eventSource = new EventSource(sseUrl);
+
+        eventSource.onopen = function() {
+          console.log('SSE connected - will auto-refresh on TO updates');
+        };
+
+        eventSource.addEventListener('update', function(e) {
+          console.log('SSE update received:', e.data);
+          // TO made a change - refresh status
+          stopPolling = false; // Re-enable to fetch new data
+          updateStatus();
+          stopPolling = true; // Stop again after update
+        });
+
+        eventSource.addEventListener('checkin', function(e) {
+          console.log('SSE checkin event:', e.data);
+          // Something changed - refresh
+          stopPolling = false;
+          updateStatus();
+          stopPolling = true;
+        });
+
+        eventSource.onerror = function(e) {
+          console.log('SSE error, will retry...');
+          if (eventSource.readyState === EventSource.CLOSED) {
+            setTimeout(connectSSE, 5000);
+          }
+        };
+      } catch (err) {
+        console.error('SSE not available:', err);
+      }
+    }
+
+    // Connect to SSE after initial status check
+    setTimeout(connectSSE, 2000);
   </script>
 </body>
 </html>

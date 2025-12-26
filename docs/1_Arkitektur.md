@@ -13,28 +13,30 @@ Här är en översikt över de primära komponenterna i systemet:
 
 #### 1. Backend (`backend/`)
 *   **Teknik:** FastAPI (Python)
-*   **Ansvar:** Detta är navet för den publika delen av applikationen.
+*   **Ansvar:** Detta är navet för den publika delen av applikationen och realtidsdataflödet.
     *   **Webbserver:** Serverar de HTML-sidor som användaren ser, t.ex. incheckningsformuläret (`checkin.html`) och statussidorna.
     *   **N8N Proxy:** All trafik från användarens webbläsare till `n8n` går via en proxy-endpoint (`/n8n/...`) i denna tjänst. Detta är en viktig säkerhetsfunktion som döljer den interna `n8n`-tjänsten. Proxyn fångar även upp inkommande data, validerar och "tvättar" den med hjälp av `validation.py` innan den skickas vidare.
-    *   **Status API:** Tillhandahåller `GET /api/participant/{name}/status` som läser deltagarstatus direkt från Airtable. Detta endpoint används av `status_pending.html` för polling - se [Dataflöden](./2_Datafloden.md#flöde-3-status-polling-väntande-deltagare) för mer detaljer om varför detta designbeslut togs.
+    *   **Status API:** Tillhandahåller `GET /api/participant/{name}/status` som läser deltagarstatus direkt från Airtable. Detta endpoint används av `status_pending.html` för polling.
+    *   **SSE Hub:** Hanterar Server-Sent Events (`GET /api/events/stream`) för realtidsuppdateringar till dashboarden. Exponerar även `/api/notify/checkin` och `/api/notify/update` som `n8n` anropar för att skicka notiser till anslutna SSE-klienter. Detta gör att backend fungerar som en brygga för realtidsflöden mellan `n8n` och `fgt_dashboard`.
 
 #### 2. FGT Dashboard (`fgt_dashboard/`)
 *   **Teknik:** Plotly Dash monterad inuti en FastAPI-app.
 *   **Ansvar:** Detta är turneringsorganisatörernas (TOs) primära verktyg.
     *   **Administrativt Gränssnitt:** Tillhandahåller ett webbgränssnitt (tillgängligt via `/admin/`) där TOs kan hantera och övervaka event.
     *   **Event-konfiguration:** Den mest kritiska funktionen är att hämta turneringsdata. En TO klistrar in en länk från Start.gg, och instrumentpanelen anropar Start.gg:s GraphQL API för att hämta alla relevanta detaljer (event, deltagare, etc.). Denna information sparas sedan i `settings`-tabellen i Airtable.
-    *   **Realtidsöverblick:** Visar en live-uppdaterad tabell med alla incheckade deltagare och deras status (Grön, Röd, etc.). Den har också en "Needs Attention"-sektion för att snabbt identifiera vilka som behöver hjälp.
+    *   **Realtidsöverblick:** Visar en live-uppdaterad tabell med alla incheckade deltagare och deras status (Grön, Röd, etc.), mottagen via **Server-Sent Events (SSE)**. Den har också en "Needs Attention"-sektion för att snabbt identifiera vilka som behöver hjälp.
 
 #### 3. N8N (`n8n/`)
 *   **Teknik:** n8n.io (Workflow Automation)
-*   **Ansvar:** Detta är systemets "hjärna" som utför själva incheckningslogiken.
+*   **Ansvar:** Detta är systemets "hjärna" som utför själva incheckningslogiken och samordnar externa API-anrop.
     *   **Workflows:** `n8n` lyssnar på webhooks som anropas av `backend`-tjänsten.
     *   **Affärslogik:** När ett `checkin`-anrop kommer in, exekverar `n8n` ett workflow som utför följande steg:
         1.  Kontrollerar deltagarens medlemskap mot **Sverok eBas API**.
         2.  Kontrollerar deltagarens turneringsregistrering mot **Start.gg API** (baserat på `tag`).
-        3.  Kontrollerar betalningsstatus.
+        3.  Kontrollerar betalningsstatus (genom att läsa från Airtable, men ingen extern API-integration här).
         4.  Uppdaterar deltagarens rad i `active_event_data`-tabellen i Airtable med resultatet.
-        5.  Returnerar ett `JSON`-svar till `backend` som indikerar om incheckningen lyckades eller vad som saknas.
+        5.  **Anropar `backend`-tjänstens `/api/notify/checkin` (eller `/api/notify/update`)** för att trigga en realtidsuppdatering via SSE till dashboarden.
+        6.  Returnerar ett `JSON`-svar till `backend` som indikerar om incheckningen lyckades eller vad som saknas.
 
 #### 4. Nginx
 *   **Teknik:** Nginx

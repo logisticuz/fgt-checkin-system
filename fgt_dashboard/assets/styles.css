@@ -1,0 +1,104 @@
+/* FGC Dashboard - Dark Theme Styles */
+
+/* === Dropdown Styling === */
+/* Base dropdown container */
+.Select-control,
+.Select-menu-outer {
+    background-color: #0a0a0f !important;
+    border-color: #1e293b !important;
+}
+
+/* Dropdown input/value area */
+.Select-value,
+.Select-value-label,
+.Select-input > input,
+.Select-placeholder {
+    color: #ffffff !important;
+}
+
+/* Dropdown menu (open state) */
+.Select-menu {
+    background-color: #12121a !important;
+}
+
+/* Dropdown options */
+.Select-option {
+    background-color: #12121a !important;
+    color: #ffffff !important;
+}
+
+.Select-option:hover,
+.Select-option.is-focused {
+    background-color: #1a1a25 !important;
+    color: #00d4ff !important;
+}
+
+.Select-option.is-selected {
+    background-color: #00d4ff !important;
+    color: #000000 !important;
+}
+
+/* Multi-select tags */
+.Select-value {
+    background-color: #1e293b !important;
+    border-color: #00d4ff !important;
+    color: #ffffff !important;
+}
+
+.Select-value-icon {
+    border-color: #00d4ff !important;
+}
+
+.Select-value-icon:hover {
+    background-color: #ef4444 !important;
+    color: #ffffff !important;
+}
+
+/* Clear indicator */
+.Select-clear-zone {
+    color: #94a3b8 !important;
+}
+
+.Select-clear-zone:hover {
+    color: #ef4444 !important;
+}
+
+/* Arrow indicator */
+.Select-arrow-zone {
+    color: #94a3b8 !important;
+}
+
+/* === Dash DataTable Filter Input === */
+.dash-filter input {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border: 1px solid #1e293b !important;
+}
+
+.dash-filter input::placeholder {
+    color: #64748b !important;
+}
+
+/* === Tabs Styling === */
+.tab-container {
+    border-bottom: 1px solid #1e293b;
+}
+
+/* === DataTable Row Hover === */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner tr:hover td {
+    background-color: #1e293b !important;
+    color: #ffffff !important;
+}
+
+/* Active/selected cell */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td.focused {
+    background-color: #1e293b !important;
+    color: #ffffff !important;
+    outline: 2px solid #00d4ff !important;
+}
+
+/* Selected row */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner tr.row-selected td {
+    background-color: #1e293b !important;
+    color: #ffffff !important;
+}

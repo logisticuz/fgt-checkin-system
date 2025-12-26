@@ -643,6 +643,14 @@ async def update_payment_status(record_id: str, request: Request):
     try:
         resp = SESSION.patch(url, json=payload, headers=headers, timeout=DEFAULT_TIMEOUT)
         resp.raise_for_status()
+
+        # Broadcast SSE update to all connected clients (including player status pages)
+        await sse_manager.broadcast("update", {
+            "type": "payment_updated",
+            "record_id": record_id,
+            "payment_valid": payment_valid
+        })
+
         return {"success": True, "record_id": record_id, "payment_valid": payment_valid}
     except requests.RequestException as e:
         logger.error(f"Airtable update failed: {e}")

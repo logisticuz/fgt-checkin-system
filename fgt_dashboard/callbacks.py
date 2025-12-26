@@ -35,14 +35,16 @@ def register_callbacks(app):
         Output("checkins-table", "data"),
         Output("checkins-table", "columns"),
         Output("player-count", "children"),
+        Output("game-filter", "options"),
         Input("event-dropdown", "value"),
         Input("interval-refresh", "n_intervals"),
         Input("btn-refresh", "n_clicks"),
         Input("visible-columns-store", "data"),
         Input("active-filter", "data"),
         Input("search-input", "value"),
+        Input("game-filter", "value"),
     )
-    def update_table(selected_slug, _interval, _clicks, visible_columns, active_filter, search_query):
+    def update_table(selected_slug, _interval, _clicks, visible_columns, active_filter, search_query, game_filter):
         """
         Refresh the check-ins table when:
         - user selects a different event slug
@@ -52,7 +54,7 @@ def register_callbacks(app):
         """
         if not selected_slug:
             logger.warning("No event slug selected – skipping table update.")
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         # Default columns if none specified
         if not visible_columns:
@@ -63,7 +65,7 @@ def register_callbacks(app):
             data = get_checkins(selected_slug) or []
             if not isinstance(data, list) or not data:
                 logger.info(f"No check-ins found for slug: {selected_slug}")
-                return [], [{"name": "No participants", "id": "info"}], "0 players"
+                return [], [{"name": "No participants", "id": "info"}], "0 players", []
 
             df = pd.DataFrame(data)
             total_count = len(df)
@@ -81,6 +83,18 @@ def register_callbacks(app):
             def shorten_game(name):
                 """Shorten game name using mapping, case-insensitive."""
                 return GAME_SHORT_NAMES.get(name.upper().strip(), name) if name else ""
+
+            # Extract unique games for filter dropdown (before shortening)
+            all_games = set()
+            if "tournament_games_registered" in df.columns:
+                for val in df["tournament_games_registered"]:
+                    if isinstance(val, list):
+                        for g in val:
+                            if g:
+                                all_games.add(shorten_game(g))
+                    elif val:
+                        all_games.add(shorten_game(val))
+            game_options = [{"label": g, "value": g} for g in sorted(all_games)]
 
             # Format multi-select fields: shorten names + join with comma
             if "tournament_games_registered" in df.columns:
@@ -117,6 +131,10 @@ def register_callbacks(app):
                     mask = mask | df["tag"].str.lower().str.contains(search_lower, na=False)
                 df = df[mask]
 
+            # Apply game filter
+            if game_filter and "tournament_games_registered" in df.columns:
+                df = df[df["tournament_games_registered"].str.contains(game_filter, case=False, na=False)]
+
             filtered_count = len(df)
 
             # Drop helper columns before output
@@ -149,7 +167,7 @@ def register_callbacks(app):
             for c in visible_cols:
                 if c in df_filtered.columns:
                     header = COLUMN_HEADERS.get(c, str(c).replace("_", " ").title())
-                    col_def = {"name": header, "id": str(c)}
+                    col_def = {"name": header, "id": str(c), "reorderable": True}
                     cols.append(col_def)
 
             # Player count text
@@ -158,11 +176,11 @@ def register_callbacks(app):
             else:
                 count_text = f"{filtered_count} of {total_count} players"
 
-            return df_filtered.to_dict("records"), cols, count_text
+            return df_filtered.to_dict("records"), cols, count_text, game_options
 
         except Exception as e:
             logger.exception(f"Error fetching check-ins for slug '{selected_slug}': {e}")
-            return [], [{"name": "Error fetching data", "id": "error"}], "Error"
+            return [], [{"name": "Error fetching data", "id": "error"}], "Error", []
 
     # ---------------------------------------------------------------------
     # Sync column visibility dropdown to store
@@ -201,55 +219,56 @@ def register_callbacks(app):
         return "all"
 
     # ---------------------------------------------------------------------
-    # Update filter button styles based on active filter
+    # Update stat card styles based on active filter
     # ---------------------------------------------------------------------
     @app.callback(
         Output("filter-all", "style"),
-        Output("filter-pending", "style"),
         Output("filter-ready", "style"),
+        Output("filter-pending", "style"),
         Output("filter-no-payment", "style"),
         Input("active-filter", "data"),
     )
-    def update_filter_button_styles(active_filter):
-        """Highlight the active filter button."""
+    def update_stat_card_styles(active_filter):
+        """Highlight the active stat card filter with subtle indicator."""
         base_style = {
-            "backgroundColor": "transparent",
-            "border": "1px solid",
-            "borderRadius": "8px",
-            "padding": "0.5rem 1rem",
-            "fontSize": "0.8rem",
-            "fontWeight": "600",
+            "backgroundColor": "#12121a",
+            "borderRadius": "12px",
+            "border": "1px solid #1e293b",
+            "padding": "1.25rem",
+            "textAlign": "center",
+            "flex": "1",
+            "minWidth": "150px",
             "cursor": "pointer",
+            "transition": "all 0.2s",
         }
 
-        # Define colors for each button
+        # Define colors for each card
         colors = {
             "all": "#00d4ff",      # accent_blue
-            "pending": "#f59e0b",  # accent_yellow
             "ready": "#10b981",    # accent_green
+            "pending": "#f59e0b",  # accent_yellow
             "no-payment": "#ef4444",  # accent_red
         }
 
         styles = {}
-        for key in ["all", "pending", "ready", "no-payment"]:
+        for key in ["all", "ready", "pending", "no-payment"]:
             color = colors[key]
             if active_filter == key:
-                # Active: filled background
+                # Active: scale up + soft glow
                 styles[key] = {
                     **base_style,
-                    "backgroundColor": color,
-                    "borderColor": color,
-                    "color": "#000" if key in ["all", "pending", "ready"] else "#fff",
+                    "borderTop": f"3px solid {color}",
+                    "transform": "scale(1.05)",
+                    "boxShadow": f"0 4px 20px {color}50",
                 }
             else:
-                # Inactive: outline only
+                # Inactive: original style, full brightness
                 styles[key] = {
                     **base_style,
-                    "borderColor": color,
-                    "color": color,
+                    "borderTop": f"3px solid {color}",
                 }
 
-        return styles["all"], styles["pending"], styles["ready"], styles["no-payment"]
+        return styles["all"], styles["ready"], styles["pending"], styles["no-payment"]
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update Airtable settings

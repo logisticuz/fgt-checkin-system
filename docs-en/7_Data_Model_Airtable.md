@@ -28,6 +28,7 @@ Airtable serves as the central database for the system, where all important info
 ## 2. Table: `active_event_data`
 
 *   **Purpose:** Stores **live data** for each participant's check-in for the active event. This table is primarily updated by **N8N** and read by both the **Backend** and the **FGT Dashboard**.
+*   **Important Maintenance Note:** The `get_checkins` function in `shared/airtable_api.py`, which reads from this table, uses a static field list. If a new field is added to this table in Airtable, it must also be manually added to the field list in that function for the data to be retrieved.
 *   **Key Fields:**
 
 | Field Name                      | Type               | Description                                                              | Example                                    |
@@ -48,7 +49,7 @@ Airtable serves as the central database for the system, where all important info
 | `payment_expected`            | `Number`           | Expected payment amount.                                                 | `100`                                      |
 | `payment_valid`               | `Checkbox`         | `[x]` if the payment has been verified and is correct.                   | `[x]`                                      |
 | `status`                      | `Single select`    | Overall status for the participant: `Ready`, `Pending`, `Missing Membership`, `Missing Payment`, `Missing Start.gg`. | `Ready`                                    |
-| `created`                     | `Created time`     | Timestamp for when the check-in record was created.                      | `2025-12-17T11:30:00.000Z`                 |
+| `created`                     | `Created time`     | Timestamp for when the check-in record was created. **Note:** This is metadata from Airtable (`createdTime`) and cannot be edited manually. | `2025-12-17T11:30:00.000Z`                 |
 
 ---
 
@@ -63,3 +64,11 @@ Airtable serves as the central database for the system, where all important info
 
 *   **Purpose:** These tables are intended to store archived or denormalized historical data about events for statistics or faster reads for the dashboard. The exact content and how they are populated is not fully defined in the primary flows, but they indicate a need for historical data.
 *   **Key Fields:** Likely `event_slug`, `status`, `participants`, `created`.
+
+---
+
+## 5. Name Conventions
+
+### Field Name: `tag` (not `gametag` or `gamerTag`)
+
+The system uses **`tag`** as the standard name for a player's "gamer tag" or "nick". This is consistent across the entire codebase to avoid confusion. The name `tag` is short, universal, and works in all technical contexts (Python, JS, etc.).
