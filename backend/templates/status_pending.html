@@ -5,56 +5,490 @@
   <title>Waiting for confirmation...</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    /* Base page styling */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      background-color: #000;
-      color: #58aaff;
-      font-family: 'Segoe UI', sans-serif;
+      background: #000;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem;
       text-align: center;
-      padding-top: 8vh;
     }
-    .pulse { font-size: 4rem; animation: pulse 1.5s infinite; margin-bottom: 1rem; }
-    h1 { font-size: 2.2rem; margin-bottom: 0.5rem; }
-    h2 { font-size: 1.1rem; margin-bottom: 2rem; }
-    ul { list-style: none; padding: 0; font-size: 1.05rem; }
-    li { margin: 8px 0; }
-    button {
-      margin-top: 1rem; padding: 0.5rem 1rem; background-color: #222; color: #58aaff;
-      border: 1px solid #58aaff; border-radius: 5px; cursor: pointer;
+
+    .container {
+      max-width: 420px;
+      width: 100%;
     }
-    .green { color: #00cc66; }
-    .yellow { color: #ffcc00; }
-    .red { color: #ff4444; }
+
+    /* Header */
+    .header-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+      padding-top: 1rem;
+    }
+
+    .status-icon {
+      font-size: 2rem;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
     @keyframes pulse {
-      0% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(1.1); }
-      100% { opacity: 1; transform: scale(1); }
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(1.05); }
+    }
+
+    h1 {
+      color: #58aaff;
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: 2px;
+      margin: 0;
+    }
+
+    .status-text {
+      color: #666;
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+
+    /* Status wrapper */
+    .status-wrapper {
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .status-header {
+      color: #58aaff;
+      font-size: 1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid rgba(88, 170, 255, 0.2);
+    }
+
+    /* Status table */
+    .status-table {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .status-col {
+      flex: 1;
+      padding: 0.75rem;
+      border-radius: 8px;
+    }
+
+    .ready-col {
+      background: rgba(76, 175, 80, 0.1);
+      border: 1px solid rgba(76, 175, 80, 0.3);
+    }
+
+    .missing-col {
+      background: rgba(244, 67, 54, 0.1);
+      border: 1px solid rgba(244, 67, 54, 0.3);
+    }
+
+    .status-col h3 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .ready-col h3 {
+      color: #4caf50;
+    }
+
+    .missing-col h3 {
+      color: #f44336;
+    }
+
+    .status-col ul {
+      list-style: none;
+      font-size: 0.85rem;
+    }
+
+    .status-col li {
+      padding: 0.25rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .ready-col li::before {
+      content: "✓";
+      color: #4caf50;
+      font-weight: bold;
+    }
+
+    .ready-col li {
+      color: #4caf50;
+    }
+
+    .missing-col li::before {
+      content: "✗";
+      color: #f44336;
+      font-weight: bold;
+    }
+
+    .missing-col li {
+      color: #f44336;
+    }
+
+    .status-col .empty {
+      color: #666;
+      font-style: italic;
+      justify-content: center;
+    }
+
+    .status-col .empty::before {
+      content: "";
+    }
+
+    /* Events list */
+    .events-card {
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.85rem;
+      color: #58aaff;
+    }
+
+    .events-card ul {
+      list-style: none;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+    }
+
+    /* Refresh button */
+    .btn-refresh {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.5rem;
+      background: #58aaff;
+      border: none;
+      border-radius: 8px;
+      color: #000;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-refresh:hover {
+      background: #6bb5ff;
+    }
+
+    .btn-refresh:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .auto-refresh-note {
+      margin-top: 0.75rem;
+      color: #444;
+      font-size: 0.75rem;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 1.5rem 0;
+      color: #444;
+      font-size: 0.75rem;
+      margin-top: auto;
+    }
+
+    footer .logo {
+      max-width: 320px;
+      width: 100%;
+      margin-bottom: 1rem;
+    }
+
+    /* Hidden class */
+    .hidden { display: none; }
+
+    /* Swish Payment Section */
+    .swish-card {
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    .swish-card h3 {
+      color: #58aaff;
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+    }
+
+    .swish-amount {
+      font-size: 1.8rem;
+      font-weight: bold;
+      color: #4caf50;
+      margin-bottom: 0.75rem;
+    }
+
+    .swish-amount span {
+      display: block;
+      font-size: 0.8rem;
+      color: #666;
+      font-weight: normal;
+      margin-bottom: 0.25rem;
+    }
+
+    .swish-qr {
+      background: #fff;
+      padding: 10px;
+      border-radius: 12px;
+      display: inline-block;
+      margin: 0.5rem 0;
+    }
+
+    .swish-qr img {
+      width: 140px;
+      height: 140px;
+      display: block;
+    }
+
+    .swish-number-box {
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(88, 170, 255, 0.3);
+      border-radius: 8px;
+      padding: 0.5rem 1rem;
+      margin: 0.75rem 0;
+      display: inline-block;
+    }
+
+    .swish-number-label {
+      font-size: 0.7rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .swish-number {
+      font-size: 1.1rem;
+      font-weight: bold;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+    }
+
+    .swish-divider {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin: 0.75rem 0;
+      color: #444;
+      font-size: 0.8rem;
+    }
+
+    .swish-divider::before,
+    .swish-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: rgba(88, 170, 255, 0.2);
+    }
+
+    .swish-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      background: #4caf50;
+      color: #fff;
+      padding: 0.85rem 2rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .swish-btn:hover {
+      background: #43a047;
+    }
+
+    .swish-note {
+      background: rgba(255, 152, 0, 0.1);
+      border: 1px solid rgba(255, 152, 0, 0.3);
+      border-radius: 8px;
+      padding: 0.75rem;
+      margin-top: 0.75rem;
+      font-size: 0.8rem;
+      color: #ff9800;
+      line-height: 1.4;
+    }
+
+    .swish-note strong {
+      color: #ffb74d;
     }
   </style>
 </head>
 <body>
-  <!-- Status display -->
-  <div class="pulse" id="statusEmoji">🌀</div>
-  <h1 id="playerName">...</h1>
-  <h2 id="statusText">Fetching status...</h2>
+  <div class="container">
+    <!-- Compact header -->
+    <div class="header-row">
+      <span class="status-icon" id="statusEmoji">⏳</span>
+      <h1 id="playerName">...</h1>
+    </div>
+    <p class="status-text" id="statusText">Checking status...</p>
 
-  <!-- Match checks -->
-  <ul>
-    <li id="match-startgg">Registered on Start.gg: ⏳</li>
-    <li id="match-member">FGC Trollhättan member: ⏳</li>
-    <li id="match-payment">Payment confirmed: ⏳</li> <!-- was Swish -->
-  </ul>
+    <!-- Status table -->
+    <div class="status-wrapper">
+      <h2 class="status-header">Status</h2>
+      <div class="status-table">
+        <div class="status-col ready-col">
+          <h3>✓ Ready</h3>
+          <ul id="ready-list"></ul>
+        </div>
+        <div class="status-col missing-col">
+          <h3>✗ Missing</h3>
+          <ul id="missing-list"></ul>
+        </div>
+      </div>
+    </div>
 
-  <!-- Events + missing -->
-  <ul id="matched-events-list" style="margin-top: 2rem;"></ul>
-  <div id="missing-block" style="margin-top: 2rem;"></div>
+    <!-- Registered events -->
+    <div id="matched-events-list" class="events-card hidden"></div>
 
-  <button id="refreshBtn" onclick="updateStatus()">🔄 Refresh manually</button>
-  <p style="margin-top: 2rem;">This page refreshes every 10 seconds automatically.</p>
+    <!-- Swish Payment Section (shown when payment missing) -->
+    <div id="swish-section" class="swish-card hidden">
+      <h3>Pay with Swish</h3>
+
+      <div class="swish-amount" id="swish-amount">
+        <span>Amount to pay</span>
+        0 kr
+      </div>
+
+      <!-- Desktop: Show QR code -->
+      <div id="swish-desktop" class="hidden">
+        <div class="swish-qr">
+          <img src="/static/swish-QR.png" alt="Swish QR">
+        </div>
+        <p style="color: #aaa; font-size: 0.85rem; margin-top: 0.5rem;">
+          Scan with Swish app
+        </p>
+
+        <div class="swish-divider">or enter manually</div>
+
+        <div class="swish-number-box">
+          <div class="swish-number-label">Swish number</div>
+          <div class="swish-number">123-043 78 22</div>
+        </div>
+      </div>
+
+      <!-- Mobile: Show deep link button -->
+      <div id="swish-mobile" class="hidden">
+        <a id="swish-deeplink" class="swish-btn" href="#">
+          Open Swish
+        </a>
+
+        <div class="swish-divider">or enter manually</div>
+
+        <div class="swish-number-box">
+          <div class="swish-number-label">Swish number</div>
+          <div class="swish-number">123-043 78 22</div>
+        </div>
+      </div>
+
+      <!-- Important note -->
+      <div class="swish-note">
+        <strong>25 kr per game.</strong><br>
+        Write your <strong>tag</strong> and <strong>which games</strong> you're entering in the Swish message!
+      </div>
+    </div>
+
+    <button class="btn-refresh" id="refreshBtn" onclick="manualRefresh()">
+      Refresh
+    </button>
+    <p class="auto-refresh-note">Auto-refreshes every 10 seconds</p>
+
+    <footer>
+      <img src="/static/logo.png" alt="FGC Trollhattan" class="logo">
+      <p>Problems? Talk to a tournament organizer.</p>
+    </footer>
+  </div>
 
   <script>
     // Name is passed from backend template
     const name = "{{ name }}";
+
+    // Swish config
+    const SWISH_NUMBER = "1230437822";
+    const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
+
+    // Mobile detection
+    function isMobile() {
+      return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    // Generate Swish deep link
+    function generateSwishDeepLink(amount, message) {
+      const data = {
+        version: 1,
+        payee: { value: SWISH_NUMBER },
+        amount: { value: amount },
+        message: { value: message, editable: false }
+      };
+      return `swish://payment?data=${encodeURIComponent(JSON.stringify(data))}`;
+    }
+
+    // Update Swish section
+    function updateSwishSection(data) {
+      const swishSection = document.getElementById("swish-section");
+
+      // Show Swish only if payment is REQUIRED and missing
+      if (data.require_payment !== false && !data.payment) {
+        swishSection.classList.remove("hidden");
+
+        // Calculate amount from games count or use expected
+        const gamesCount = Array.isArray(data.startgg_events) ? data.startgg_events.length : 1;
+        const amount = data.payment_expected || (gamesCount * SWISH_PRICE_PER_GAME);
+
+        // Update amount display
+        document.getElementById("swish-amount").innerHTML =
+          `<span>Amount to pay</span>${amount} kr`;
+
+        // Show mobile or desktop UI
+        if (isMobile()) {
+          document.getElementById("swish-mobile").classList.remove("hidden");
+          document.getElementById("swish-desktop").classList.add("hidden");
+
+          // Generate deep link with player name/tag
+          const message = data.tag || data.name || name || "FGC";
+          const deepLink = generateSwishDeepLink(amount, message);
+          document.getElementById("swish-deeplink").href = deepLink;
+        } else {
+          document.getElementById("swish-desktop").classList.remove("hidden");
+          document.getElementById("swish-mobile").classList.add("hidden");
+        }
+      } else {
+        swishSection.classList.add("hidden");
+      }
+    }
 
     // Guard to avoid overlapping polls
     let inFlight = false;
@@ -67,14 +501,35 @@
       if (el) el.textContent = text;
     };
 
-    // Update a check row preserving its left label
-    const setCheck = (id, ok) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const label = el.textContent.split(":")[0];
-      el.textContent = `${label}: ${ok ? "✓" : "✗"}`;
-      el.className = ok ? "green" : "red";
-    };
+    // Update status table with ready/missing items
+    // Only shows items that are REQUIRED based on settings
+    function updateStatusTable(data) {
+      const readyList = document.getElementById("ready-list");
+      const missingList = document.getElementById("missing-list");
+
+      // Build items list - only include items that are REQUIRED
+      const items = [];
+      if (data?.require_startgg !== false) {
+        items.push({ name: "Start.gg", ok: !!data?.startgg });
+      }
+      if (data?.require_membership !== false) {
+        items.push({ name: "Member", ok: !!data?.member });
+      }
+      if (data?.require_payment !== false) {
+        items.push({ name: "Payment", ok: !!data?.payment });
+      }
+
+      const ready = items.filter(i => i.ok);
+      const missing = items.filter(i => !i.ok);
+
+      readyList.innerHTML = ready.length > 0
+        ? ready.map(i => `<li>${i.name}</li>`).join("")
+        : '<li class="empty">—</li>';
+
+      missingList.innerHTML = missing.length > 0
+        ? missing.map(i => `<li>${i.name}</li>`).join("")
+        : '<li class="empty">—</li>';
+    }
 
     // Flag to stop polling (e.g., already checked in - status won't change from polling)
     let stopPolling = false;
@@ -124,8 +579,8 @@
           stopPolling = true;
           if (intervalId) clearInterval(intervalId);
           // Update the auto-refresh message
-          document.querySelector("p[style*='margin-top: 2rem']").textContent =
-            "Use the refresh button to check for updates.";
+          const refreshNote = document.querySelector(".auto-refresh-note");
+          if (refreshNote) refreshNote.textContent = "Use the refresh button to check for updates.";
         } else {
           setText("statusText", data?.status ?? "Pending...");
         }
@@ -133,44 +588,44 @@
         const isReady = data?.status === "Ready";
         const emojiEl = document.getElementById("statusEmoji");
         emojiEl.textContent = isReady ? "✓" : "⏳";
-        emojiEl.className = "pulse " + (isReady ? "green" : "yellow");
+        emojiEl.style.color = isReady ? "#4caf50" : "#ff9800";
 
-        setCheck("match-startgg", !!data?.startgg);
-        setCheck("match-member", !!data?.member);
-        setCheck("match-payment", !!data?.payment);
+        // Update status table
+        updateStatusTable(data);
 
         // Registered events
         const eventsList = document.getElementById("matched-events-list");
         if (Array.isArray(data?.startgg_events) && data.startgg_events.length > 0) {
+          eventsList.classList.remove("hidden");
           eventsList.innerHTML =
-            `<p class="green">Registered in:</p>` +
-            data.startgg_events.map(ev => `<li class="green">${ev}</li>`).join("");
+            `<h3>Registered for</h3><ul>` +
+            data.startgg_events.map(ev => `<li>${ev}</li>`).join("") +
+            `</ul>`;
         } else {
+          eventsList.classList.add("hidden");
           eventsList.innerHTML = "";
         }
 
-        // Missing items
-        const missing = Array.isArray(data?.missing) ? data.missing : [];
-        const block = document.getElementById("missing-block");
-        if (missing.length > 0) {
-          block.innerHTML =
-            `<p class="yellow">Missing:</p><ul>` +
-            missing.map(s => `<li class="red">${s}</li>`).join("") +
-            `</ul>`;
-        } else {
-          block.innerHTML = "";
-        }
+        // Update Swish payment section
+        updateSwishSection(data);
 
       } catch (err) {
         setText("statusText", "Could not connect to server");
         const emojiEl = document.getElementById("statusEmoji");
         emojiEl.textContent = "✗";
-        emojiEl.className = "pulse red";
+        emojiEl.style.color = "#f44336";
         console.error("updateStatus failed:", err);
       } finally {
         inFlight = false;
         document.getElementById("refreshBtn").disabled = false;
       }
+    }
+
+    // Manual refresh - resets stopPolling so button always works
+    function manualRefresh() {
+      stopPolling = false;
+      pollCount = 0;  // Reset poll count too
+      updateStatus();
     }
 
     // Start with one immediate check, then poll every 10s (but stop after first successful response)

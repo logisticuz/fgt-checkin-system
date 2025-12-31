@@ -223,9 +223,9 @@
         <input type="text" id="tag" name="tag" placeholder="Your player tag" required>
       </div>
 
-      <div class="form-group">
+      <div class="form-group" id="personnummer-group">
         <label for="personnummer">Personal ID (YYYYMMDDXXXX)</label>
-        <input type="text" id="personnummer" name="personnummer" placeholder="199001011234" required pattern="\d{10,12}">
+        <input type="text" id="personnummer" name="personnummer" placeholder="199001011234" pattern="\d{10,12}">
       </div>
 
       <div class="consent">
@@ -246,6 +246,15 @@
   <script>
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
+    const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
+
+    // Hide personnummer field if membership not required
+    if (!REQUIRE_MEMBERSHIP) {
+      document.getElementById("personnummer-group").style.display = "none";
+    } else {
+      // Make personnummer required if membership is required
+      document.getElementById("personnummer").setAttribute("required", "");
+    }
 
     // Error display helpers (using textContent to prevent XSS)
     function showErrors(errors) {

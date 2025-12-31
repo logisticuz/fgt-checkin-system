@@ -7,15 +7,18 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+      background: #000;
       color: #e0e0e0;
       font-family: 'Segoe UI', system-ui, sans-serif;
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
       padding: 1rem;
     }
     .container {
-      max-width: 480px;
-      margin: 0 auto;
+      max-width: 420px;
+      width: 100%;
     }
     header {
       text-align: center;
@@ -23,12 +26,18 @@
     }
     header h1 {
       color: #58aaff;
-      font-size: 1.5rem;
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 2px;
       margin-bottom: 0.5rem;
     }
+    header p {
+      color: #666;
+      font-size: 0.9rem;
+    }
     .status-summary {
-      background: rgba(88, 170, 255, 0.1);
-      border: 1px solid rgba(88, 170, 255, 0.3);
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
       border-radius: 12px;
       padding: 1rem;
       margin-bottom: 1.5rem;
@@ -45,7 +54,8 @@
 
     /* Sections */
     .section {
-      background: rgba(255, 255, 255, 0.05);
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
       border-radius: 12px;
       padding: 1.25rem;
       margin-bottom: 1rem;
@@ -59,20 +69,22 @@
       gap: 0.5rem;
     }
     .section.hidden { display: none; }
+    .hidden { display: none; }
 
     /* Form elements */
     label {
       display: block;
-      font-size: 0.9rem;
-      color: #aaa;
-      margin-bottom: 0.3rem;
+      font-size: 0.85rem;
+      color: #58aaff;
+      margin-bottom: 0.4rem;
+      font-weight: 500;
     }
     input, select {
       width: 100%;
-      padding: 0.75rem;
-      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 0.75rem 1rem;
+      border: 1px solid rgba(88, 170, 255, 0.3);
       border-radius: 8px;
-      background: rgba(0, 0, 0, 0.3);
+      background: rgba(0, 0, 0, 0.5);
       color: #fff;
       font-size: 1rem;
       margin-bottom: 0.75rem;
@@ -80,6 +92,10 @@
     input:focus, select:focus {
       outline: none;
       border-color: #58aaff;
+      box-shadow: 0 0 0 3px rgba(88, 170, 255, 0.15);
+    }
+    input::placeholder {
+      color: #666;
     }
     /* Checkbox game selection */
     .game-checkboxes {
@@ -93,8 +109,8 @@
       align-items: center;
       gap: 0.75rem;
       padding: 0.75rem;
-      background: rgba(0, 0, 0, 0.3);
-      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(88, 170, 255, 0.3);
       border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s;
@@ -110,7 +126,7 @@
     .game-checkbox input[type="checkbox"] {
       width: 20px;
       height: 20px;
-      accent-color: #4caf50;
+      accent-color: #58aaff;
       cursor: pointer;
     }
     .game-checkbox label {
@@ -148,32 +164,120 @@
       border: 1px solid #58aaff;
     }
 
-    /* Payment QR */
+    /* Payment / Swish */
     .swish-container {
       text-align: center;
-      padding: 1rem;
+    }
+    .swish-box {
+      background: linear-gradient(135deg, #1a2a1a 0%, #0d1f0d 100%);
+      border: 1px solid rgba(18, 168, 87, 0.3);
+      border-radius: 16px;
+      padding: 1.5rem;
+      margin: 1rem 0;
+    }
+    .swish-header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .swish-logo {
+      width: 80px;
+      height: auto;
+    }
+    .swish-amount {
+      font-size: 2rem;
+      font-weight: bold;
+      color: #12a857;
+      margin: 0.5rem 0 1rem;
+    }
+    .swish-amount span {
+      font-size: 1rem;
+      color: #888;
+      font-weight: normal;
     }
     .swish-qr {
       background: #fff;
-      padding: 1rem;
+      padding: 12px;
       border-radius: 12px;
       display: inline-block;
-      margin: 1rem 0;
+      margin: 0.5rem 0;
     }
     .swish-qr img {
-      width: 180px;
-      height: 180px;
+      width: 160px;
+      height: 160px;
+      display: block;
+    }
+    .swish-number-box {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      display: inline-block;
+    }
+    .swish-number-label {
+      font-size: 0.75rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 0.25rem;
     }
     .swish-number {
-      font-size: 1.5rem;
+      font-size: 1.4rem;
       font-weight: bold;
-      color: #58aaff;
-      letter-spacing: 2px;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      letter-spacing: 1px;
     }
-    .swish-amount {
-      font-size: 1.2rem;
-      color: #4caf50;
+    .swish-divider {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin: 1rem 0;
+      color: #666;
+      font-size: 0.85rem;
+    }
+    .swish-divider::before,
+    .swish-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .swish-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      background: #12a857;
+      color: #fff;
+      padding: 1rem 2rem;
+      border-radius: 50px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
       margin: 0.5rem 0;
+    }
+    .swish-btn:hover {
+      background: #0e8a47;
+      transform: scale(1.02);
+    }
+    .swish-btn:active {
+      transform: scale(0.98);
+    }
+    .swish-note {
+      background: rgba(255, 152, 0, 0.1);
+      border: 1px solid rgba(255, 152, 0, 0.3);
+      border-radius: 8px;
+      padding: 0.75rem;
+      margin-top: 1rem;
+      font-size: 0.85rem;
+      color: #ff9800;
+    }
+    .swish-note strong {
+      color: #ffb74d;
     }
 
     /* Messages */
@@ -217,17 +321,22 @@
     /* Footer */
     footer {
       text-align: center;
-      padding: 2rem 0 1rem;
-      color: #666;
-      font-size: 0.8rem;
+      padding: 1.5rem 0;
+      color: #444;
+      font-size: 0.75rem;
     }
-    footer a { color: #58aaff; }
+    footer a { color: #58aaff; text-decoration: none; }
+    footer .logo {
+      max-width: 320px;
+      width: 100%;
+      margin-bottom: 1rem;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>FGC Trollhattan</h1>
+      <h1>REGISTRATION</h1>
       <p>Complete your registration</p>
     </header>
 
@@ -275,22 +384,51 @@
     <section id="section-payment" class="section hidden">
       <h2>Payment</h2>
       <div class="swish-container">
-        <p>Swish to:</p>
-        <div class="swish-number" id="swish-number">{{ swish_number | default('123 456 78 90') }}</div>
-        <div class="swish-amount" id="swish-amount">Amount: <strong>0 kr</strong></div>
+        <div class="swish-box">
+          <!-- Amount display -->
+          <div class="swish-amount" id="swish-amount">
+            <span>Amount to pay</span><br>
+            0 kr
+          </div>
 
-        <div class="swish-qr">
-          <img src="/static/swish_qr.png" alt="Swish QR" id="swish-qr-img">
+          <!-- Desktop: Show QR code -->
+          <div id="swish-desktop" class="hidden">
+            <div class="swish-qr">
+              <img src="/static/swish-QR.png" alt="Swish QR" id="swish-qr-img">
+            </div>
+            <p style="color: #aaa; font-size: 0.85rem; margin-top: 0.5rem;">
+              Scan with Swish app
+            </p>
+
+            <div class="swish-divider">or enter manually</div>
+
+            <div class="swish-number-box">
+              <div class="swish-number-label">Swish number</div>
+              <div class="swish-number">123-043 78 22</div>
+            </div>
+          </div>
+
+          <!-- Mobile: Show deep link button -->
+          <div id="swish-mobile" class="hidden">
+            <a id="swish-deeplink" class="swish-btn">
+              Open Swish
+            </a>
+
+            <div class="swish-divider">or enter manually</div>
+
+            <div class="swish-number-box">
+              <div class="swish-number-label">Swish number</div>
+              <div class="swish-number">123-043 78 22</div>
+            </div>
+          </div>
+
+          <!-- Important note -->
+          <div class="swish-note">
+            <strong>25 kr per game.</strong><br>
+            Write your <strong>tag</strong> and <strong>which games</strong> you're entering in the Swish message!
+          </div>
         </div>
-
-        <p style="color: #aaa; font-size: 0.85rem;">
-          Write your <strong>name</strong> or <strong>tag</strong> in the message.
-        </p>
       </div>
-
-      <button type="button" id="btn-payment-done" class="btn btn-success">
-        I Have Paid
-      </button>
     </section>
 
     <!-- Section: Start.gg Games -->
@@ -326,6 +464,7 @@
     </section>
 
     <footer>
+      <img src="/static/logo.png" alt="FGC Trollhattan" class="logo">
       <p>Problems? Talk to a tournament organizer.</p>
       <p><a href="/">Back to start</a></p>
     </footer>
@@ -337,13 +476,40 @@
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
     const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
+    const SWISH_NUMBER = "1230437822"; // Without formatting for deep link
+
+    // Configurable requirements from event settings
+    // If a requirement is disabled, we never show that section
+    const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
+    const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
+    const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
+
+    // Mobile detection
+    function isMobile() {
+      return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    // Generate Swish deep link
+    function generateSwishDeepLink(amount, message) {
+      const data = {
+        version: 1,
+        payee: { value: SWISH_NUMBER },
+        amount: { value: amount },
+        message: { value: message, editable: false }
+      };
+      return `swish://payment?data=${encodeURIComponent(JSON.stringify(data))}`;
+    }
 
     // State from URL params
+    // Override "needs" flags based on what's REQUIRED for this event
     const params = new URLSearchParams(window.location.search);
     const state = {
-      needsEbas: params.get("ebas") === "true",
-      needsPayment: params.get("payment") === "true",
-      needsStartgg: params.get("startgg") === "false",
+      // Only show eBas section if membership is REQUIRED AND player needs it
+      needsEbas: REQUIRE_MEMBERSHIP && params.get("ebas") === "true",
+      // Only show payment section if payment is REQUIRED AND player needs it
+      needsPayment: REQUIRE_PAYMENT && params.get("payment") === "true",
+      // Only show Start.gg section if Start.gg is REQUIRED AND player is not registered
+      needsStartgg: REQUIRE_STARTGG && params.get("startgg") === "false",
       name: params.get("name") || localStorage.getItem("namn") || "",
       personnummer: localStorage.getItem("personnummer") || "",
       phone: localStorage.getItem("telefon") || "",
@@ -389,10 +555,21 @@
 
     // Initialize UI based on state
     function initUI() {
-      // Set initial status icons
-      setStatus("status-startgg", !state.needsStartgg);
-      setStatus("status-member", !state.needsEbas);
-      setStatus("status-payment", !state.needsPayment);
+      // Hide status items that are not required for this event
+      if (!REQUIRE_STARTGG) {
+        document.getElementById("status-startgg").style.display = "none";
+      }
+      if (!REQUIRE_MEMBERSHIP) {
+        document.getElementById("status-member").style.display = "none";
+      }
+      if (!REQUIRE_PAYMENT) {
+        document.getElementById("status-payment").style.display = "none";
+      }
+
+      // Set initial status icons (only for required items)
+      if (REQUIRE_STARTGG) setStatus("status-startgg", !state.needsStartgg);
+      if (REQUIRE_MEMBERSHIP) setStatus("status-member", !state.needsEbas);
+      if (REQUIRE_PAYMENT) setStatus("status-payment", !state.needsPayment);
 
       // Show relevant sections
       if (state.needsEbas) {
@@ -404,7 +581,18 @@
       if (state.needsPayment) {
         document.getElementById("section-payment").classList.remove("hidden");
         const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
-        document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+        document.getElementById("swish-amount").innerHTML = `<span>Amount to pay</span><br>${amount} kr`;
+
+        // Show mobile or desktop Swish UI
+        if (isMobile()) {
+          document.getElementById("swish-mobile").classList.remove("hidden");
+          // Generate deep link with player tag/name as message
+          const message = state.tag || state.name || "FGC";
+          const deepLink = generateSwishDeepLink(amount, message);
+          document.getElementById("swish-deeplink").href = deepLink;
+        } else {
+          document.getElementById("swish-desktop").classList.remove("hidden");
+        }
       }
 
       if (state.needsStartgg) {
@@ -416,8 +604,10 @@
     }
 
     function updateFinalButton() {
-      const allDone = !state.needsEbas && !state.needsPayment && !state.needsStartgg;
-      if (allDone) {
+      // Show final button when user-actionable items are done
+      // Payment is handled by TO, so we only check eBas and Start.gg
+      const userTasksDone = !state.needsEbas && !state.needsStartgg;
+      if (userTasksDone) {
         document.getElementById("section-final").classList.remove("hidden");
       }
     }
@@ -465,16 +655,7 @@
       }
     });
 
-    // Payment confirmation
-    document.getElementById("btn-payment-done").addEventListener("click", function() {
-      // For MVP: Trust user and mark as done
-      // In production: This would poll/verify actual payment
-      showMessage("Payment noted - we will verify manually.", "success");
-      state.needsPayment = false;
-      setStatus("status-payment", true);
-      document.getElementById("section-payment").classList.add("hidden");
-      updateFinalButton();
-    });
+    // Payment section is informational only - TO verifies manually
 
     // Game selection
     document.getElementById("btn-confirm-games").addEventListener("click", async function() {
@@ -526,7 +707,14 @@
         // Update payment amount if payment section is visible
         if (document.getElementById("section-payment").classList.contains("hidden") === false) {
           const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
-          document.getElementById("swish-amount").innerHTML = `Amount: <strong>${amount} kr</strong>`;
+          document.getElementById("swish-amount").innerHTML = `<span>Amount to pay</span><br>${amount} kr`;
+
+          // Update deep link with new amount
+          if (isMobile()) {
+            const message = state.tag || state.name || "FGC";
+            const deepLink = generateSwishDeepLink(amount, message);
+            document.getElementById("swish-deeplink").href = deepLink;
+          }
         }
 
         showMessage(`${selectedNames.length} game(s) saved: ${selectedNames.join(", ")}`, "success");

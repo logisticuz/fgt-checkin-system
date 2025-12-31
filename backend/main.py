@@ -253,7 +253,8 @@ async def proxy_n8n(path: str, request: Request):
 def get_active_settings() -> dict:
     """
     Fetch active event settings from Airtable settings table.
-    Returns dict with swish_number, swish_expected_per_game, active_event_slug, etc.
+    Returns dict with swish_number, swish_expected_per_game, active_event_slug,
+    and configurable check-in requirements.
     Uses shared airtable_api module.
     """
     fields = airtable_get_active_settings() or {}
@@ -262,6 +263,10 @@ def get_active_settings() -> dict:
         "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
         "active_event_slug": fields.get("active_event_slug", ""),
         "startgg_event_ids": fields.get("startgg_event_ids", []),
+        # Configurable check-in requirements
+        "require_payment": fields.get("require_payment"),
+        "require_membership": fields.get("require_membership"),
+        "require_startgg": fields.get("require_startgg"),
     }
 
 
@@ -516,6 +521,7 @@ def get_participant_details(namn: str) -> dict:
                 "tag": f.get("tag", ""),
                 "event_name": f.get("event_slug", "FGC Weekly").replace("-", " ").title(),
                 "games": games,
+                "payment_expected": f.get("payment_expected", 0),
             }
     except Exception as e:
         logger.warning(f"get_participant_details error: {e}")
@@ -527,6 +533,7 @@ def get_participant_details(namn: str) -> dict:
 async def status_view(request: Request, name: str):
     status = check_participant_status(name)
     details = get_participant_details(name)
+    settings = get_active_settings()
     # Show ready page if member and payment are OK
     template_name = "status_ready.html" if status["member"] and status["payment"] else "status_pending.html"
     return templates.TemplateResponse(
@@ -539,6 +546,7 @@ async def status_view(request: Request, name: str):
             "event_name": details.get("event_name", "FGC Weekly"),
             "games": details.get("games", []),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         },
     )
 
@@ -547,17 +555,26 @@ async def api_participant_status(name: str):
     """
     JSON API endpoint for polling participant status.
     Used by status_pending.html to check if all requirements are met.
+    Respects configurable requirements from settings.
     """
     status = check_participant_status(name)
     details = get_participant_details(name)
+    settings = get_active_settings()
 
-    # Build missing list
+    # Get configurable requirements
+    # Airtable checkboxes: True when checked, key missing when unchecked
+    # We treat missing/None as False (not required) - TO must explicitly check to require
+    require_payment = settings.get("require_payment") is True
+    require_membership = settings.get("require_membership") is True
+    require_startgg = settings.get("require_startgg") is True
+
+    # Build missing list - only for REQUIRED items that are not met
     missing = []
-    if not status.get("member"):
+    if require_membership and not status.get("member"):
         missing.append("Membership")
-    if not status.get("payment"):
+    if require_payment and not status.get("payment"):
         missing.append("Payment")
-    if not status.get("startgg"):
+    if require_startgg and not status.get("startgg"):
         missing.append("Start.gg")
 
     ready = len(missing) == 0
@@ -572,12 +589,22 @@ async def api_participant_status(name: str):
         "name": name,
         "tag": details.get("tag", name),
         "startgg_events": details.get("games", []),
+        "payment_expected": details.get("payment_expected", 0),
+        # Include requirement settings so frontend can show/hide UI elements
+        "require_payment": require_payment,
+        "require_membership": require_membership,
+        "require_startgg": require_startgg,
     }
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Checkin"])
 async def root(request: Request):
-    return templates.TemplateResponse("checkin.html", {"request": request, "n8n_token": N8N_WEBHOOK_TOKEN or ""})
+    settings = get_active_settings()
+    return templates.TemplateResponse("checkin.html", {
+        "request": request,
+        "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        "require_membership": settings.get("require_membership") is True,
+    })
 
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form(request: Request):
@@ -590,6 +617,10 @@ async def register_form(request: Request):
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
+        # Configurable requirements - frontend hides sections that are not required
+        "require_payment": settings.get("require_payment") is True,
+        "require_membership": settings.get("require_membership") is True,
+        "require_startgg": settings.get("require_startgg") is True,
     })
 
 # Legacy alias so /register.html keeps working (old links/bookmarks)
@@ -605,6 +636,10 @@ async def register_form_alias(request: Request):
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
+        # Configurable requirements
+        "require_payment": settings.get("require_payment") is True,
+        "require_membership": settings.get("require_membership") is True,
+        "require_startgg": settings.get("require_startgg") is True,
     })
 # --- /CHANGED ---
 

@@ -111,23 +111,31 @@ def get_active_slug() -> Optional[str]:
 # -----------------------------
 # Checkins (active_event_data)
 # -----------------------------
-def get_checkins(slug: str) -> List[Dict[str, Any]]:
+def get_checkins(slug: str = None, include_all: bool = False) -> List[Dict[str, Any]]:
     """
     Return check-ins for a given event_slug from active_event_data.
     Field list matches your actual Airtable schema.
+
+    Args:
+        slug: Event slug to filter by. If None and include_all=False, returns empty.
+        include_all: If True, returns ALL records regardless of slug (for debugging).
     """
-    if not slug:
+    if not slug and not include_all:
         return []
 
-    # Escape single quotes for Airtable formula
-    safe_slug = (slug or "").replace("'", "''")
-    formula = f"{{event_slug}} = '{safe_slug}'"
+    # Build filter formula
+    if include_all:
+        formula = None  # No filter - return all records
+    else:
+        # Escape single quotes for Airtable formula
+        safe_slug = (slug or "").replace("'", "''")
+        formula = f"{{event_slug}} = '{safe_slug}'"
 
     # ✅ Only request fields that exist in your table
     fields = [
         "name", "email", "telephone", "tag",
         "payment_amount", "payment_expected", "payment_valid",
-        "member", "startgg", "status",
+        "member", "startgg", "is_guest", "status",
         "tournament_games_registered",
         "UUID", "event_slug", "startgg_event_id", "external_id",
     ]
@@ -148,6 +156,7 @@ def get_checkins(slug: str) -> List[Dict[str, Any]]:
             # Membership / registration / payment
             "member": f.get("member"),
             "startgg": f.get("startgg"),
+            "is_guest": f.get("is_guest"),
             "payment_amount": f.get("payment_amount"),
             "payment_expected": f.get("payment_expected"),
             "payment_valid": f.get("payment_valid"),
@@ -166,7 +175,10 @@ def get_checkins(slug: str) -> List[Dict[str, Any]]:
         })
         # --- /CHANGED ---
 
-    logger.info(f"📥 Found {len(result)} checkins for slug '{slug}'")
+    if include_all:
+        logger.info(f"📥 Found {len(result)} checkins (ALL events)")
+    else:
+        logger.info(f"📥 Found {len(result)} checkins for slug '{slug}'")
     return result
 
 

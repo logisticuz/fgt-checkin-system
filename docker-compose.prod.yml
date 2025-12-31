@@ -94,6 +94,8 @@ services:
 
 volumes:
   n8n_data:
+    external: true
+    name: fgt-checkin-system_n8n_data
 
 networks:
   fgt-net:
