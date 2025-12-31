@@ -42,22 +42,33 @@ This guide describes how to set up and run the project in a local development en
     Once the configuration files are in place, it's time to start the system. Make sure you are in the project's root directory in your terminal.
     *   Run the following command to build and start all services in development mode:
         ```bash
-        docker-compose -f docker-compose.dev.yml up --build
+        docker compose -p fgt-dev -f docker-compose.dev.yml up --build
         ```
+    *   `-p fgt-dev` gives the dev stack a unique project name to avoid conflicts with the production stack.
     *   `--build` ensures that the Docker images are rebuilt if the code has changed.
-    *   If you want to run the services in the background, you can add the `-d` flag:
-        ```bash
-        docker-compose -f docker-compose.dev.yml up -d --build
-        ```
+    *   If you want to run the services in the background, you can add the `-d` flag.
 
 5.  **Verify the Installation**
-    After the command has finished, all services should be running. You can now access the different parts of the system via your web browser:
-    *   **Check-in Page:** [http://localhost](http://localhost)
-        *   This is the public page that participants use. It is routed by Nginx to the `backend` service.
-    *   **Admin Dashboard:** [http://localhost/admin/](http://localhost/admin/)
-        *   This is the TOs' dashboard. It is routed by Nginx to the `fgt_dashboard` service.
-    *   **N8N Interface:** [http://localhost:5678](http://localhost:5678)
-        *   Here you can see and edit your n8n workflows. You will need to log in with the username and password you specified in `n8n.env`.
+    After the command has finished, all services should be running. You can now access the different parts of the system via your web browser on their new dev ports:
+    *   **Check-in Page & Dashboard:** [http://localhost:8088](http://localhost:8088) and [http://localhost:8088/admin/](http://localhost:8088/admin/)
+        *   This is the public page and TO dashboard, routed by the Nginx dev configuration.
+    *   **N8N Interface:** [http://localhost:5679](http://localhost:5679)
+        *   Here you can see and edit your n8n workflows.
+    *   **Backend API direct:** [http://localhost:8001](http://localhost:8001)
+
+### Running Dev & Prod in Parallel (Advanced)
+
+The system is configured to allow running the development and production environments simultaneously on the same machine. This is useful for testing locally without disrupting the live service connected to the domains.
+
+*   **The production stack** uses the standard ports (80, 443) and is run with the command:
+    ```bash
+    docker compose -p fgt-prod -f docker-compose.prod.yml up -d
+    ```
+*   **The development stack** (as described above) uses alternative ports (8088, 5679, etc.) and a separate project name (`-p fgt-dev`).
+
+### Note on the n8n Data Volume
+
+Both `docker-compose.dev.yml` and `docker-compose.prod.yml` are configured to use a **shared, external Docker volume** named `fgt-checkin-system_n8n_data`. This ensures that both environments use the same n8n data (workflows, credentials, etc.) and prevents data loss when a stack is taken down and brought back up. You typically do not need to manage this manually, but it is good to be aware of.
 
 ### Troubleshooting
 

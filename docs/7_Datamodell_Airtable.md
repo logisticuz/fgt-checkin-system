@@ -34,21 +34,22 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 | Fältnamn                      | Typ              | Beskrivning                                                              | Exempel                                    |
 | :---------------------------- | :--------------- | :----------------------------------------------------------------------- | :----------------------------------------- |
 | `name`                        | `Single line text` | Deltagarens fullständiga namn (tvättat).                                 | `Anna Andersson`                           |
-| `tag`                     | `Single line text` | Deltagarens gamer-tag (tvättat). Används för matchning mot Start.gg.      | `CoolPlayer`                               |
+| `tag`                         | `Single line text` | Deltagarens gamer-tag (tvättat). Används för matchning mot Start.gg.      | `CoolPlayer`                               |
 | `email`                       | `Email`          | Deltagarens e-postadress.                                                | `anna@example.com`                         |
 | `telephone`                   | `Phone number`   | Deltagarens telefonnummer (tvättat, endast siffror).                     | `0701234567`                               |
-| `personnummer`                | `Single line text` | Deltagarens personnummer (tvättat, endast siffror). Används för matchning mot Sverok. | `199001011234`                             |
+| `personnummer`                | `Single line text` | Deltagarens personnummer (tvättat, endast siffror). Används för matchning mot Sverok. **Lagras ej permanent**. | `199001011234`                             |
 | `UUID`                        | `Single line text` | En unik identifierare för denna incheckning (genereras av n8n).          | `b7d4e1f8-c2a7-...`                         |
 | `external_id`                 | `Single line text` | Extern ID, t.ex. från Start.gg-registrering.                             | `startgg_reg_12345`                        |
 | `event_slug`                  | `Single line text` | Start.gg-sluggen för eventet deltagaren checkar in till.                 | `fgc-trollhattan-weekly-42`                |
 | `startgg_event_id`            | `Single line text` | ID för det specifika Start.gg-eventet (t.ex. för ett visst spel).         | `123456`                                   |
-| `tournament_games_registered` | `Multi-select`   | Lista över spel som deltagaren är registrerad för i turneringen (från Start.gg). | `["Street Fighter 6", "Tekken 8"]`         |
+| `tournament_games_registered` | `Multi-select`   | Lista över spel som deltagaren är registrerad för i turneringen.          | `["Street Fighter 6", "Tekken 8"]`         |
 | `member`                      | `Checkbox`       | `[x]` om deltagaren är verifierad medlem i föreningen.                   | `[x]`                                      |
 | `startgg`                     | `Checkbox`       | `[x]` om deltagaren är verifierad registrerad på Start.gg för eventet.   | `[x]`                                      |
+| `is_guest`                    | `Checkbox`       | `[x]` om spelaren **inte** hittades på Start.gg. Sätts automatiskt.      | `[x]`                                      |
 | `payment_amount`              | `Number`         | Belopp som deltagaren har betalat (från Swish-matchning eller manuellt). | `100`                                      |
 | `payment_expected`            | `Number`         | Förväntat betalningsbelopp.                                              | `100`                                      |
 | `payment_valid`               | `Checkbox`       | `[x]` om betalningen har verifierats och är korrekt.                     | `[x]`                                      |
-| `status`                      | `Single select`  | Övergripande status för deltagaren: `Ready`, `Pending`, `Missing Membership`, `Missing Payment`, `Missing Start.gg`. | `Ready`                                    |
+| `status`                      | `Single select`  | Övergripande status för deltagaren: `Ready`, `Pending`.                  | `Ready`                                    |
 | `created`                     | `Created time`   | Tidstämpel för när incheckningsraden skapades. **Notering:** Detta är ett metadata-fält från Airtable (`createdTime`) och kan inte redigeras manuellt. | `2025-12-17T11:30:00.000Z`                 |
 
 ---

@@ -88,7 +88,7 @@ These endpoints are available through the `backend` service.
 ### 1.2 Dashboard & Administration
 
 #### `PATCH /players/{record_id}/payment`
-*   **Description:** Used by the TO dashboard to manually mark a player's payment as approved or not approved.
+*   **Description:** Used by the TO dashboard to manually mark a player's payment as approved or not approved. **Triggers an SSE event** via `/api/notify/update` to immediately update connected clients (like the player's status page).
 *   **Method:** `PATCH`
 *   **URL Parameters:**
     *   `record_id` (str): The Airtable record ID for the player.

@@ -88,7 +88,7 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
 ### 1.2 Dashboard & Administration
 
 #### `PATCH /players/{record_id}/payment`
-*   **Beskrivning:** Används av TO-dashboarden för att manuellt markera en spelares betalning som godkänd eller icke-godkänd.
+*   **Beskrivning:** Används av TO-dashboarden för att manuellt markera en spelares betalning som godkänd eller icke-godkänd. **Triggar ett SSE-event** via `/api/notify/update` för att omedelbart uppdatera anslutna klienter (som spelarens statussida).
 *   **Metod:** `PATCH`
 *   **URL-parametrar:**
     *   `record_id` (str): Airtable record ID för spelaren.
