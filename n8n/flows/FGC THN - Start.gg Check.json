@@ -1,0 +1,155 @@
+{
+  "name": "FGC THN - Start.gg Check",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "startgg/check",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        112,
+        208
+      ],
+      "webhookId": "startgg-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst tag = (body.tag || '').trim();\nconst slug = body.tournament_slug || body.slug || '';\n\nif (!tag || !slug) {\n  return [{ json: { isRegistered: false, error: true, message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\nreturn [{ json: { tag, slug } }];"
+      },
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        208
+      ],
+      "id": "parse-input"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.start.gg/gql/alpha",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.STARTGG_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
+        "options": {}
+      },
+      "name": "Query Start.gg",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        528,
+        208
+      ],
+      "id": "query-startgg"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json.data;\nconst tournament = data?.tournament;\n\nif (!tournament) {\n  return [{ json: { isRegistered: false, error: true, message: 'Turnering hittades inte' } }];\n}\n\nconst participants = tournament.participants?.nodes || [];\nif (participants.length === 0) {\n  return [{ json: { isRegistered: false, tournament: tournament.name, message: 'Ej registrerad' } }];\n}\n\nconst player = participants[0];\nconst events = (player.events || []).map(e => e.name);\n\nreturn [{ json: {\n  isRegistered: true,\n  tournament: tournament.name,\n  tag: player.gamerTag,\n  name: player.user?.name || null,\n  events: events,\n  eventCount: events.length\n} }];"
+      },
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        208
+      ],
+      "id": "parse-response"
+    },
+    {
+      "parameters": {
+        "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Case-insensitive:** Tag matching is handled by Start.gg API.",
+        "height": 576,
+        "width": 500,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -400,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "note-startgg-overview",
+      "name": "Overview"
+    },
+    {
+      "parameters": {
+        "content": "## GraphQL Query\n\nQueries the tournament by slug, filters participants by gamerTag.\n\nReturns player's registered events (game names).",
+        "height": 168,
+        "width": 280,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        272,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "note-startgg-query",
+      "name": "Query"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Query Start.gg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Start.gg": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+  "meta": {
+    "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
+  },
+  "id": "Tt8amKeBzTjwBWmY",
+  "tags": []
+}

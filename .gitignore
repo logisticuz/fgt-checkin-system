@@ -12,7 +12,11 @@ backup/
 *.zip
 *.json
 
-# –– Python ––––––––––––––––––––––––––––
+# Allow committed n8n flow exports
+!n8n/flows/
+!n8n/flows/*.json
+
+# -- Python ----------------------------
 __pycache__/
 *.pyc
 *.pyo
@@ -74,3 +78,4 @@ GEMINI.md
 
 # Local-only docs
 docs/roadmap.md
+docs/PROJECT_STATUS.md

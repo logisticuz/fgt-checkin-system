@@ -1,0 +1,162 @@
+{
+  "name": "FGC THN - eBas Register",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ebas/register",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-ebas-register",
+      "name": "Webhook - eBas Register",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        112,
+        208
+      ],
+      "webhookId": "ebas-register"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize personnummer to 12 digits\nconst body = $json.body ?? $json;\nlet pnrRaw = body.personnummer ?? null;\n\nif (!pnrRaw) {\n  throw new Error(\"Personnummer krÃ¤vs fÃ¶r registrering\");\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  throw new Error(\"Ogiltigt personnummer-format\");\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nconst email = body.email || '';\nconst phone = (body.telephone || body.telefon || '').replace(/[\\s-]/g, '');\nconst nick = body.nick || body.tag || null;\nconst discord = body.discord || null;\n\n// Get today's date for renewed field\nconst today = new Date().toISOString().split('T')[0];\n\nreturn [{ json: { \n  pnr: pnr,\n  email: email,\n  phone: phone,\n  nick: nick,\n  discord: discord,\n  renewed: today\n}}];"
+      },
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        208
+      ],
+      "id": "normalize-input"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebas.sverok.se/apis/submit_member_with_lookup.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n  \"member\": {\n    \"socialsecuritynumber\": \"{{ $json.pnr }}\",\n    \"renewed\": \"{{ $json.renewed }}\",\n    \"firstname\": \"\",\n    \"lastname\": \"\",\n    \"street\": \"\",\n    \"zip_code_id\": \"\",\n    \"city\": \"\",\n    \"country_id\": \"1\",\n    \"email\": \"{{ $json.email }}\",\n    \"phone1\": \"{{ $json.phone }}\",\n    \"co\": [],\n    \"member_nick\": {{ $json.nick ? '\"' + $json.nick + '\"' : 'null' }},\n    \"discord_user_id\": {{ $json.discord ? '\"' + $json.discord + '\"' : 'null' }}\n  }\n}",
+        "options": {}
+      },
+      "name": "Call eBas API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        736,
+        208
+      ],
+      "id": "call-ebas-api"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse eBas submit_member_with_lookup response\nconst response = $json;\n\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{ \n    json: { \n      success: true,\n      registered: true,\n      message: \"Medlem registrerad i Sverok\"\n    } \n  }];\n}\n\n// Check for errors\nif (response.member_errors) {\n  const errors = Object.entries(response.member_errors)\n    .map(([field, msgs]) => field + ': ' + msgs.join(', '))\n    .join('; ');\n  return [{ \n    json: { \n      success: false,\n      error: true,\n      message: errors || \"Kunde inte registrera medlem\",\n      details: response.member_errors\n    } \n  }];\n}\n\n// Generic error\nreturn [{ \n  json: { \n    success: false,\n    error: true,\n    message: response.request_result || \"OkÃ¤nt fel\",\n    raw_response: response\n  } \n}];"
+      },
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        208
+      ],
+      "id": "parse-response"
+    },
+    {
+      "parameters": {
+        "content": "## eBas Register Sub-workflow\n\n**Purpose:** Register a new member in Sverok via eBas API.\n\n**When used:** When a player wants to become a Sverok member during check-in.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\",\n  \"email\": \"player@example.com\",\n  \"telephone\": \"0701234567\",\n  \"nick\": \"PlayerTag\" (optional),\n  \"discord\": \"user#1234\" (optional)\n}\n```\n\n**Output:**\n```json\n{\n  \"success\": true/false,\n  \"registered\": true,\n  \"message\": \"Medlem registrerad i Sverok\"\n}\n```\n\n**API Endpoint:** submit_member_with_lookup.json\n- Uses SPAR lookup to auto-fill name/address from personnummer\n- Requires valid Swedish personnummer",
+        "height": 636,
+        "width": 500,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -288,
+        -448
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-reg-overview",
+      "name": "Overview"
+    },
+    {
+      "parameters": {
+        "content": "## Input Normalization\n\nPrepares data for eBas API:\n- Normalizes personnummer to 12 digits\n- Cleans phone number (removes spaces/dashes)\n- Sets renewal date to today\n\n**Fields sent to eBas:**\n- socialsecuritynumber (required)\n- renewed (today's date)\n- email, phone1, member_nick, discord_user_id",
+        "height": 316,
+        "width": 340,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        288,
+        -128
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-reg-input",
+      "name": "Input"
+    },
+    {
+      "parameters": {
+        "content": "## Response Handling\n\n**Success:** `stored_member: true` + `request_result: \"success\"`\n\n**Errors:** Returns member_errors object with field-specific messages.\n\n**Common errors:**\n- Invalid personnummer\n- Already registered\n- Missing required fields",
+        "height": 292,
+        "width": 320,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        960,
+        -96
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-reg-response",
+      "name": "Response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - eBas Register": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Call eBas API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call eBas API": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "90e2fe1a-63f9-43b4-a6f3-cde6a82cf612",
+  "meta": {
+    "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
+  },
+  "id": "O7qbXOsWUrs3vDDk",
+  "tags": []
+}

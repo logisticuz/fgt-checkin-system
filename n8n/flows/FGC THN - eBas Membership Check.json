@@ -1,0 +1,162 @@
+{
+  "name": "FGC THN - eBas Membership Check",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ebas/check",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-ebas-check",
+      "name": "Webhook - eBas Check",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        112,
+        208
+      ],
+      "webhookId": "ebas-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize personnummer to 12 digits (YYYYMMDDXXXX)\nlet pnrRaw = $json.body?.personnummer ?? $json.personnummer ?? null;\n\nif (!pnrRaw) {\n  return [{ json: { \n    isMember: false, \n    skipEbas: true, \n    message: \"Inget personnummer angivet\" \n  }}];\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  return [{ json: { \n    isMember: false, \n    error: true, \n    message: \"Ogiltigt personnummer-format\" \n  }}];\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nreturn [{ json: { \n  ...$json, \n  _pnr_normalized: pnr \n}}];"
+      },
+      "name": "Normalize Personnummer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        208
+      ],
+      "id": "normalize-pnr"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebas.sverok.se/apis/confirm_membership.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"request\": {\n    \"action\": \"confirm_membership\",\n    \"association_number\": \"{{ $env.EBAS_ASSOC }}\",\n    \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n    \"year_id\": {{ new Date().getFullYear() }},\n    \"socialsecuritynumber\": \"{{ $json._pnr_normalized }}\"\n  }\n}",
+        "options": {}
+      },
+      "name": "Call eBas confirm_membership",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        208
+      ],
+      "id": "call-ebas-api"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse eBas confirm_membership response\n// Expected response: { response: { member_found: true/false } }\n\nconst response = $json;\nconst memberFound = response?.response?.member_found === true;\n\n// Remove sensitive data before returning\nconst { _pnr_normalized, personnummer, ...safeData } = $input.first().json;\n\nreturn [{ \n  json: { \n    isMember: memberFound,\n    message: memberFound ? \"Medlem i Sverok\" : \"Ej medlem i Sverok\"\n  } \n}];"
+      },
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        208
+      ],
+      "id": "parse-response"
+    },
+    {
+      "parameters": {
+        "content": "## eBas Membership Check Sub-workflow\n\n**Purpose:** Verify if a person is a registered Sverok member.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Why Sverok membership?**\nSwedish gaming associations require membership for insurance coverage at events.\nSverok is the Swedish Gaming Federation.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isMember\": true/false,\n  \"message\": \"Medlem i Sverok\" / \"Ej medlem\"\n}\n```\n\n**Privacy:** Personnummer is NOT stored - only the boolean result.\nPersonnummer is cleared from localStorage after check-in.",
+        "height": 596,
+        "width": 500,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -320,
+        -352
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-overview",
+      "name": "Overview"
+    },
+    {
+      "parameters": {
+        "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
+        "height": 324,
+        "width": 340,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        224,
+        -352
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-normalize",
+      "name": "Normalize"
+    },
+    {
+      "parameters": {
+        "content": "## eBas API Call\n\n**Endpoint:** confirm_membership.json\n**Auth:** API key (env: EBAS_API_KEY)\n**Assoc:** F161215-9 (FGC Trollhättan)\n\nChecks if personnummer is registered as member for current year.",
+        "height": 224,
+        "width": 320,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        704,
+        -336
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-api",
+      "name": "API Call"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - eBas Check": {
+      "main": [
+        [
+          {
+            "node": "Normalize Personnummer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Personnummer": {
+      "main": [
+        [
+          {
+            "node": "Call eBas confirm_membership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call eBas confirm_membership": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "9263623c-f4bd-4455-aeba-39763c0d222d",
+  "meta": {
+    "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
+  },
+  "id": "5zyWxQKRA7JcyuN3",
+  "tags": []
+}
