@@ -61,7 +61,11 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
       "startgg": true,
       "name": "Deltagarens Namn",
       "tag": "PlayerTag123",
-      "startgg_events": ["Street Fighter 6"]
+      "startgg_events": ["Street Fighter 6"],
+      "payment_expected": 100,
+      "require_payment": true,
+      "require_membership": true,
+      "require_startgg": false
     }
     ```
 

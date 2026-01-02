@@ -22,6 +22,9 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 | `timezone`                | `Single line text` | Tidzonen för turneringen (från Start.gg).                               | `Europe/Stockholm`                |
 | `swish_number`            | `Single line text` | Swish-nummer för betalningar (om använt).                                | `1234567890`                      |
 | `swish_expected_per_game` | `Number`         | Förväntad Swish-betalning per spel (i SEK).                             | `50`                              |
+| `require_payment`         | `Checkbox`       | Om `[x]`, måste `payment_valid` vara sann för att en deltagare ska bli `Ready`. | `[x]`                             |
+| `require_membership`      | `Checkbox`       | Om `[x]`, måste `member` vara sann för att en deltagare ska bli `Ready`.       | `[x]`                             |
+| `require_startgg`         | `Checkbox`       | Om `[x]`, måste `startgg` vara sann för att en deltagare ska bli `Ready`.      | `[x]`                             |
 
 ---
 
@@ -37,7 +40,7 @@ Airtable fungerar som den centrala databasen för systemet, där all viktig info
 | `tag`                         | `Single line text` | Deltagarens gamer-tag (tvättat). Används för matchning mot Start.gg.      | `CoolPlayer`                               |
 | `email`                       | `Email`          | Deltagarens e-postadress.                                                | `anna@example.com`                         |
 | `telephone`                   | `Phone number`   | Deltagarens telefonnummer (tvättat, endast siffror).                     | `0701234567`                               |
-| `personnummer`                | `Single line text` | Deltagarens personnummer (tvättat, endast siffror). Används för matchning mot Sverok. **Lagras ej permanent**. | `199001011234`                             |
+| `personnummer`                | `Single line text` | Används för API-slagning mot Sverok, men **sparas inte** i den slutgiltiga posten för att skydda personlig information. Fältet är avsiktligt tomt efter att incheckningen processats. | `(tomt)`                             |
 | `UUID`                        | `Single line text` | En unik identifierare för denna incheckning (genereras av n8n).          | `b7d4e1f8-c2a7-...`                         |
 | `external_id`                 | `Single line text` | Extern ID, t.ex. från Start.gg-registrering.                             | `startgg_reg_12345`                        |
 | `event_slug`                  | `Single line text` | Start.gg-sluggen för eventet deltagaren checkar in till.                 | `fgc-trollhattan-weekly-42`                |
