@@ -29,6 +29,33 @@ session = requests.Session()
 session.headers.update({"Authorization": f"Bearer {AIRTABLE_API_KEY}"})
 DEFAULT_TIMEOUT = (5, 20)  # (connect, read)
 
+
+# -----------------------------
+# Requirement helpers (Task 3.1)
+# See: docs/9_Systemkontrakt_och_Invarianter.md
+# -----------------------------
+def compute_requirements(settings: Dict[str, Any]) -> Dict[str, bool]:
+    """
+    Compute which requirements are active based on settings.
+
+    Airtable checkbox semantics:
+    - Checkbox checked → True
+    - Checkbox unchecked → field missing (None)
+    - We treat None as True (requirement is ON by default)
+
+    This ensures TOs must explicitly disable requirements.
+    All layers (backend, dashboard, n8n) should use this same logic.
+
+    NOTE: This layer does NOT decide status - status is DERIVED data
+    calculated by the consuming layer using the READY formula.
+    """
+    return {
+        "require_payment": settings.get("require_payment") is not False,
+        "require_membership": settings.get("require_membership") is not False,
+        "require_startgg": settings.get("require_startgg") is not False,
+    }
+
+
 # -----------------------------
 # Core helpers (pagination etc.)
 # -----------------------------

@@ -154,12 +154,57 @@ def _to_float(x):
     except Exception:
         return 0.0
 
+
 def _to_str_phone(x):
     """Normalize phone-like values to a clean string (preserve leading zeros, drop trailing .0)."""
     s = "" if x is None else str(x).strip()
     if s.endswith(".0"):
         s = s[:-2]
     return s
+
+
+# === Helpers: requirement logic (Task 1.1) ===
+# See: docs/9_Systemkontrakt_och_Invarianter.md
+def compute_requirements(settings: dict) -> dict:
+    """
+    Compute which requirements are active based on settings.
+
+    Airtable checkbox semantics: default ON unless explicitly False.
+    - Checkbox checked = True
+    - Checkbox unchecked = field missing (None)
+    - We treat None as True (requirement is ON by default)
+
+    This ensures TOs must explicitly disable requirements.
+    """
+    return {
+        "require_payment": settings.get("require_payment") is not False,
+        "require_membership": settings.get("require_membership") is not False,
+        "require_startgg": settings.get("require_startgg") is not False,
+    }
+
+
+def compute_ready_and_missing(status: dict, requirements: dict) -> tuple:
+    """
+    Calculate if player is READY and what requirements are missing.
+
+    READY formula (from system contract):
+        READY = (NOT require_payment OR payment_valid)
+            AND (NOT require_membership OR member)
+            AND (NOT require_startgg OR startgg)
+
+    Returns: (ready: bool, missing: list[str])
+    """
+    missing = []
+
+    if requirements["require_membership"] and not status.get("member"):
+        missing.append("Membership")
+    if requirements["require_payment"] and not status.get("payment"):
+        missing.append("Payment")
+    if requirements["require_startgg"] and not status.get("startgg"):
+        missing.append("Start.gg")
+
+    ready = len(missing) == 0
+    return ready, missing
 # --- /CHANGED ---
 
 # === n8n proxy ===
@@ -534,8 +579,12 @@ async def status_view(request: Request, name: str):
     status = check_participant_status(name)
     details = get_participant_details(name)
     settings = get_active_settings()
-    # Show ready page if member and payment are OK
-    template_name = "status_ready.html" if status["member"] and status["payment"] else "status_pending.html"
+
+    # Task 1.3: Use centralized READY calculation for template selection
+    requirements = compute_requirements(settings)
+    ready, _ = compute_ready_and_missing(status, requirements)
+
+    template_name = "status_ready.html" if ready else "status_pending.html"
     return templates.TemplateResponse(
         template_name,
         {
@@ -561,23 +610,9 @@ async def api_participant_status(name: str):
     details = get_participant_details(name)
     settings = get_active_settings()
 
-    # Get configurable requirements
-    # Airtable checkboxes: True when checked, key missing when unchecked
-    # We treat missing/None as False (not required) - TO must explicitly check to require
-    require_payment = settings.get("require_payment") is True
-    require_membership = settings.get("require_membership") is True
-    require_startgg = settings.get("require_startgg") is True
-
-    # Build missing list - only for REQUIRED items that are not met
-    missing = []
-    if require_membership and not status.get("member"):
-        missing.append("Membership")
-    if require_payment and not status.get("payment"):
-        missing.append("Payment")
-    if require_startgg and not status.get("startgg"):
-        missing.append("Start.gg")
-
-    ready = len(missing) == 0
+    # Use centralized helpers (Task 1.1, 1.2)
+    requirements = compute_requirements(settings)
+    ready, missing = compute_ready_and_missing(status, requirements)
 
     return {
         "ready": ready,
@@ -591,24 +626,24 @@ async def api_participant_status(name: str):
         "startgg_events": details.get("games", []),
         "payment_expected": details.get("payment_expected", 0),
         # Include requirement settings so frontend can show/hide UI elements
-        "require_payment": require_payment,
-        "require_membership": require_membership,
-        "require_startgg": require_startgg,
+        **requirements,
     }
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Checkin"])
 async def root(request: Request):
     settings = get_active_settings()
+    requirements = compute_requirements(settings)
     return templates.TemplateResponse("checkin.html", {
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "require_membership": settings.get("require_membership") is True,
+        "require_membership": requirements["require_membership"],
     })
 
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form(request: Request):
     settings = get_active_settings()
+    requirements = compute_requirements(settings)
     tournament_slug = settings.get("active_event_slug", "")
     games = get_tournament_events(tournament_slug)
     return templates.TemplateResponse("register.html", {
@@ -618,9 +653,7 @@ async def register_form(request: Request):
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
         # Configurable requirements - frontend hides sections that are not required
-        "require_payment": settings.get("require_payment") is True,
-        "require_membership": settings.get("require_membership") is True,
-        "require_startgg": settings.get("require_startgg") is True,
+        **requirements,
     })
 
 # Legacy alias so /register.html keeps working (old links/bookmarks)
@@ -628,6 +661,7 @@ async def register_form(request: Request):
 async def register_form_alias(request: Request):
     """Alias to support legacy links to /register.html."""
     settings = get_active_settings()
+    requirements = compute_requirements(settings)
     tournament_slug = settings.get("active_event_slug", "")
     games = get_tournament_events(tournament_slug)
     return templates.TemplateResponse("register.html", {
@@ -637,9 +671,7 @@ async def register_form_alias(request: Request):
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
         # Configurable requirements
-        "require_payment": settings.get("require_payment") is True,
-        "require_membership": settings.get("require_membership") is True,
-        "require_startgg": settings.get("require_startgg") is True,
+        **requirements,
     })
 # --- /CHANGED ---
 

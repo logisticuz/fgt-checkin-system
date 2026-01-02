@@ -503,16 +503,24 @@ def register_callbacks(app):
     @app.callback(
         Output("needs-attention-list", "children"),
         Input("checkins-table", "data"),
+        Input("requirements-store", "data"),  # Task 2.2: Respect requirements
     )
-    def update_needs_attention(table_data):
+    def update_needs_attention(table_data, requirements):
         """
-        Build a list of players who are missing membership, payment, or start.gg registration.
+        Build a list of players who are missing ACTIVE requirements only.
         Shows what each player is missing with icons to help TOs prioritize assistance.
+        Disabled requirements never appear in "Needs Attention" (Task 2.2).
         """
         from dash import html
 
         if not table_data:
             return html.P("No players checked in yet.", style={"color": "#888"})
+
+        # Get active requirements (default ON unless explicitly False)
+        requirements = requirements or {}
+        require_membership = requirements.get("require_membership") is not False
+        require_payment = requirements.get("require_payment") is not False
+        require_startgg = requirements.get("require_startgg") is not False
 
         # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
         def is_ok(val):
@@ -522,20 +530,23 @@ def register_callbacks(app):
         for row in table_data:
             missing = []
 
-            # Check membership status (now using ✓/✗ icons)
-            member_val = row.get("member", "")
-            if not is_ok(member_val):
-                missing.append({"field": "Member", "icon": "🪪"})
+            # Only check membership if it's a required field
+            if require_membership:
+                member_val = row.get("member", "")
+                if not is_ok(member_val):
+                    missing.append({"field": "Member", "icon": "🪪"})
 
-            # Check payment status
-            payment_val = row.get("payment_valid", "")
-            if not is_ok(payment_val):
-                missing.append({"field": "Payment", "icon": "💰"})
+            # Only check payment if it's a required field
+            if require_payment:
+                payment_val = row.get("payment_valid", "")
+                if not is_ok(payment_val):
+                    missing.append({"field": "Payment", "icon": "💰"})
 
-            # Check start.gg registration
-            startgg_val = row.get("startgg", "")
-            if not is_ok(startgg_val):
-                missing.append({"field": "Start.gg", "icon": "🎮"})
+            # Only check start.gg if it's a required field
+            if require_startgg:
+                startgg_val = row.get("startgg", "")
+                if not is_ok(startgg_val):
+                    missing.append({"field": "Start.gg", "icon": "🎮"})
 
             if missing:
                 name = row.get("name") or row.get("tag") or "Unknown"
@@ -601,15 +612,23 @@ def register_callbacks(app):
         Output("stat-attention", "children"),
         Output("needs-attention-section", "style"),
         Input("checkins-table", "data"),
+        Input("requirements-store", "data"),  # Task 2.2: Respect requirements
     )
-    def update_stats(table_data):
+    def update_stats(table_data, requirements):
         """
         Update stats cards reactively when check-ins table data changes.
         Also shows/hides the needs-attention section.
+        Respects configurable requirements (Task 2.2).
         """
         if not table_data:
             hidden_style = {"display": "none"}
             return "0", "0", "0", "0", hidden_style
+
+        # Get active requirements (default ON unless explicitly False)
+        requirements = requirements or {}
+        require_membership = requirements.get("require_membership") is not False
+        require_payment = requirements.get("require_payment") is not False
+        require_startgg = requirements.get("require_startgg") is not False
 
         # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
         def is_ok(val):
@@ -619,18 +638,18 @@ def register_callbacks(app):
         ready = len([d for d in table_data if d.get("status") == "Ready"])
         pending = len([d for d in table_data if d.get("status") == "Pending"])
 
-        # Count players needing attention (missing membership, payment, or start.gg)
+        # Count players needing attention (only for ACTIVE requirements)
         needs_attention = 0
         for row in table_data:
             missing_something = False
-            # Check membership (now using ✓/✗ icons)
-            if not is_ok(row.get("member", "")):
+            # Only check membership if required
+            if require_membership and not is_ok(row.get("member", "")):
                 missing_something = True
-            # Check payment
-            if not is_ok(row.get("payment_valid", "")):
+            # Only check payment if required
+            if require_payment and not is_ok(row.get("payment_valid", "")):
                 missing_something = True
-            # Check start.gg
-            if not is_ok(row.get("startgg", "")):
+            # Only check start.gg if required
+            if require_startgg and not is_ok(row.get("startgg", "")):
                 missing_something = True
             if missing_something:
                 needs_attention += 1
@@ -674,7 +693,8 @@ def register_callbacks(app):
         col_id = active_cell.get("column_id")
 
         # Only trigger on toggleable columns (is_guest is set automatically by system)
-        toggleable_columns = ["payment_valid", "startgg"]
+        # member added as workaround until eBas Register → Airtable update is implemented
+        toggleable_columns = ["payment_valid", "startgg", "member"]
         if col_id not in toggleable_columns:
             return no_update, no_update
 
@@ -700,10 +720,11 @@ def register_callbacks(app):
         update_data = {col_id: new_val}
 
         # Fetch configurable requirements from settings
+        # Airtable checkbox semantics: default ON unless explicitly False (Task 2.1)
         settings = get_active_settings() or {}
-        require_payment = settings.get("require_payment") is True
-        require_membership = settings.get("require_membership") is True
-        require_startgg = settings.get("require_startgg") is True
+        require_payment = settings.get("require_payment") is not False
+        require_membership = settings.get("require_membership") is not False
+        require_startgg = settings.get("require_startgg") is not False
 
         # Determine current field values (with the toggled value updated)
         if col_id == "payment_valid":
@@ -714,6 +735,10 @@ def register_callbacks(app):
             payment_val = is_checked(row.get("payment_valid", ""))
             member_val = is_checked(row.get("member", ""))
             startgg_val = new_val
+        elif col_id == "member":
+            payment_val = is_checked(row.get("payment_valid", ""))
+            member_val = new_val
+            startgg_val = is_checked(row.get("startgg", ""))
         else:  # is_guest - doesn't affect Ready status
             payment_val = is_checked(row.get("payment_valid", ""))
             member_val = is_checked(row.get("member", ""))
@@ -752,7 +777,7 @@ def register_callbacks(app):
                 logger.warning(f"Failed to broadcast SSE: {e}")
 
             # Feedback message based on column
-            col_labels = {"payment_valid": "Payment", "startgg": "Start.gg", "is_guest": "Guest"}
+            col_labels = {"payment_valid": "Payment", "startgg": "Start.gg", "member": "Member", "is_guest": "Guest"}
             col_label = col_labels.get(col_id, col_id)
             status_emoji = "✅" if new_val else "⏸️"
 
