@@ -137,8 +137,8 @@ def sanitize_checkin_payload(data: dict) -> dict:
         if field in result and isinstance(result[field], str):
             result[field] = sanitize_string(result[field], field)
 
-    # Phone fields
-    phone_fields = ["telefon", "phone"]
+    # Phone fields (including 'telephone' used by register.html eBas form)
+    phone_fields = ["telefon", "phone", "telephone"]
     for field in phone_fields:
         if field in result and isinstance(result[field], str):
             result[field] = sanitize_phone(result[field])
@@ -195,7 +195,7 @@ def validate_checkin_payload(data: dict) -> list[str]:
                 errors.append(f"Invalid personal ID format (expected 10 or 12 digits, got {len(pnr)})")
 
     # Validate phone format (if provided)
-    for field in ["telefon", "phone"]:
+    for field in ["telefon", "phone", "telephone"]:
         if field in data and data[field]:
             phone = sanitize_phone(str(data[field]))
             if phone and len(phone) < 7:

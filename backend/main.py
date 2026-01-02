@@ -252,19 +252,23 @@ async def proxy_n8n(path: str, request: Request):
             try:
                 payload = json.loads(body)
 
-                # Validate
-                errors = validate_checkin_payload(payload)
-                if errors:
-                    logger.warning(f"Validation errors: {errors}")
-                    raise HTTPException(status_code=400, detail={"errors": errors})
+                # Only validate check-in webhooks (not eBas, startgg, etc.)
+                is_checkin_webhook = "checkin" in path.lower()
 
-                # Sanitize
+                if is_checkin_webhook:
+                    # Validate check-in payload
+                    errors = validate_checkin_payload(payload)
+                    if errors:
+                        logger.warning(f"Validation errors: {errors}")
+                        raise HTTPException(status_code=400, detail={"errors": errors})
+
+                # Sanitize all webhook payloads (phone, personnummer, etc.)
                 sanitized = sanitize_checkin_payload(payload)
                 body = json.dumps(sanitized).encode("utf-8")
 
                 # Update content-length header
                 headers["content-length"] = str(len(body))
-                logger.debug(f"Sanitized payload: {sanitized}")
+                logger.debug(f"Sanitized payload for {path}: {sanitized}")
 
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid JSON payload")
