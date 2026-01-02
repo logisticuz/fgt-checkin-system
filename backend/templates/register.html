@@ -164,115 +164,12 @@
       border: 1px solid #58aaff;
     }
 
-    /* Payment / Swish */
-    .swish-container {
-      text-align: center;
-    }
-    .swish-box {
-      background: linear-gradient(135deg, #1a2a1a 0%, #0d1f0d 100%);
-      border: 1px solid rgba(18, 168, 87, 0.3);
-      border-radius: 16px;
-      padding: 1.5rem;
-      margin: 1rem 0;
-    }
-    .swish-header {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-    }
-    .swish-logo {
-      width: 80px;
-      height: auto;
-    }
-    .swish-amount {
-      font-size: 2rem;
-      font-weight: bold;
-      color: #12a857;
-      margin: 0.5rem 0 1rem;
-    }
-    .swish-amount span {
-      font-size: 1rem;
-      color: #888;
-      font-weight: normal;
-    }
-    .swish-qr {
-      background: #fff;
-      padding: 12px;
-      border-radius: 12px;
-      display: inline-block;
-      margin: 0.5rem 0;
-    }
-    .swish-qr img {
-      width: 160px;
-      height: 160px;
-      display: block;
-    }
-    .swish-number-box {
-      background: rgba(0, 0, 0, 0.3);
-      border-radius: 8px;
-      padding: 0.75rem 1rem;
-      margin: 1rem 0;
-      display: inline-block;
-    }
-    .swish-number-label {
-      font-size: 0.75rem;
-      color: #888;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 0.25rem;
-    }
-    .swish-number {
-      font-size: 1.4rem;
-      font-weight: bold;
-      color: #fff;
-      font-family: 'Courier New', monospace;
-      letter-spacing: 1px;
-    }
-    .swish-divider {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin: 1rem 0;
-      color: #666;
-      font-size: 0.85rem;
-    }
-    .swish-divider::before,
-    .swish-divider::after {
-      content: "";
-      flex: 1;
-      height: 1px;
-      background: rgba(255, 255, 255, 0.1);
-    }
-    .swish-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      background: #12a857;
-      color: #fff;
-      padding: 1rem 2rem;
-      border-radius: 50px;
-      font-size: 1.1rem;
-      font-weight: 600;
-      text-decoration: none;
-      transition: all 0.2s;
-      margin: 0.5rem 0;
-    }
-    .swish-btn:hover {
-      background: #0e8a47;
-      transform: scale(1.02);
-    }
-    .swish-btn:active {
-      transform: scale(0.98);
-    }
+    /* Payment info note */
     .swish-note {
       background: rgba(255, 152, 0, 0.1);
       border: 1px solid rgba(255, 152, 0, 0.3);
       border-radius: 8px;
       padding: 0.75rem;
-      margin-top: 1rem;
       font-size: 0.85rem;
       color: #ff9800;
     }
@@ -380,54 +277,12 @@
       </button>
     </section>
 
-    <!-- Section: Payment -->
+    <!-- Section: Payment (info only - actual payment on status page) -->
     <section id="section-payment" class="section hidden">
-      <h2>Payment</h2>
-      <div class="swish-container">
-        <div class="swish-box">
-          <!-- Amount display -->
-          <div class="swish-amount" id="swish-amount">
-            <span>Amount to pay</span><br>
-            0 kr
-          </div>
-
-          <!-- Desktop: Show QR code -->
-          <div id="swish-desktop" class="hidden">
-            <div class="swish-qr">
-              <img src="/static/swish-QR.png" alt="Swish QR" id="swish-qr-img">
-            </div>
-            <p style="color: #aaa; font-size: 0.85rem; margin-top: 0.5rem;">
-              Scan with Swish app
-            </p>
-
-            <div class="swish-divider">or enter manually</div>
-
-            <div class="swish-number-box">
-              <div class="swish-number-label">Swish number</div>
-              <div class="swish-number">123-043 78 22</div>
-            </div>
-          </div>
-
-          <!-- Mobile: Show deep link button -->
-          <div id="swish-mobile" class="hidden">
-            <a id="swish-deeplink" class="swish-btn">
-              Open Swish
-            </a>
-
-            <div class="swish-divider">or enter manually</div>
-
-            <div class="swish-number-box">
-              <div class="swish-number-label">Swish number</div>
-              <div class="swish-number">123-043 78 22</div>
-            </div>
-          </div>
-
-          <!-- Important note -->
-          <div class="swish-note">
-            <strong>25 kr per game.</strong><br>
-            Write your <strong>tag</strong> and <strong>which games</strong> you're entering in the Swish message!
-          </div>
-        </div>
+      <h2>💳 Payment Required</h2>
+      <div class="swish-note" style="margin: 0;">
+        <strong id="price-per-game-text">{{ swish_expected_per_game | default(25) }} kr per game.</strong><br>
+        Payment details will be shown after you complete registration.
       </div>
     </section>
 
@@ -458,8 +313,8 @@
 
     <!-- Final Submit -->
     <section id="section-final" class="section hidden">
-      <button type="button" id="btn-final-checkin" class="btn btn-success">
-        Complete Check-in
+      <button type="button" id="btn-final-checkin" class="btn btn-primary">
+        Continue →
       </button>
     </section>
 
@@ -475,30 +330,12 @@
     // Config
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
-    const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
-    const SWISH_NUMBER = "1230437822"; // Without formatting for deep link
 
     // Configurable requirements from event settings
     // If a requirement is disabled, we never show that section
     const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
     const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
     const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
-
-    // Mobile detection
-    function isMobile() {
-      return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    }
-
-    // Generate Swish deep link
-    function generateSwishDeepLink(amount, message) {
-      const data = {
-        version: 1,
-        payee: { value: SWISH_NUMBER },
-        amount: { value: amount },
-        message: { value: message, editable: false }
-      };
-      return `swish://payment?data=${encodeURIComponent(JSON.stringify(data))}`;
-    }
 
     // State from URL params
     // Override "needs" flags based on what's REQUIRED for this event
@@ -553,6 +390,36 @@
       }
     }
 
+    // Fetch real status from API and update UI
+    async function fetchAndUpdateStatus() {
+      if (!state.name) return;
+
+      try {
+        const response = await fetch(`/api/participant/${encodeURIComponent(state.name)}/status`);
+        if (!response.ok) return;
+
+        const data = await response.json();
+
+        // Update status icons based on real Airtable data
+        if (REQUIRE_STARTGG) {
+          setStatus("status-startgg", data.startgg === true);
+        }
+        if (REQUIRE_MEMBERSHIP) {
+          setStatus("status-member", data.member === true);
+        }
+        if (REQUIRE_PAYMENT) {
+          setStatus("status-payment", data.payment === true);
+          // Show payment section if payment is required but not done
+          if (!data.payment) {
+            state.needsPayment = true;
+            document.getElementById("section-payment").classList.remove("hidden");
+          }
+        }
+      } catch (err) {
+        console.warn("Could not fetch status from API:", err);
+      }
+    }
+
     // Initialize UI based on state
     function initUI() {
       // Hide status items that are not required for this event
@@ -566,7 +433,7 @@
         document.getElementById("status-payment").style.display = "none";
       }
 
-      // Set initial status icons (only for required items)
+      // Set initial status icons (only for required items) - from URL params
       if (REQUIRE_STARTGG) setStatus("status-startgg", !state.needsStartgg);
       if (REQUIRE_MEMBERSHIP) setStatus("status-member", !state.needsEbas);
       if (REQUIRE_PAYMENT) setStatus("status-payment", !state.needsPayment);
@@ -580,19 +447,7 @@
 
       if (state.needsPayment) {
         document.getElementById("section-payment").classList.remove("hidden");
-        const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
-        document.getElementById("swish-amount").innerHTML = `<span>Amount to pay</span><br>${amount} kr`;
-
-        // Show mobile or desktop Swish UI
-        if (isMobile()) {
-          document.getElementById("swish-mobile").classList.remove("hidden");
-          // Generate deep link with player tag/name as message
-          const message = state.tag || state.name || "FGC";
-          const deepLink = generateSwishDeepLink(amount, message);
-          document.getElementById("swish-deeplink").href = deepLink;
-        } else {
-          document.getElementById("swish-desktop").classList.remove("hidden");
-        }
+        // Payment details (QR, amount) shown on status page after registration
       }
 
       if (state.needsStartgg) {
@@ -601,6 +456,9 @@
 
       // Show final button if nothing is needed
       updateFinalButton();
+
+      // Fetch real status from API to correct any mismatches
+      fetchAndUpdateStatus();
     }
 
     function updateFinalButton() {
@@ -615,23 +473,50 @@
     // eBas Registration
     document.getElementById("btn-register-ebas").addEventListener("click", async function() {
       const btn = this;
-      const pnr = document.getElementById("pnr-ebas").value.trim();
+      const pnrRaw = document.getElementById("pnr-ebas").value.trim();
       const email = document.getElementById("email-ebas").value.trim();
       const phone = document.getElementById("phone-ebas").value.trim();
 
-      if (!pnr || pnr.length < 10) {
-        showMessage("Please enter a valid personal ID", "error");
+      // Sanitize and validate personnummer using validation.js
+      const pnr = Validation.sanitizePersonnummer(pnrRaw);
+
+      if (!pnr) {
+        showMessage("Personal ID is required", "error");
         return;
+      }
+
+      if (pnr.length !== 10 && pnr.length !== 12) {
+        showMessage(`Personal ID must be 10 or 12 digits (you entered ${pnr.length} digits)`, "error");
+        return;
+      }
+
+      // Validate email if provided
+      if (email && !email.includes("@")) {
+        showMessage("Please enter a valid email address", "error");
+        return;
+      }
+
+      // Validate phone if provided (minimum 7 digits)
+      if (phone) {
+        const cleanedPhone = Validation.sanitizePhone(phone);
+        if (cleanedPhone.length > 0 && cleanedPhone.length < 7) {
+          showMessage("Phone number too short (minimum 7 digits)", "error");
+          return;
+        }
       }
 
       setButtonLoading(btn, true);
       clearMessages();
 
       try {
+        // Include tag and slug so n8n can update the Airtable record
+        const tag = state.tag || localStorage.getItem("tag") || "";
+        const slug = state.eventSlug || localStorage.getItem("eventSlug") || "";
+
         const response = await fetch(`/n8n/webhook/ebas/register${tokenParam}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ personnummer: pnr, email, telephone: phone })
+          body: JSON.stringify({ personnummer: pnr, email, telephone: phone, tag, slug })
         });
 
         const data = await response.json();
@@ -703,19 +588,6 @@
         localStorage.setItem("selectedGames", JSON.stringify(selectedNames));
         state.gamesCount = selectedNames.length;
         state.needsStartgg = false;
-
-        // Update payment amount if payment section is visible
-        if (document.getElementById("section-payment").classList.contains("hidden") === false) {
-          const amount = state.gamesCount * SWISH_PRICE_PER_GAME;
-          document.getElementById("swish-amount").innerHTML = `<span>Amount to pay</span><br>${amount} kr`;
-
-          // Update deep link with new amount
-          if (isMobile()) {
-            const message = state.tag || state.name || "FGC";
-            const deepLink = generateSwishDeepLink(amount, message);
-            document.getElementById("swish-deeplink").href = deepLink;
-          }
-        }
 
         showMessage(`${selectedNames.length} game(s) saved: ${selectedNames.join(", ")}`, "success");
         setStatus("status-startgg", true);

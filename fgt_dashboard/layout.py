@@ -578,6 +578,53 @@ def create_layout():
                         html.Div(id="requirements-save-feedback", style={"marginTop": "1rem"}),
                     ]),
 
+                    # Payment Settings
+                    html.Div(style=STYLES["card"], children=[
+                        html.H3("Payment Settings", style=STYLES["section_title"]),
+                        html.P("Configure Swish payment details for this event.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
+
+                        # Price per game
+                        html.Div(style={"marginBottom": "1rem"}, children=[
+                            html.Label("Price per game (kr)", style={"fontWeight": "600", "color": COLORS["text_primary"], "marginBottom": "0.5rem", "display": "block"}),
+                            dcc.Input(
+                                id="input-price-per-game",
+                                type="number",
+                                value=settings.get("swish_expected_per_game", 25),
+                                min=0,
+                                step=5,
+                                style={
+                                    "width": "120px",
+                                    "padding": "0.5rem",
+                                    "borderRadius": "6px",
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                },
+                            ),
+                        ]),
+
+                        # Swish number
+                        html.Div(style={"marginBottom": "1rem"}, children=[
+                            html.Label("Swish number", style={"fontWeight": "600", "color": COLORS["text_primary"], "marginBottom": "0.5rem", "display": "block"}),
+                            dcc.Input(
+                                id="input-swish-number",
+                                type="text",
+                                value=settings.get("swish_number", "123-456 78 90"),
+                                style={
+                                    "width": "200px",
+                                    "padding": "0.5rem",
+                                    "borderRadius": "6px",
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                },
+                            ),
+                        ]),
+
+                        html.Button("Save Payment Settings", id="btn-save-payment-settings", n_clicks=0, style=STYLES["button_primary"]),
+                        html.Div(id="payment-settings-feedback", style={"marginTop": "1rem"}),
+                    ]),
+
                     # Hidden elements to satisfy callback dependencies
                     html.Div(style={"display": "none"}, children=[
                         dcc.Dropdown(id="game-dropdown", options=[], value=None),

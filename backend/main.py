@@ -163,6 +163,27 @@ def _to_str_phone(x):
     return s
 
 
+# === Helpers: slug to display name ===
+def slug_to_display_name(slug: str) -> str:
+    """
+    Convert a Start.gg event slug to a nice display name.
+
+    "fight-night-17-at-backstage-rockbar-fgc-trollh-ttan"
+    → "Fight Night 17"
+    """
+    if not slug:
+        return "Tournament"
+
+    # Take everything before "-at-" (venue info)
+    if "-at-" in slug:
+        slug = slug.split("-at-")[0]
+
+    # Replace hyphens with spaces and title case
+    name = slug.replace("-", " ").title()
+
+    return name
+
+
 # === Helpers: requirement logic (Task 1.1) ===
 # See: docs/9_Systemkontrakt_och_Invarianter.md
 def compute_requirements(settings: dict) -> dict:
@@ -589,6 +610,9 @@ async def status_view(request: Request, name: str):
     ready, _ = compute_ready_and_missing(status, requirements)
 
     template_name = "status_ready.html" if ready else "status_pending.html"
+    event_slug = settings.get("active_event_slug", "")
+    # Use custom display name if set, otherwise convert slug to nice name
+    event_name = settings.get("event_display_name") or slug_to_display_name(event_slug)
     return templates.TemplateResponse(
         template_name,
         {
@@ -596,7 +620,8 @@ async def status_view(request: Request, name: str):
             "name": name,
             "status": status,
             "tag": details.get("tag", name),
-            "event_name": details.get("event_name", "FGC Weekly"),
+            "event_name": event_name,
+            "event_slug": event_slug,
             "games": details.get("games", []),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
@@ -720,9 +745,11 @@ async def get_event_history():
 @app.patch("/api/player/games", tags=["Checkin"])
 async def update_player_games(request: Request):
     """
-    Update tournament_games_registered for a player.
+    Update tournament_games_registered and payment_expected for a player.
     Used when player manually selects games in register.html.
     Body: { "tag": "playertag", "slug": "tournament-slug", "games": ["SF6", "Tekken 8"] }
+
+    Also calculates payment_expected = len(games) * swish_expected_per_game
     """
     try:
         body = await request.json()
@@ -745,15 +772,32 @@ async def update_player_games(request: Request):
 
     record_id = checkin["record_id"]
 
-    # Update the record with games using shared airtable_api
-    fields = {"tournament_games_registered": games} if games else {}
+    # Get settings to calculate payment_expected
+    settings = get_active_settings()
+    per_game = settings.get("swish_expected_per_game", 25)
+    payment_expected = len(games) * per_game
+
+    # Update the record with games AND payment_expected
+    fields = {
+        "tournament_games_registered": games,
+        "payment_expected": payment_expected,
+    }
     result = update_checkin(record_id, fields, typecast=True)
 
     if not result:
         raise HTTPException(status_code=500, detail="Airtable update failed")
 
-    logger.info(f"Updated games for {tag}: {games}")
-    return {"success": True, "tag": tag, "games": games}
+    # Broadcast SSE update for dashboard
+    await sse_manager.broadcast("update", {
+        "type": "games_updated",
+        "record_id": record_id,
+        "tag": tag,
+        "games": games,
+        "payment_expected": payment_expected,
+    })
+
+    logger.info(f"Updated games for {tag}: {games}, payment_expected: {payment_expected}")
+    return {"success": True, "tag": tag, "games": games, "payment_expected": payment_expected}
 
 
 # === Start.gg OAuth (Admin Only) ===

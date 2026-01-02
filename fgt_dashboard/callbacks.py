@@ -1092,3 +1092,52 @@ def register_callbacks(app):
         startgg_val = [True] if requirements.get("require_startgg", True) else []
 
         return payment_val, membership_val, startgg_val
+
+    # -------------------------------------------------------------------------
+    # Save Payment Settings - update swish_expected_per_game and swish_number
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("payment-settings-feedback", "children"),
+        Input("btn-save-payment-settings", "n_clicks"),
+        State("input-price-per-game", "value"),
+        State("input-swish-number", "value"),
+        prevent_initial_call=True,
+    )
+    def save_payment_settings(n_clicks, price_per_game, swish_number):
+        """Save payment settings (price per game, swish number) to Airtable."""
+        if not n_clicks:
+            return no_update
+
+        # Get the active settings record ID
+        settings_data = get_active_settings_with_id()
+        if not settings_data:
+            return html.Span("❌ No active settings found", style={"color": "#ef4444"})
+
+        record_id = settings_data.get("record_id")
+        if not record_id:
+            return html.Span("❌ Could not find settings record", style={"color": "#ef4444"})
+
+        # Validate price
+        try:
+            price = int(price_per_game) if price_per_game else 0
+            if price < 0:
+                return html.Span("❌ Price must be 0 or higher", style={"color": "#ef4444"})
+        except (ValueError, TypeError):
+            return html.Span("❌ Invalid price value", style={"color": "#ef4444"})
+
+        # Prepare update data
+        update_data = {
+            "swish_expected_per_game": price,
+            "swish_number": swish_number or "",
+        }
+
+        # Update Airtable
+        result = update_settings(record_id, update_data)
+
+        if result:
+            return html.Span(
+                f"✅ Saved! Price: {price} kr/game, Swish: {swish_number}",
+                style={"color": "#10b981"}
+            )
+        else:
+            return html.Span("❌ Failed to save settings", style={"color": "#ef4444"})

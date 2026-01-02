@@ -21,7 +21,7 @@
     }
 
     .container {
-      max-width: 480px;
+      max-width: 420px;
       width: 100%;
     }
 
@@ -79,51 +79,71 @@
       color: #4caf50;
     }
 
-    /* Info card */
-    .info-card {
-      background: rgba(255, 255, 255, 0.05);
+    /* Thank you message */
+    .thank-you {
+      background: rgba(76, 175, 80, 0.1);
       border: 1px solid rgba(76, 175, 80, 0.2);
-      border-radius: 16px;
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+      color: #e0e0e0;
+    }
+    .thank-you strong {
+      color: #4caf50;
+    }
+    .event-name {
+      color: #58aaff;
+      font-weight: 600;
     }
 
-    .info-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 0.75rem 0;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    }
-
-    .info-row:last-child {
-      border-bottom: none;
-    }
-
-    .info-label {
-      color: #888;
-    }
-
-    .info-value {
-      color: #fff;
-      font-weight: 500;
-    }
-
-    /* Games list */
-    .games-list {
-      display: flex;
-      flex-wrap: wrap;
+    /* Bracket link */
+    .bracket-link {
+      display: inline-flex;
+      align-items: center;
       gap: 0.5rem;
-      justify-content: center;
-      margin-bottom: 2rem;
-    }
-
-    .game-badge {
       background: rgba(88, 170, 255, 0.15);
       border: 1px solid rgba(88, 170, 255, 0.3);
       color: #58aaff;
-      padding: 0.5rem 1rem;
-      border-radius: 20px;
+      padding: 0.6rem 1.2rem;
+      border-radius: 8px;
+      text-decoration: none;
       font-size: 0.9rem;
+      margin-bottom: 1rem;
+      transition: all 0.2s;
+    }
+    .bracket-link:hover {
+      background: rgba(88, 170, 255, 0.25);
+      transform: translateY(-2px);
+    }
+
+    /* Games list */
+    .games-section {
+      background: rgba(88, 170, 255, 0.05);
+      border: 1px solid rgba(88, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .games-section h3 {
+      margin: 0 0 0.75rem 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #58aaff;
+    }
+    .games-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .game-badge {
+      background: rgba(76, 175, 80, 0.15);
+      border: 1px solid rgba(76, 175, 80, 0.3);
+      color: #fff;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      text-align: center;
     }
 
     /* Logo */
@@ -155,28 +175,26 @@
       <span class="badge">✓ Paid</span>
     </div>
 
-    <div class="info-card">
-      <div class="info-row">
-        <span class="info-label">Name</span>
-        <span class="info-value">{{ name }}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Event</span>
-        <span class="info-value">{{ event_name | default('FGC Weekly') }}</span>
-      </div>
-      {% if games %}
-      <div class="info-row">
-        <span class="info-label">Games</span>
-        <span class="info-value">{{ games | length }}</span>
-      </div>
-      {% endif %}
+    <div class="thank-you">
+      Thanks <strong>{{ name }}</strong> for joining
+      <span class="event-name">{{ event_name | default('the tournament') }}</span>!
+      <br>You're all set.
     </div>
 
+    {% if event_slug %}
+    <a href="https://start.gg/{{ event_slug }}" target="_blank" class="bracket-link">
+      🎮 View Bracket on Start.gg
+    </a>
+    {% endif %}
+
     {% if games %}
-    <div class="games-list">
-      {% for game in games %}
-      <span class="game-badge">{{ game }}</span>
-      {% endfor %}
+    <div class="games-section">
+      <h3>Registered for</h3>
+      <div class="games-list">
+        {% for game in games %}
+        <span class="game-badge">{{ game }}</span>
+        {% endfor %}
+      </div>
     </div>
     {% endif %}
 

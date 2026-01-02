@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalize personnummer to 12 digits\nconst body = $json.body ?? $json;\nlet pnrRaw = body.personnummer ?? null;\n\nif (!pnrRaw) {\n  throw new Error(\"Personnummer krÃ¤vs fÃ¶r registrering\");\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  throw new Error(\"Ogiltigt personnummer-format\");\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nconst email = body.email || '';\nconst phone = (body.telephone || body.telefon || '').replace(/[\\s-]/g, '');\nconst nick = body.nick || body.tag || null;\nconst discord = body.discord || null;\n\n// Get today's date for renewed field\nconst today = new Date().toISOString().split('T')[0];\n\nreturn [{ json: { \n  pnr: pnr,\n  email: email,\n  phone: phone,\n  nick: nick,\n  discord: discord,\n  renewed: today\n}}];"
+        "jsCode": "// Normalize personnummer to 12 digits and preserve tag/slug for Airtable update\nconst body = $json.body ?? $json;\nlet pnrRaw = body.personnummer ?? null;\n\nif (!pnrRaw) {\n  throw new Error(\"Personnummer krävs för registrering\");\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  throw new Error(\"Ogiltigt personnummer-format\");\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nconst email = body.email || '';\nconst phone = (body.telephone || body.telefon || '').replace(/[\\s-]/g, '');\nconst nick = body.nick || body.tag || null;\nconst discord = body.discord || null;\n\n// Preserve tag and slug for Airtable update after eBas registration\nconst tag = (body.tag || '').toLowerCase().trim();\nconst slug = body.slug || '';\n\n// Get today's date for renewed field\nconst today = new Date().toISOString().split('T')[0];\n\nreturn [{ json: { \n  pnr: pnr,\n  email: email,\n  phone: phone,\n  nick: nick,\n  discord: discord,\n  renewed: today,\n  // Pass through for Airtable update\n  tag: tag,\n  slug: slug\n}}];"
       },
       "name": "Normalize Input",
       "type": "n8n-nodes-base.code",
@@ -51,7 +51,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse eBas submit_member_with_lookup response\nconst response = $json;\n\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{ \n    json: { \n      success: true,\n      registered: true,\n      message: \"Medlem registrerad i Sverok\"\n    } \n  }];\n}\n\n// Check for errors\nif (response.member_errors) {\n  const errors = Object.entries(response.member_errors)\n    .map(([field, msgs]) => field + ': ' + msgs.join(', '))\n    .join('; ');\n  return [{ \n    json: { \n      success: false,\n      error: true,\n      message: errors || \"Kunde inte registrera medlem\",\n      details: response.member_errors\n    } \n  }];\n}\n\n// Generic error\nreturn [{ \n  json: { \n    success: false,\n    error: true,\n    message: response.request_result || \"OkÃ¤nt fel\",\n    raw_response: response\n  } \n}];"
+        "jsCode": "// Parse eBas submit_member_with_lookup response\n// Preserve tag and slug from input for Airtable update\nconst response = $json;\nconst input = $('Normalize Input').first().json;\nconst tag = input.tag || '';\nconst slug = input.slug || '';\n\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{ \n    json: { \n      success: true,\n      registered: true,\n      message: \"Medlem registrerad i Sverok\",\n      tag: tag,\n      slug: slug\n    } \n  }];\n}\n\n// Check for errors\nif (response.member_errors) {\n  const errors = Object.entries(response.member_errors)\n    .map(([field, msgs]) => field + ': ' + msgs.join(', '))\n    .join('; ');\n  return [{ \n    json: { \n      success: false,\n      error: true,\n      message: errors || \"Kunde inte registrera medlem\",\n      details: response.member_errors,\n      tag: tag,\n      slug: slug\n    } \n  }];\n}\n\n// Generic error\nreturn [{ \n  json: { \n    success: false,\n    error: true,\n    message: response.request_result || \"Okänt fel\",\n    raw_response: response,\n    tag: tag,\n    slug: slug\n  } \n}];"
       },
       "name": "Parse Response",
       "type": "n8n-nodes-base.code",
@@ -64,7 +64,140 @@
     },
     {
       "parameters": {
-        "content": "## eBas Register Sub-workflow\n\n**Purpose:** Register a new member in Sverok via eBas API.\n\n**When used:** When a player wants to become a Sverok member during check-in.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\",\n  \"email\": \"player@example.com\",\n  \"telephone\": \"0701234567\",\n  \"nick\": \"PlayerTag\" (optional),\n  \"discord\": \"user#1234\" (optional)\n}\n```\n\n**Output:**\n```json\n{\n  \"success\": true/false,\n  \"registered\": true,\n  \"message\": \"Medlem registrerad i Sverok\"\n}\n```\n\n**API Endpoint:** submit_member_with_lookup.json\n- Uses SPAR lookup to auto-fill name/address from personnummer\n- Requires valid Swedish personnummer",
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.success }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "If Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        208
+      ],
+      "id": "if-success"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "active_event_data"
+        },
+        "filterByFormula": "=AND(LOWER(tag)='{{ $json.tag }}', event_slug='{{ $json.slug }}')",
+        "options": {}
+      },
+      "name": "Find Player in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1530,
+        100
+      ],
+      "id": "find-player",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-credentials",
+          "name": "Airtable Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "active_event_data"
+        },
+        "id": "={{ $json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "member": true
+          }
+        },
+        "options": {}
+      },
+      "name": "Update Member Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        100
+      ],
+      "id": "update-member",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-credentials",
+          "name": "Airtable Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/notify/update",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"event_type\": \"member_update\",\n  \"tag\": \"{{ $('Parse Response').first().json.tag }}\",\n  \"member\": true\n}",
+        "options": {}
+      },
+      "name": "Notify SSE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1990,
+        100
+      ],
+      "id": "notify-sse",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return success response (already set by Parse Response)\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+      },
+      "name": "Return Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        100
+      ],
+      "id": "return-success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return error/failure response\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+      },
+      "name": "Return Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1530,
+        320
+      ],
+      "id": "return-error"
+    },
+    {
+      "parameters": {
+        "content": "## eBas Register Workflow\n\n**Purpose:** Register a new member in Sverok via eBas API and update Airtable.\n\n**When used:** When a player wants to become a Sverok member during check-in.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\",\n  \"email\": \"player@example.com\",\n  \"telephone\": \"0701234567\",\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Flow:**\n1. Normalize personnummer and input data\n2. Call eBas API to register member\n3. If success: Find player in Airtable and update member=true\n4. Notify dashboard via SSE\n5. Return success/error response\n\n**API Endpoint:** submit_member_with_lookup.json\n- Uses SPAR lookup to auto-fill name/address from personnummer\n- Requires valid Swedish personnummer",
         "height": 636,
         "width": 500,
         "color": 4
@@ -80,7 +213,7 @@
     },
     {
       "parameters": {
-        "content": "## Input Normalization\n\nPrepares data for eBas API:\n- Normalizes personnummer to 12 digits\n- Cleans phone number (removes spaces/dashes)\n- Sets renewal date to today\n\n**Fields sent to eBas:**\n- socialsecuritynumber (required)\n- renewed (today's date)\n- email, phone1, member_nick, discord_user_id",
+        "content": "## Input Normalization\n\nPrepares data for eBas API:\n- Normalizes personnummer to 12 digits\n- Cleans phone number (removes spaces/dashes)\n- Sets renewal date to today\n- Preserves tag+slug for Airtable update\n\n**Fields sent to eBas:**\n- socialsecuritynumber (required)\n- renewed (today's date)\n- email, phone1, member_nick, discord_user_id",
         "height": 316,
         "width": 340,
         "color": 6
@@ -96,19 +229,19 @@
     },
     {
       "parameters": {
-        "content": "## Response Handling\n\n**Success:** `stored_member: true` + `request_result: \"success\"`\n\n**Errors:** Returns member_errors object with field-specific messages.\n\n**Common errors:**\n- Invalid personnummer\n- Already registered\n- Missing required fields",
-        "height": 292,
-        "width": 320,
-        "color": 5
+        "content": "## Airtable Update\n\n**On success:** Find player by tag+slug and set member=true\n\n**SSE notification:** Broadcasts member_update event to dashboard\n\n**Note:** Airtable update is fire-and-forget - errors don't block the response",
+        "height": 220,
+        "width": 340,
+        "color": 3
       },
       "type": "n8n-nodes-base.stickyNote",
       "position": [
-        960,
-        -96
+        1500,
+        -128
       ],
       "typeVersion": 1,
-      "id": "note-ebas-reg-response",
-      "name": "Response"
+      "id": "note-airtable-update",
+      "name": "Airtable Update"
     }
   ],
   "pinData": {},
@@ -140,6 +273,68 @@
         [
           {
             "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Response": {
+      "main": [
+        [
+          {
+            "node": "If Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Success": {
+      "main": [
+        [
+          {
+            "node": "Find Player in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Player in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Update Member Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Member Status": {
+      "main": [
+        [
+          {
+            "node": "Notify SSE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify SSE": {
+      "main": [
+        [
+          {
+            "node": "Return Success",
             "type": "main",
             "index": 0
           }

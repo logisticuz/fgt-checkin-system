@@ -164,18 +164,32 @@
       background: rgba(88, 170, 255, 0.05);
       border: 1px solid rgba(88, 170, 255, 0.2);
       border-radius: 12px;
-      padding: 0.75rem 1rem;
+      padding: 1rem;
       margin-bottom: 0.75rem;
-      font-size: 0.85rem;
-      color: #58aaff;
     }
-
+    .events-card h3 {
+      margin: 0 0 0.75rem 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #58aaff;
+      text-align: center;
+    }
     .events-card ul {
       list-style: none;
+      padding: 0;
+      margin: 0;
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
       gap: 0.5rem;
-      justify-content: center;
+    }
+    .events-card li {
+      background: rgba(88, 170, 255, 0.15);
+      border: 1px solid rgba(88, 170, 255, 0.3);
+      border-radius: 8px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
+      color: #fff;
+      text-align: center;
     }
 
     /* Refresh button */
