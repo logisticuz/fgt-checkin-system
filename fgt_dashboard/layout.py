@@ -181,8 +181,11 @@ def create_layout():
         columns = [{"name": str(col).replace("_", " ").title(), "id": str(col)} for col in df.columns]
         data = df.to_dict("records")
 
-    # Format event name for display
-    event_display = active_slug.replace("-", " ").title() if active_slug else "No Event Selected"
+    # Format event name for display - use event_display_name if available (has proper åäö)
+    event_display_name = settings.get("event_display_name", "")
+    event_display = event_display_name if event_display_name else (
+        active_slug.replace("-", " ").title() if active_slug else "No Event Selected"
+    )
 
     return html.Div(style=STYLES["page"], children=[
         # Data stores
@@ -192,10 +195,11 @@ def create_layout():
         dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
         dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
         dcc.Store(id="requirements-store", data={
-            # Default to True if not explicitly set to False
-            "require_payment": settings.get("require_payment") is not False,
-            "require_membership": settings.get("require_membership") is not False,
-            "require_startgg": settings.get("require_startgg") is not False,
+            # Airtable checkbox: checked = True, unchecked = field missing (None)
+            # Use "is True" so that unchecked (None) = requirement OFF
+            "require_payment": settings.get("require_payment") is True,
+            "require_membership": settings.get("require_membership") is True,
+            "require_startgg": settings.get("require_startgg") is True,
         }),
         dcc.Interval(id="interval-refresh", interval=300 * 1000, n_intervals=0, disabled=True),  # Fallback: 5 min, disabled by default
 
@@ -270,7 +274,11 @@ def create_layout():
                                 id="event-dropdown",
                                 options=[
                                     {"label": "🔍 All Events (Debug)", "value": "__ALL__"},
-                                ] + [{"label": s.replace("-", " ").title(), "value": s} for s in event_slugs],
+                                ] + [
+                                    # Use event_display_name for active slug (has proper åäö), fallback to slug title
+                                    {"label": event_display_name if s == active_slug and event_display_name else s.replace("-", " ").title(), "value": s}
+                                    for s in event_slugs
+                                ],
                                 value=active_slug if active_slug in event_slugs else (event_slugs[0] if event_slugs else None),
                                 clearable=False,
                                 style={"backgroundColor": COLORS["bg_dark"]},
@@ -335,16 +343,40 @@ def create_layout():
                         ]),
                     ]),
 
-                    # Needs attention section
+                    # Needs attention section (collapsible)
                     html.Div(id="needs-attention-section", style={
                         **STYLES["card"],
                         "borderLeft": f"4px solid {COLORS['accent_red']}",
                         "display": "none",  # Hidden by default, shown by callback when needed
                     }, children=[
-                        html.H3("🚨 Needs Attention", style={**STYLES["section_title"], "color": COLORS["accent_red"]}),
+                        # Header with toggle
+                        html.Div(style={
+                            "display": "flex",
+                            "justifyContent": "space-between",
+                            "alignItems": "center",
+                            "cursor": "pointer",
+                        }, id="needs-attention-header", n_clicks=0, children=[
+                            html.H3("🚨 Needs Attention", style={**STYLES["section_title"], "color": COLORS["accent_red"], "margin": "0"}),
+                            html.Div(style={"display": "flex", "alignItems": "center", "gap": "0.5rem"}, children=[
+                                html.Span(id="needs-attention-count", style={
+                                    "backgroundColor": COLORS["accent_red"],
+                                    "color": "#fff",
+                                    "padding": "0.25rem 0.6rem",
+                                    "borderRadius": "12px",
+                                    "fontSize": "0.8rem",
+                                    "fontWeight": "600",
+                                }),
+                                html.Span("▼", id="needs-attention-chevron", style={
+                                    "color": COLORS["text_muted"],
+                                    "fontSize": "0.8rem",
+                                    "transition": "transform 0.2s",
+                                }),
+                            ]),
+                        ]),
+                        # Collapsible content
                         html.Div(id="needs-attention-list", children=[
                             html.P("No issues", style={"color": COLORS["text_muted"], "margin": "0"})
-                        ])
+                        ], style={"marginTop": "1rem"})
                     ]),
 
                     # Main checkins table
@@ -534,7 +566,7 @@ def create_layout():
                             dcc.Checklist(
                                 id="require-payment-toggle",
                                 options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_payment") is not False else [],
+                                value=[True] if settings.get("require_payment") is True else [],
                                 style={"display": "inline-block"},
                                 inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
                             ),
@@ -549,7 +581,7 @@ def create_layout():
                             dcc.Checklist(
                                 id="require-membership-toggle",
                                 options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_membership") is not False else [],
+                                value=[True] if settings.get("require_membership") is True else [],
                                 style={"display": "inline-block"},
                                 inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
                             ),
@@ -564,7 +596,7 @@ def create_layout():
                             dcc.Checklist(
                                 id="require-startgg-toggle",
                                 options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_startgg") is not False else [],
+                                value=[True] if settings.get("require_startgg") is True else [],
                                 style={"display": "inline-block"},
                                 inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
                             ),

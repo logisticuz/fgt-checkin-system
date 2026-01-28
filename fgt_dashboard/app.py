@@ -1,13 +1,23 @@
 # app.py
 from dash import Dash
-from layout import create_layout
-from callbacks import register_callbacks
+try:
+    # When running in Docker (files copied flat to /app/)
+    from layout import create_layout
+    from callbacks import register_callbacks
+except ImportError:
+    # When running locally with package structure
+    from fgt_dashboard.layout import create_layout
+    from fgt_dashboard.callbacks import register_callbacks
 
 # Create Dash instance (mounted at root in production)
-app = Dash(__name__, requests_pathname_prefix='/')
+# suppress_callback_exceptions=True allows callbacks to reference elements
+# that don't exist at startup (needed for dynamic layout)
+app = Dash(__name__, requests_pathname_prefix='/', suppress_callback_exceptions=True)
 
-# Layout is built internally by layout.py (no preloaded args)
-app.layout = create_layout()
+# Layout as function reference (not called) = regenerated on each page load
+# This allows the event dropdown to show updated events from Airtable
+# without requiring a container rebuild
+app.layout = create_layout
 
 # Register interactive callbacks
 register_callbacks(app)

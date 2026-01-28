@@ -264,15 +264,15 @@
       </p>
 
       <label for="pnr-ebas">Personal ID (YYYYMMDDXXXX)</label>
-      <input type="text" id="pnr-ebas" placeholder="199001011234" pattern="\d{10,12}">
+      <input type="text" id="pnr-ebas" placeholder="199001011234" pattern="\d{10,12}" oninput="validateEbasForm()">
 
-      <label for="email-ebas">Email</label>
-      <input type="email" id="email-ebas" placeholder="your@email.com">
+      <label for="email-ebas">Email (optional)</label>
+      <input type="email" id="email-ebas" placeholder="your@email.com" oninput="validateEbasForm()">
 
-      <label for="phone-ebas">Phone (optional)</label>
-      <input type="tel" id="phone-ebas" placeholder="0701234567">
+      <label for="phone-ebas">Phone</label>
+      <input type="tel" id="phone-ebas" placeholder="0701234567" required oninput="validateEbasForm()">
 
-      <button type="button" id="btn-register-ebas" class="btn btn-primary">
+      <button type="button" id="btn-register-ebas" class="btn btn-primary" disabled>
         Register as Member
       </button>
     </section>
@@ -470,6 +470,24 @@
       }
     }
 
+    // eBas form validation - enables button only when all required fields are valid
+    function validateEbasForm() {
+      const btn = document.getElementById("btn-register-ebas");
+      const pnrRaw = document.getElementById("pnr-ebas").value.trim();
+      const phone = document.getElementById("phone-ebas").value.trim();
+
+      // Validate personnummer (10 or 12 digits)
+      const pnr = Validation.sanitizePersonnummer(pnrRaw);
+      const pnrValid = pnr && (pnr.length === 10 || pnr.length === 12);
+
+      // Validate phone (minimum 7 digits)
+      const cleanedPhone = Validation.sanitizePhone(phone);
+      const phoneValid = cleanedPhone.length >= 7;
+
+      // Enable button only if both are valid
+      btn.disabled = !(pnrValid && phoneValid);
+    }
+
     // eBas Registration
     document.getElementById("btn-register-ebas").addEventListener("click", async function() {
       const btn = this;
@@ -522,6 +540,28 @@
         const data = await response.json();
 
         if (data.success || data.already_member) {
+          // eBas registration successful - now update Airtable via backend
+          // This separates concerns: n8n handles Sverok API, backend handles Airtable
+          try {
+            const memberResponse = await fetch("/api/player/member", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                tag: tag,
+                slug: slug,
+                member: true
+              })
+            });
+
+            if (!memberResponse.ok) {
+              console.warn("Could not update member status in Airtable:", await memberResponse.text());
+              // Don't fail the whole flow - eBas registration was successful
+            }
+          } catch (memberErr) {
+            console.warn("Error updating member status:", memberErr);
+            // Don't fail - eBas registration was successful
+          }
+
           showMessage(data.already_member
             ? "You are already a member - perfect!"
             : "Membership registered!", "success");
@@ -530,7 +570,16 @@
           document.getElementById("section-ebas").classList.add("hidden");
           updateFinalButton();
         } else {
-          showMessage(data.message || "Could not register membership", "error");
+          // Handle different response formats from n8n
+          let errorMsg = "Could not register membership";
+          if (typeof data.message === "string") {
+            errorMsg = data.message;
+          } else if (data.message?.error) {
+            errorMsg = data.message.error;
+          } else if (data.error && typeof data.error === "string") {
+            errorMsg = data.error;
+          }
+          showMessage(errorMsg, "error");
         }
       } catch (err) {
         console.error("eBas error:", err);

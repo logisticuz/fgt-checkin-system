@@ -424,6 +424,7 @@ def register_callbacks(app):
         # 5) Patch Airtable settings using shared airtable_api
         patch_fields = {
             "active_event_slug": slug,
+            "event_display_name": tournament.get("name", ""),  # Store proper tournament name with åäö
             "is_active": True,
         }
         result = update_settings(settings_id, patch_fields)
@@ -437,9 +438,15 @@ def register_callbacks(app):
         all_slugs = get_all_event_slugs() or []
         if slug not in all_slugs:
             all_slugs = [slug] + all_slugs
-        dropdown_options = [{"label": s.replace("-", " ").title(), "value": s} for s in all_slugs]
 
-        return f"✅ Updated {tournament['name']} • {len(events)} events", dropdown_options, slug
+        # Use tournament name (with proper åäö) for the active slug
+        tournament_name = tournament.get("name", "")
+        dropdown_options = [
+            {"label": tournament_name if s == slug and tournament_name else s.replace("-", " ").title(), "value": s}
+            for s in all_slugs
+        ]
+
+        return f"✅ Updated {tournament_name} • {len(events)} events", dropdown_options, slug
 
     # ---------------------------------------------------------------------
     # Helper: read active settings.fields from Airtable (uses shared airtable_api)
@@ -502,6 +509,7 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     @app.callback(
         Output("needs-attention-list", "children"),
+        Output("needs-attention-count", "children"),
         Input("checkins-table", "data"),
         Input("requirements-store", "data"),  # Task 2.2: Respect requirements
     )
@@ -514,7 +522,7 @@ def register_callbacks(app):
         from dash import html
 
         if not table_data:
-            return html.P("No players checked in yet.", style={"color": "#888"})
+            return html.P("No players checked in yet.", style={"color": "#888"}), "0"
 
         # Get active requirements (default ON unless explicitly False)
         requirements = requirements or {}
@@ -534,13 +542,13 @@ def register_callbacks(app):
             if require_membership:
                 member_val = row.get("member", "")
                 if not is_ok(member_val):
-                    missing.append({"field": "Member", "icon": "🪪"})
+                    missing.append({"field": "Membership", "icon": "🎫"})
 
             # Only check payment if it's a required field
             if require_payment:
                 payment_val = row.get("payment_valid", "")
                 if not is_ok(payment_val):
-                    missing.append({"field": "Payment", "icon": "💰"})
+                    missing.append({"field": "Payment", "icon": "💳"})
 
             # Only check start.gg if it's a required field
             if require_startgg:
@@ -559,31 +567,95 @@ def register_callbacks(app):
                 })
 
         if not needs_help:
-            return html.P("✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"})
+            return html.P("✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"}), "0"
 
-        # Build list of players needing help with icons
+        # Badge styles matching Active Requirements (same colors/styling)
+        badge_styles = {
+            "Payment": {
+                "backgroundColor": "rgba(16, 185, 129, 0.2)",
+                "color": "#10b981",
+                "border": "1px solid rgba(16, 185, 129, 0.3)",
+            },
+            "Membership": {
+                "backgroundColor": "rgba(139, 92, 246, 0.2)",
+                "color": "#8b5cf6",
+                "border": "1px solid rgba(139, 92, 246, 0.3)",
+            },
+            "Start.gg": {
+                "backgroundColor": "rgba(0, 212, 255, 0.2)",
+                "color": "#00d4ff",
+                "border": "1px solid rgba(0, 212, 255, 0.3)",
+            },
+        }
+        badge_base = {
+            "padding": "0.25rem 0.5rem",
+            "borderRadius": "4px",
+            "fontSize": "0.75rem",
+            "fontWeight": "600",
+            "marginLeft": "0.25rem",
+        }
+
+        # Build list of players needing help with badge-styled requirements
         items = []
         for player in needs_help:
-            # Build missing icons string
-            missing_icons = " ".join([m["icon"] for m in player["missing"]])
-            missing_text = ", ".join([m["field"] for m in player["missing"]])
-
             display_name = player["name"]
             if player["tag"] and player["tag"] != player["name"]:
                 display_name = f"{player['name']} ({player['tag']})"
 
+            # Create badges for each missing requirement
+            missing_badges = []
+            for m in player["missing"]:
+                field = m["field"]
+                icon = m["icon"]
+                style = {**badge_base, **badge_styles.get(field, badge_styles["Payment"])}
+                missing_badges.append(html.Span(f"{icon} {field.upper()}", style=style))
+
             items.append(
                 html.Div([
-                    html.Span(missing_icons, style={"marginRight": "0.5rem"}),
-                    html.Strong(display_name, style={"color": "#fff"}),
-                    html.Span(f" — {missing_text}", style={"color": "#94a3b8", "fontSize": "0.85rem"}),
+                    # Player name with bullet point
+                    html.Div([
+                        html.Span("•", style={"color": "#ef4444", "marginRight": "0.5rem", "fontSize": "1.2rem"}),
+                        html.Span(display_name, style={"color": "#fff", "fontWeight": "500"}),
+                    ], style={"display": "flex", "alignItems": "center", "marginBottom": "0.25rem"}),
+                    # Missing badges on second line, indented
+                    html.Div(missing_badges, style={
+                        "display": "flex",
+                        "gap": "0.5rem",
+                        "flexWrap": "wrap",
+                        "marginLeft": "1rem",
+                    }),
                 ], style={
-                    "padding": "0.5rem 0",
-                    "borderBottom": "1px solid #1e293b",
+                    "padding": "0.75rem",
+                    "marginBottom": "0.5rem",
+                    "backgroundColor": "rgba(239, 68, 68, 0.05)",
+                    "borderRadius": "8px",
+                    "borderLeft": "3px solid #ef4444",
                 })
             )
 
-        return items
+        return items, str(len(needs_help))
+
+    # -------------------------------------------------------------------------
+    # Toggle "Needs Attention" collapse state
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("needs-attention-list", "style"),
+        Output("needs-attention-chevron", "children"),
+        Input("needs-attention-header", "n_clicks"),
+        State("needs-attention-list", "style"),
+        prevent_initial_call=True,
+    )
+    def toggle_needs_attention(n_clicks, current_style):
+        """Toggle the collapsed state of the Needs Attention section."""
+        current_style = current_style or {}
+        is_hidden = current_style.get("display") == "none"
+
+        if is_hidden:
+            # Expand
+            return {"marginTop": "1rem"}, "▼"
+        else:
+            # Collapse
+            return {"display": "none"}, "▶"
 
     # -------------------------------------------------------------------------
     # Tab switching - show/hide content based on selected tab
@@ -720,11 +792,12 @@ def register_callbacks(app):
         update_data = {col_id: new_val}
 
         # Fetch configurable requirements from settings
-        # Airtable checkbox semantics: default ON unless explicitly False (Task 2.1)
+        # Airtable checkbox: checked = True, unchecked = field missing (None)
+        # Use "is True" so that unchecked (None) = requirement OFF
         settings = get_active_settings() or {}
-        require_payment = settings.get("require_payment") is not False
-        require_membership = settings.get("require_membership") is not False
-        require_startgg = settings.get("require_startgg") is not False
+        require_payment = settings.get("require_payment") is True
+        require_membership = settings.get("require_membership") is True
+        require_startgg = settings.get("require_startgg") is True
 
         # Determine current field values (with the toggled value updated)
         if col_id == "payment_valid":

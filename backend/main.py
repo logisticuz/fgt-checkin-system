@@ -190,17 +190,19 @@ def compute_requirements(settings: dict) -> dict:
     """
     Compute which requirements are active based on settings.
 
-    Airtable checkbox semantics: default ON unless explicitly False.
-    - Checkbox checked = True
-    - Checkbox unchecked = field missing (None)
-    - We treat None as True (requirement is ON by default)
+    Airtable checkbox semantics:
+    - Checkbox checked = True (stored in Airtable)
+    - Checkbox unchecked = field missing/None (Airtable doesn't store False)
 
-    This ensures TOs must explicitly disable requirements.
+    We now require explicit True to enable a requirement.
+    Missing/None = requirement is OFF (disabled).
+
+    This means TOs must explicitly ENABLE each requirement they want.
     """
     return {
-        "require_payment": settings.get("require_payment") is not False,
-        "require_membership": settings.get("require_membership") is not False,
-        "require_startgg": settings.get("require_startgg") is not False,
+        "require_payment": settings.get("require_payment") is True,
+        "require_membership": settings.get("require_membership") is True,
+        "require_startgg": settings.get("require_startgg") is True,
     }
 
 
@@ -624,7 +626,10 @@ async def status_view(request: Request, name: str):
             "event_slug": event_slug,
             "games": details.get("games", []),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "swish_number": settings.get("swish_number", "123-456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+            # Pass requirements so templates can show/hide elements
+            **requirements,
         },
     )
 
@@ -666,7 +671,8 @@ async def root(request: Request):
     return templates.TemplateResponse("checkin.html", {
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "require_membership": requirements["require_membership"],
+        # Pass all requirements so frontend can compute missing array correctly
+        **requirements,
     })
 
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
@@ -798,6 +804,54 @@ async def update_player_games(request: Request):
 
     logger.info(f"Updated games for {tag}: {games}, payment_expected: {payment_expected}")
     return {"success": True, "tag": tag, "games": games, "payment_expected": payment_expected}
+
+
+@app.patch("/api/player/member", tags=["Checkin"])
+async def update_player_member(request: Request):
+    """
+    Update member status for a player after successful eBas registration.
+    Called by frontend after n8n eBas webhook returns success.
+
+    Body: { "tag": "playertag", "slug": "tournament-slug", "member": true }
+
+    This separates concerns:
+    - n8n handles external API (Sverok eBas)
+    - Backend handles internal database (Airtable)
+    """
+    try:
+        body = await request.json()
+        tag = (body.get("tag") or "").strip().lower()
+        slug = body.get("slug") or ""
+        member = body.get("member", True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not tag or not slug:
+        raise HTTPException(status_code=400, detail="tag and slug are required")
+
+    # Find the player record by tag + slug using shared airtable_api
+    checkin = get_checkin_by_tag(tag, slug)
+    if not checkin:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    record_id = checkin["record_id"]
+
+    # Update the record with member status
+    result = update_checkin(record_id, {"member": member})
+
+    if not result:
+        raise HTTPException(status_code=500, detail="Airtable update failed")
+
+    # Broadcast SSE update for dashboard
+    await sse_manager.broadcast("update", {
+        "type": "member_updated",
+        "record_id": record_id,
+        "tag": tag,
+        "member": member,
+    })
+
+    logger.info(f"Updated member status for {tag}: {member}")
+    return {"success": True, "tag": tag, "member": member}
 
 
 # === Start.gg OAuth (Admin Only) ===

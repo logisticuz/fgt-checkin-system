@@ -246,7 +246,11 @@
   <script>
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
+
+    // Configurable requirements from event settings
     const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
+    const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
+    const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
 
     // Hide personnummer field if membership not required
     if (!REQUIRE_MEMBERSHIP) {
@@ -337,7 +341,28 @@
           }
 
           // Something missing - go to register page
-          const missing = Array.isArray(data.missing) ? data.missing : [];
+          // Compute missing array from individual fields if not provided
+          // (n8n doesn't include 'missing' for already_checked_in responses)
+          let missing = [];
+          if (Array.isArray(data.missing) && data.missing.length > 0) {
+            missing = data.missing;
+          } else {
+            // Fallback: compute from individual boolean fields
+            if (data.member === false) missing.push("Membership");
+            if (data.payment_valid === false) missing.push("Payment");
+            if (data.startgg === false) missing.push("Start.gg");
+          }
+
+          // Filter missing based on what's actually required for this event
+          // This ensures disabled requirements don't show up even if n8n returns them
+          missing = missing.filter(item => {
+            const t = item.toLowerCase();
+            if (t.includes("membership")) return REQUIRE_MEMBERSHIP;
+            if (t.includes("payment")) return REQUIRE_PAYMENT;
+            if (t.includes("start")) return REQUIRE_STARTGG;
+            return true;
+          });
+
           const flags = missing.map(s => {
             const t = String(s).toLowerCase();
             if (t.includes("payment")) return "payment=true";

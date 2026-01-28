@@ -272,18 +272,23 @@
       margin-bottom: 0.25rem;
     }
 
-    .swish-qr {
-      background: #fff;
-      padding: 10px;
-      border-radius: 12px;
-      display: inline-block;
-      margin: 0.5rem 0;
+    .swish-qr-container {
+      text-align: center;
+      margin: 1rem 0;
     }
 
-    .swish-qr img {
-      width: 140px;
-      height: 140px;
-      display: block;
+    .swish-qr-image {
+      width: 180px;
+      height: 180px;
+      border-radius: 12px;
+      background: white;
+      padding: 8px;
+    }
+
+    .swish-qr-label {
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 0.5rem;
     }
 
     .swish-number-box {
@@ -397,20 +402,18 @@
         0 kr
       </div>
 
-      <!-- Desktop: Show QR code -->
+      <!-- Desktop: Show QR code and Swish number -->
       <div id="swish-desktop" class="hidden">
-        <div class="swish-qr">
-          <img src="/static/swish-QR.png" alt="Swish QR">
+        <div class="swish-qr-container">
+          <img src="/static/swish-QR.png" alt="Swish QR Code" class="swish-qr-image">
+          <p class="swish-qr-label">Scan with Swish app</p>
         </div>
-        <p style="color: #aaa; font-size: 0.85rem; margin-top: 0.5rem;">
-          Scan with Swish app
-        </p>
 
         <div class="swish-divider">or enter manually</div>
 
         <div class="swish-number-box">
           <div class="swish-number-label">Swish number</div>
-          <div class="swish-number">123-043 78 22</div>
+          <div class="swish-number">{{ swish_number | default('123-456 78 90') }}</div>
         </div>
       </div>
 
@@ -424,13 +427,13 @@
 
         <div class="swish-number-box">
           <div class="swish-number-label">Swish number</div>
-          <div class="swish-number">123-043 78 22</div>
+          <div class="swish-number">{{ swish_number | default('123-456 78 90') }}</div>
         </div>
       </div>
 
       <!-- Important note -->
       <div class="swish-note">
-        <strong>25 kr per game.</strong><br>
+        <strong>{{ swish_expected_per_game | default(25) }} kr per game.</strong><br>
         Write your <strong>tag</strong> and <strong>which games</strong> you're entering in the Swish message!
       </div>
     </div>
@@ -450,8 +453,8 @@
     // Name is passed from backend template
     const name = "{{ name }}";
 
-    // Swish config
-    const SWISH_NUMBER = "1230437822";
+    // Swish config (from Airtable settings)
+    const SWISH_NUMBER = "{{ swish_number | default('1234567890') | replace('-', '') | replace(' ', '') }}";
     const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
 
     // Mobile detection

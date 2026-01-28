@@ -41,18 +41,18 @@ def compute_requirements(settings: Dict[str, Any]) -> Dict[str, bool]:
     Airtable checkbox semantics:
     - Checkbox checked → True
     - Checkbox unchecked → field missing (None)
-    - We treat None as True (requirement is ON by default)
+    - We treat None as False (requirement is OFF when unchecked)
 
-    This ensures TOs must explicitly disable requirements.
+    This allows TOs to disable requirements by unchecking the checkbox.
     All layers (backend, dashboard, n8n) should use this same logic.
 
     NOTE: This layer does NOT decide status - status is DERIVED data
     calculated by the consuming layer using the READY formula.
     """
     return {
-        "require_payment": settings.get("require_payment") is not False,
-        "require_membership": settings.get("require_membership") is not False,
-        "require_startgg": settings.get("require_startgg") is not False,
+        "require_payment": settings.get("require_payment") is True,
+        "require_membership": settings.get("require_membership") is True,
+        "require_startgg": settings.get("require_startgg") is True,
     }
 
 
