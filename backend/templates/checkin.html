@@ -61,6 +61,65 @@
       font-weight: 500;
     }
 
+    /* Tooltip for info icon */
+    .label-with-info {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .info-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: rgba(88, 170, 255, 0.2);
+      color: #58aaff;
+      font-size: 0.7rem;
+      font-weight: 600;
+      cursor: help;
+      position: relative;
+    }
+
+    .info-icon:hover .tooltip,
+    .info-icon.active .tooltip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .tooltip {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%) translateY(5px);
+      background: #1a1a2e;
+      border: 1px solid rgba(88, 170, 255, 0.3);
+      color: #e0e0e0;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 400;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.2s ease;
+      z-index: 100;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .tooltip::after {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: #1a1a2e;
+    }
+
     input[type="text"],
     input[type="tel"],
     select {
@@ -219,7 +278,13 @@
       </div>
 
       <div class="form-group">
-        <label for="tag">Tag / Gamertag</label>
+        <label for="tag" class="label-with-info">
+          Tag / Gamertag
+          <span class="info-icon" id="tag-info">
+            i
+            <span class="tooltip">If registered on Start.gg, use the exact same tag</span>
+          </span>
+        </label>
         <input type="text" id="tag" name="tag" placeholder="Your player tag" required>
       </div>
 
@@ -230,7 +295,7 @@
 
       <div class="consent">
         <input type="checkbox" id="consent" required>
-        <span>I consent to my data being used to validate membership and tournament registration.</span>
+        <span id="consent-text">I consent to my data being used to validate tournament registration.</span>
       </div>
 
       <button type="submit" class="btn-submit">Check In</button>
@@ -259,6 +324,16 @@
       // Make personnummer required if membership is required
       document.getElementById("personnummer").setAttribute("required", "");
     }
+
+    // Update consent text based on active requirements
+    (function updateConsentText() {
+      const parts = [];
+      if (REQUIRE_MEMBERSHIP) parts.push("membership");
+      if (REQUIRE_STARTGG) parts.push("tournament registration");
+      if (parts.length === 0) parts.push("check-in");
+      document.getElementById("consent-text").textContent =
+        "I consent to my data being used to validate " + parts.join(" and ") + ".";
+    })();
 
     // Error display helpers (using textContent to prevent XSS)
     function showErrors(errors) {
@@ -382,6 +457,16 @@
         btn.disabled = false;
         btn.textContent = originalText;
       }
+    });
+
+    // Tooltip click handling
+    const infoIcon = document.getElementById("tag-info");
+    infoIcon.addEventListener("click", (e) => {
+      e.stopPropagation();
+      infoIcon.classList.toggle("active");
+    });
+    document.addEventListener("click", () => {
+      infoIcon.classList.remove("active");
     });
   </script>
 </body>

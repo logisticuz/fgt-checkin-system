@@ -47,6 +47,7 @@ OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/d
 OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
+SSE_TOKEN = os.getenv("SSE_TOKEN")  # token for SSE authentication (used instead of Basic Auth)
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # for fetching tournament events
 
 # If n8n is protected with Basic Auth, set these for proxy + health
@@ -335,10 +336,13 @@ def get_active_settings() -> dict:
         "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
         "active_event_slug": fields.get("active_event_slug", ""),
         "startgg_event_ids": fields.get("startgg_event_ids", []),
+        "event_display_name": fields.get("event_display_name", ""),
         # Configurable check-in requirements
         "require_payment": fields.get("require_payment"),
         "require_membership": fields.get("require_membership"),
         "require_startgg": fields.get("require_startgg"),
+        # Optional features
+        "offer_membership": fields.get("offer_membership"),
     }
 
 
@@ -628,6 +632,9 @@ async def status_view(request: Request, name: str):
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123-456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+            # Optional membership offer (shown on Ready page when membership not required AND not already a member)
+            "offer_membership": settings.get("offer_membership") is True,
+            "is_member": status.get("member", False),
             # Pass requirements so templates can show/hide elements
             **requirements,
         },
@@ -904,11 +911,17 @@ async def auth_callback(code: str, admin_key: str):
 
 # === SSE Endpoints ===
 @app.get("/api/events/stream", tags=["SSE"])
-async def sse_stream(request: Request):
+async def sse_stream(request: Request, token: str = None):
     """
     Server-Sent Events endpoint for real-time dashboard updates.
     Clients connect here and receive events when check-ins happen.
+
+    In production, requires SSE_TOKEN for authentication (since Basic Auth
+    doesn't work with EventSource). Token is passed as query parameter.
     """
+    # Validate SSE token if configured
+    if SSE_TOKEN and token != SSE_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing SSE token")
     async def event_generator():
         queue = await sse_manager.connect()
         try:

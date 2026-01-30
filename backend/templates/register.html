@@ -340,17 +340,21 @@
     // State from URL params
     // Override "needs" flags based on what's REQUIRED for this event
     const params = new URLSearchParams(window.location.search);
+    // membership_only=true means user came from Ready page to voluntarily become member
+    const membershipOnly = params.get("membership_only") === "true";
     const state = {
-      // Only show eBas section if membership is REQUIRED AND player needs it
-      needsEbas: REQUIRE_MEMBERSHIP && params.get("ebas") === "true",
-      // Only show payment section if payment is REQUIRED AND player needs it
-      needsPayment: REQUIRE_PAYMENT && params.get("payment") === "true",
-      // Only show Start.gg section if Start.gg is REQUIRED AND player is not registered
-      needsStartgg: REQUIRE_STARTGG && params.get("startgg") === "false",
+      // Show eBas section if: membership_only mode OR (membership required AND player needs it)
+      needsEbas: membershipOnly || (REQUIRE_MEMBERSHIP && params.get("ebas") === "true"),
+      // Only show payment section if payment is REQUIRED AND player needs it (not in membership_only mode)
+      needsPayment: !membershipOnly && REQUIRE_PAYMENT && params.get("payment") === "true",
+      // Only show Start.gg section if Start.gg is REQUIRED AND player is not registered (not in membership_only mode)
+      needsStartgg: !membershipOnly && REQUIRE_STARTGG && params.get("startgg") === "false",
+      // membership_only mode - simplified flow just for optional membership
+      membershipOnly: membershipOnly,
       name: params.get("name") || localStorage.getItem("namn") || "",
       personnummer: localStorage.getItem("personnummer") || "",
       phone: localStorage.getItem("telefon") || "",
-      tag: localStorage.getItem("tag") || "",
+      tag: params.get("tag") || localStorage.getItem("tag") || "",
       gamesCount: parseInt(params.get("games") || "1", 10),
       eventSlug: params.get("event") || localStorage.getItem("eventSlug") || ""
     };
@@ -422,6 +426,22 @@
 
     // Initialize UI based on state
     function initUI() {
+      // Special handling for membership_only mode (voluntary member signup from Ready page)
+      if (state.membershipOnly) {
+        // Hide the status summary - they're already checked in
+        document.querySelector(".status-summary").style.display = "none";
+        // Update header for membership-only flow
+        document.querySelector("header h1").textContent = "Become a Member";
+        document.querySelector("header p").textContent = "Support us and get info about future events - it's free!";
+        // Show only the eBas section
+        document.getElementById("section-ebas").classList.remove("hidden");
+        // Pre-fill tag if provided
+        if (state.tag) {
+          localStorage.setItem("tag", state.tag);
+        }
+        return; // Skip rest of init
+      }
+
       // Hide status items that are not required for this event
       if (!REQUIRE_STARTGG) {
         document.getElementById("status-startgg").style.display = "none";
@@ -564,10 +584,19 @@
 
           showMessage(data.already_member
             ? "You are already a member - perfect!"
-            : "Membership registered!", "success");
+            : "Membership registered! Thank you for supporting us!", "success");
           state.needsEbas = false;
           setStatus("status-member", true);
           document.getElementById("section-ebas").classList.add("hidden");
+
+          // In membership_only mode, redirect back to status page after short delay
+          if (state.membershipOnly) {
+            setTimeout(() => {
+              window.location.href = `/status/${encodeURIComponent(state.name)}`;
+            }, 2000);
+            return;
+          }
+
           updateFinalButton();
         } else {
           // Handle different response formats from n8n

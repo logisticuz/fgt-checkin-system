@@ -59,6 +59,23 @@
         }
     }
 
+    function getSSEToken() {
+        // Read token from Dash dcc.Store (rendered as hidden div with JSON)
+        const storeEl = document.getElementById('sse-token-store');
+        if (storeEl) {
+            try {
+                // Dash stores data in a data attribute or as text content
+                const data = storeEl.textContent || storeEl.getAttribute('data-dash-is-loading');
+                if (data && data !== 'null' && data !== '""') {
+                    return JSON.parse(data);
+                }
+            } catch (e) {
+                console.log('Could not parse SSE token from store');
+            }
+        }
+        return '';
+    }
+
     function connectSSE() {
         if (eventSource) {
             eventSource.close();
@@ -67,12 +84,18 @@
         updateIndicator('connecting');
 
         // Connect to backend SSE endpoint
-        // In dev: localhost:8000, in prod: same origin (nginx proxies)
-        const sseUrl = window.location.port === '8050'
+        // In dev (port 8050 direct): localhost:8000, otherwise: same origin (nginx proxies)
+        let sseUrl = window.location.port === '8050'
             ? 'http://localhost:8000/api/events/stream'
             : '/api/events/stream';
 
-        console.log('Connecting to SSE:', sseUrl);
+        // Add token for authentication (required in prod where Basic Auth doesn't work with EventSource)
+        const token = getSSEToken();
+        if (token) {
+            sseUrl += '?token=' + encodeURIComponent(token);
+        }
+
+        console.log('Connecting to SSE:', sseUrl.replace(/token=.*/, 'token=***'));
 
         try {
             eventSource = new EventSource(sseUrl);

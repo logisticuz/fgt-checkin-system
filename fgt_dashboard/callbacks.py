@@ -51,8 +51,9 @@ def register_callbacks(app):
         Input("active-filter", "data"),
         Input("search-input", "value"),
         Input("game-filter", "value"),
+        State("requirements-store", "data"),
     )
-    def update_table(selected_slug, _interval, _clicks, _sse_trigger, visible_columns, active_filter, search_query, game_filter):
+    def update_table(selected_slug, _interval, _clicks, _sse_trigger, visible_columns, active_filter, search_query, game_filter, requirements):
         """
         Refresh the check-ins table when:
         - user selects a different event slug
@@ -67,6 +68,13 @@ def register_callbacks(app):
         # Default columns if none specified
         if not visible_columns:
             visible_columns = ["name", "tag", "telephone", "member", "startgg", "is_guest", "payment_valid", "status"]
+
+        # Hide columns for disabled requirements
+        requirements = requirements or {}
+        if requirements.get("require_membership") is not True:
+            visible_columns = [c for c in visible_columns if c != "member"]
+        if requirements.get("require_payment") is not True:
+            visible_columns = [c for c in visible_columns if c != "payment_valid"]
 
         # Handle special "__ALL__" value for debugging
         is_all_events = selected_slug == "__ALL__"
@@ -524,11 +532,11 @@ def register_callbacks(app):
         if not table_data:
             return html.P("No players checked in yet.", style={"color": "#888"}), "0"
 
-        # Get active requirements (default ON unless explicitly False)
+        # Get active requirements (only enabled when explicitly True)
         requirements = requirements or {}
-        require_membership = requirements.get("require_membership") is not False
-        require_payment = requirements.get("require_payment") is not False
-        require_startgg = requirements.get("require_startgg") is not False
+        require_membership = requirements.get("require_membership") is True
+        require_payment = requirements.get("require_payment") is True
+        require_startgg = requirements.get("require_startgg") is True
 
         # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
         def is_ok(val):
@@ -696,11 +704,11 @@ def register_callbacks(app):
             hidden_style = {"display": "none"}
             return "0", "0", "0", "0", hidden_style
 
-        # Get active requirements (default ON unless explicitly False)
+        # Get active requirements (only enabled when explicitly True)
         requirements = requirements or {}
-        require_membership = requirements.get("require_membership") is not False
-        require_payment = requirements.get("require_payment") is not False
-        require_startgg = requirements.get("require_startgg") is not False
+        require_membership = requirements.get("require_membership") is True
+        require_payment = requirements.get("require_payment") is True
+        require_startgg = requirements.get("require_startgg") is True
 
         # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
         def is_ok(val):
@@ -989,25 +997,44 @@ def register_callbacks(app):
                 style={"color": "#f59e0b"}
             )
 
-        # Build DataFrame with relevant columns for Start.gg import
+        # Build export data grouped by game
+        # Players registered for multiple games are duplicated to each game section
         export_data = []
         for g in guests:
-            export_data.append({
-                "Name": g.get("name", ""),
-                "Tag": g.get("tag", ""),
-                "Email": g.get("email", ""),
-                "Phone": g.get("telephone", ""),
-                "Games": g.get("tournament_games_registered", ""),
-            })
+            tag = g.get("tag", "")
+            games_raw = g.get("tournament_games_registered", "")
 
+            # Parse games (could be string "Game1, Game2" or list ["Game1", "Game2"])
+            if isinstance(games_raw, list):
+                games = games_raw
+            elif isinstance(games_raw, str) and games_raw:
+                games = [game.strip() for game in games_raw.split(",")]
+            else:
+                games = ["Unknown"]
+
+            # Add one row per game for this player
+            for game in games:
+                if game:  # Skip empty
+                    export_data.append({
+                        "Tag": tag,
+                        "Game": game,
+                    })
+
+        # Sort by Game so all players per game are grouped together
         df = pd.DataFrame(export_data)
+        if not df.empty:
+            df = df.sort_values(by="Game", key=lambda x: x.str.upper())
 
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"guests_export_{timestamp}.csv"
 
+        # Count unique guests vs total rows (some duplicated across games)
+        unique_guests = len(guests)
+        total_rows = len(df)
+
         feedback = html.Span(
-            f"✅ Exported {len(guests)} guests to CSV",
+            f"✅ Exported {unique_guests} guests ({total_rows} entries across games)",
             style={"color": "#10b981"}
         )
 
@@ -1023,10 +1050,11 @@ def register_callbacks(app):
         State("require-payment-toggle", "value"),
         State("require-membership-toggle", "value"),
         State("require-startgg-toggle", "value"),
+        State("offer-membership-toggle", "value"),
         State("requirements-store", "data"),
         prevent_initial_call=True,
     )
-    def save_requirements(n_clicks, req_payment, req_membership, req_startgg, current_store):
+    def save_requirements(n_clicks, req_payment, req_membership, req_startgg, offer_membership, current_store):
         """Save check-in requirement settings to Airtable."""
         if not n_clicks:
             return no_update, no_update
@@ -1045,6 +1073,7 @@ def register_callbacks(app):
             "require_payment": bool(req_payment),
             "require_membership": bool(req_membership),
             "require_startgg": bool(req_startgg),
+            "offer_membership": bool(offer_membership),
         }
 
         # Update Airtable

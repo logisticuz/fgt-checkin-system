@@ -2,12 +2,16 @@
 """
 FGC Dashboard Layout - Modern Esports Theme
 """
+import os
 from dash import html, dcc, dash_table
 from shared.airtable_api import get_all_event_slugs, get_active_slug, get_checkins, get_active_settings
 import pandas as pd
 import logging
 
 logger = logging.getLogger(__name__)
+
+# SSE token for authenticated real-time updates
+SSE_TOKEN = os.getenv("SSE_TOKEN", "")
 
 # Color palette - Esports theme
 COLORS = {
@@ -187,10 +191,18 @@ def create_layout():
         active_slug.replace("-", " ").title() if active_slug else "No Event Selected"
     )
 
+    # Build visible columns based on active requirements
+    default_columns = ["name", "tag", "status", "telephone", "startgg", "is_guest", "tournament_games_registered"]
+    if settings.get("require_payment") is True:
+        default_columns.insert(3, "payment_valid")
+    if settings.get("require_membership") is True:
+        default_columns.insert(4 if "payment_valid" in default_columns else 3, "member")
+
     return html.Div(style=STYLES["page"], children=[
         # Data stores
+        dcc.Store(id="sse-token-store", data=SSE_TOKEN),  # Token for SSE auth
         dcc.Store(id="events-map-store", data=[]),
-        dcc.Store(id="visible-columns-store", data=["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "is_guest", "tournament_games_registered"]),
+        dcc.Store(id="visible-columns-store", data=default_columns),
         dcc.Store(id="active-filter", data="all"),  # Current filter: all, pending, ready, no-payment
         dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
         dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
@@ -606,6 +618,23 @@ def create_layout():
                             ]),
                         ]),
 
+                        html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.5rem 0"}),
+
+                        # Offer Membership (optional)
+                        html.Div(style={"marginBottom": "1.5rem", "display": "flex", "alignItems": "center", "gap": "0.75rem"}, children=[
+                            dcc.Checklist(
+                                id="offer-membership-toggle",
+                                options=[{"label": "", "value": True}],
+                                value=[True] if settings.get("offer_membership") is True else [],
+                                style={"display": "inline-block"},
+                                inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
+                            ),
+                            html.Div(children=[
+                                html.Span("Offer Membership (optional)", style={"fontWeight": "600", "color": COLORS["text_primary"]}),
+                                html.P("Show 'Become a member' on Ready page even when not required", style={"margin": "0", "fontSize": "0.75rem", "color": COLORS["text_muted"]}),
+                            ]),
+                        ]),
+
                         html.Button("Save Requirements", id="btn-save-requirements", n_clicks=0, style=STYLES["button_primary"]),
                         html.Div(id="requirements-save-feedback", style={"marginTop": "1rem"}),
                     ]),
@@ -669,21 +698,23 @@ def create_layout():
                         html.P("Choose which columns to display in the check-ins table.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
                         dcc.Dropdown(
                             id="column-visibility-dropdown",
-                            options=[
+                            options=[opt for opt in [
                                 {"label": "Name", "value": "name"},
                                 {"label": "Tag", "value": "tag"},
                                 {"label": "Status", "value": "status"},
-                                {"label": "Payment", "value": "payment_valid"},
+                                {"label": "Payment", "value": "payment_valid"} if settings.get("require_payment") is True else None,
                                 {"label": "Phone", "value": "telephone"},
-                                {"label": "Member", "value": "member"},
+                                {"label": "Member", "value": "member"} if settings.get("require_membership") is True else None,
                                 {"label": "Start.gg", "value": "startgg"},
                                 {"label": "Guest", "value": "is_guest"},
                                 {"label": "Games", "value": "tournament_games_registered"},
                                 {"label": "Email", "value": "email"},
                                 {"label": "UUID", "value": "UUID"},
                                 {"label": "Created", "value": "created"},
-                            ],
-                            value=["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "is_guest", "tournament_games_registered"],  # Default TO view
+                            ] if opt is not None],
+                            value=[c for c in ["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "is_guest", "tournament_games_registered"]
+                                   if not (c == "payment_valid" and settings.get("require_payment") is not True)
+                                   and not (c == "member" and settings.get("require_membership") is not True)],
                             multi=True,
                             clearable=False,
                             style={"backgroundColor": COLORS["bg_dark"]},

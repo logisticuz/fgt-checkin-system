@@ -154,6 +154,43 @@
       text-align: center;
     }
 
+    /* Support section */
+    .support-section {
+      background: rgba(139, 92, 246, 0.1);
+      border: 1px solid rgba(139, 92, 246, 0.25);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .support-section h3 {
+      color: #a78bfa;
+      font-size: 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+    .support-section p {
+      color: #94a3b8;
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+    }
+    .support-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(139, 92, 246, 0.2);
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      color: #a78bfa;
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .support-link:hover {
+      background: rgba(139, 92, 246, 0.3);
+      transform: translateY(-2px);
+    }
+
     /* Logo */
     .logo {
       max-width: 180px;
@@ -208,8 +245,18 @@
 
     {% if event_slug %}
     <div class="bracket-wrapper">
-      <a href="https://start.gg/{{ event_slug }}" target="_blank" class="bracket-link">
-        View Bracket on Start.gg
+      <a href="https://start.gg/{{ event_slug }}/events" target="_blank" class="bracket-link">
+        View Brackets on Start.gg
+      </a>
+    </div>
+    {% endif %}
+
+    {% if offer_membership and not require_membership and not is_member %}
+    <div class="support-section">
+      <h3>🎫 Support FGC Trollhättan</h3>
+      <p>Become a member - it's free and helps us keep running events! You'll also get info about future tournaments and community updates.</p>
+      <a href="/register?name={{ name | urlencode }}&tag={{ tag | urlencode }}&event={{ event_slug | urlencode }}&membership_only=true" class="support-link">
+        Join as Member →
       </a>
     </div>
     {% endif %}
