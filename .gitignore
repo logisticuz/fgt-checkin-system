@@ -69,6 +69,7 @@ fix_events_null.py
 image.png
 n8n-backup-*/
 nul
+nginx/htpasswd
 
 # -- Agent files -----------------------
 AGENTS.md
