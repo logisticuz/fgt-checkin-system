@@ -76,7 +76,7 @@ services:
     environment:
       - ADMIN_AUTH_COOKIE_TOKEN=${ADMIN_AUTH_COOKIE_TOKEN}
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/www:/var/www/certbot:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./nginx/htpasswd:/etc/nginx/.htpasswd:ro
