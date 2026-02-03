@@ -443,6 +443,13 @@
     </button>
     <p class="auto-refresh-note">Auto-refreshes every 10 seconds</p>
 
+    <!-- Kiosk mode: show back button for next person in queue -->
+    <div id="kiosk-back" class="hidden" style="margin-top: 1rem;">
+      <a href="/kiosk" class="btn-refresh" style="text-decoration: none; background: #666;">
+        ← Next person
+      </a>
+    </div>
+
     <footer>
       <img src="/static/logo.png" alt="FGC Trollhattan" class="logo">
       <p>Problems? Talk to a tournament organizer.</p>
@@ -452,6 +459,12 @@
   <script>
     // Name is passed from backend template
     const name = "{{ name }}";
+
+    // Kiosk mode - show back button and redirect to /kiosk when ready
+    const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
+    if (KIOSK_MODE) {
+      document.getElementById("kiosk-back").classList.remove("hidden");
+    }
 
     // Swish config (from Airtable settings)
     const SWISH_NUMBER = "{{ swish_number | default('1234567890') | replace('-', '') | replace(' ', '') }}";
@@ -582,7 +595,8 @@
           // Cleanup sensitive data on success
           localStorage.removeItem("personnummer");
           localStorage.removeItem("telefon");
-          window.location.href = `/status/${encodeURIComponent(name)}`;
+          const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
+          window.location.href = `/status/${encodeURIComponent(name)}${kioskParam}`;
           return;
         }
 

@@ -278,6 +278,34 @@
     audioEl.addEventListener("error", () => {
       console.warn("Could not play confirmation sound");
     });
+
+    // Kiosk mode - auto-redirect back to start after delay
+    const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
+    if (KIOSK_MODE) {
+      const REDIRECT_DELAY = 5000; // 5 seconds
+      let countdown = REDIRECT_DELAY / 1000;
+
+      // Add countdown indicator
+      const footer = document.querySelector("footer p");
+      if (footer) {
+        footer.innerHTML = `Good luck! <br><span id="kiosk-countdown" style="color: #58aaff; font-size: 0.8rem;">Returning to check-in in ${countdown}s...</span>`;
+      }
+
+      // Update countdown every second
+      const countdownInterval = setInterval(() => {
+        countdown--;
+        const el = document.getElementById("kiosk-countdown");
+        if (el && countdown > 0) {
+          el.textContent = `Returning to check-in in ${countdown}s...`;
+        }
+      }, 1000);
+
+      // Redirect after delay
+      setTimeout(() => {
+        clearInterval(countdownInterval);
+        window.location.href = "/kiosk";
+      }, REDIRECT_DELAY);
+    }
   </script>
 </body>
 </html>

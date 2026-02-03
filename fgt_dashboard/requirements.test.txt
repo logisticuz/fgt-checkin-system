@@ -1,0 +1,4 @@
+# Test-specific dependencies
+pytest
+dash[testing]
+pytest-mock

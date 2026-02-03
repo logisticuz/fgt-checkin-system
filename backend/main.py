@@ -607,7 +607,7 @@ def get_participant_details(namn: str) -> dict:
 
 
 @app.get("/status/{name}", response_class=HTMLResponse, tags=["Checkin"])
-async def status_view(request: Request, name: str):
+async def status_view(request: Request, name: str, kiosk: bool = False):
     status = check_participant_status(name)
     details = get_participant_details(name)
     settings = get_active_settings()
@@ -636,6 +636,8 @@ async def status_view(request: Request, name: str):
             # Optional membership offer (shown on Ready page when membership not required AND not already a member)
             "offer_membership": settings.get("offer_membership") is True,
             "is_member": status.get("member", False),
+            # Kiosk mode - auto-redirect after showing status
+            "kiosk": kiosk,
             # Pass requirements so templates can show/hide elements
             **requirements,
         },
@@ -679,7 +681,24 @@ async def root(request: Request):
     return templates.TemplateResponse("checkin.html", {
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        "kiosk": False,
         # Pass all requirements so frontend can compute missing array correctly
+        **requirements,
+    })
+
+
+@app.get("/kiosk", response_class=HTMLResponse, tags=["Checkin"])
+async def kiosk_mode(request: Request):
+    """
+    Kiosk mode for self-service check-in stations.
+    After check-in, automatically redirects back to this page.
+    """
+    settings = get_active_settings()
+    requirements = compute_requirements(settings)
+    return templates.TemplateResponse("checkin.html", {
+        "request": request,
+        "n8n_token": N8N_WEBHOOK_TOKEN or "",
+        "kiosk": True,
         **requirements,
     })
 

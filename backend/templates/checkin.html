@@ -317,6 +317,9 @@
     const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
     const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
 
+    // Kiosk mode - auto-redirect back to start after check-in
+    const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
+
     // Hide personnummer field if membership not required
     if (!REQUIRE_MEMBERSHIP) {
       document.getElementById("personnummer-group").style.display = "none";
@@ -408,7 +411,8 @@
 
         if (data.ready) {
           // Player is ready - go to success page
-          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}`;
+          const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
+          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}${kioskParam}`;
         } else {
           // Store event slug for register page
           if (data.slug) {
