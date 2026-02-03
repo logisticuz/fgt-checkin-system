@@ -64,6 +64,10 @@ CHANGELOG*.md
 context/
 todoishhh.txt
 
+# Keep changelogs tracked
+!docs/changelogs/
+!docs/changelogs/**
+
 # -- Local-only files ------------------
 fix_events_null.py
 image.png

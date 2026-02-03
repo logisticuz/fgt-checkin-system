@@ -1,1 +1,517 @@
-{"updatedAt":"2026-01-30T07:35:23.062Z","createdAt":"2025-12-16T14:14:49.098Z","id":"5zyWxQKRA7JcyuN3","name":"FGC THN - eBas Membership Check","description":null,"active":true,"isArchived":false,"nodes":[{"parameters":{"httpMethod":"POST","path":"ebas/check","responseMode":"lastNode","options":{}},"id":"webhook-ebas-check","name":"Webhook - eBas Check","type":"n8n-nodes-base.webhook","typeVersion":1,"position":[112,208],"webhookId":"ebas-check"},{"parameters":{"jsCode":"// Normalize personnummer to 12 digits (YYYYMMDDXXXX)\nlet pnrRaw = $json.body?.personnummer ?? $json.personnummer ?? null;\n\nif (!pnrRaw) {\n  return [{ json: { \n    isMember: false, \n    skipEbas: true, \n    message: \"Inget personnummer angivet\" \n  }}];\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  return [{ json: { \n    isMember: false, \n    error: true, \n    message: \"Ogiltigt personnummer-format\" \n  }}];\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nreturn [{ json: { \n  ...$json, \n  _pnr_normalized: pnr \n}}];"},"name":"Normalize Personnummer","type":"n8n-nodes-base.code","typeVersion":2,"position":[320,208],"id":"normalize-pnr"},{"parameters":{"method":"POST","url":"https://ebas.sverok.se/apis/confirm_membership.json","sendBody":true,"specifyBody":"json","jsonBody":"={\n  \"request\": {\n    \"action\": \"confirm_membership\",\n    \"association_number\": \"{{ $env.EBAS_ASSOC }}\",\n    \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n    \"year_id\": {{ new Date().getFullYear() }},\n    \"socialsecuritynumber\": \"{{ $json._pnr_normalized }}\"\n  }\n}","options":{}},"name":"Call eBas confirm_membership","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[560,208],"id":"call-ebas-api"},{"parameters":{"jsCode":"// Parse eBas confirm_membership response\n// Expected response: { response: { member_found: true/false } }\n\nconst response = $json;\nconst memberFound = response?.response?.member_found === true;\n\n// Remove sensitive data before returning\nconst { _pnr_normalized, personnummer, ...safeData } = $input.first().json;\n\nreturn [{ \n  json: { \n    isMember: memberFound,\n    message: memberFound ? \"Medlem i Sverok\" : \"Ej medlem i Sverok\"\n  } \n}];"},"name":"Parse Response","type":"n8n-nodes-base.code","typeVersion":2,"position":[800,208],"id":"parse-response"},{"parameters":{"content":"## eBas Membership Check Sub-workflow\n\n**Purpose:** Verify if a person is a registered Sverok member.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Why Sverok membership?**\nSwedish gaming associations require membership for insurance coverage at events.\nSverok is the Swedish Gaming Federation.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isMember\": true/false,\n  \"message\": \"Medlem i Sverok\" / \"Ej medlem\"\n}\n```\n\n**Privacy:** Personnummer is NOT stored - only the boolean result.\nPersonnummer is cleared from localStorage after check-in.","height":596,"width":500,"color":4},"type":"n8n-nodes-base.stickyNote","position":[-320,-352],"typeVersion":1,"id":"note-ebas-overview","name":"Overview"},{"parameters":{"content":"## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX","height":324,"width":340,"color":6},"type":"n8n-nodes-base.stickyNote","position":[224,-352],"typeVersion":1,"id":"note-ebas-normalize","name":"Normalize"},{"parameters":{"content":"## eBas API Call\n\n**Endpoint:** confirm_membership.json\n**Auth:** API key (env: EBAS_API_KEY)\n**Assoc:** F161215-9 (FGC Trollhättan)\n\nChecks if personnummer is registered as member for current year.","height":224,"width":320,"color":5},"type":"n8n-nodes-base.stickyNote","position":[704,-336],"typeVersion":1,"id":"note-ebas-api","name":"API Call"},{"parameters":{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"skip-check","leftValue":"={{ $json.skipEbas }}","rightValue":true,"operator":{"type":"boolean","operation":"equals"}}],"combinator":"and"},"options":{}},"id":"if-skip-ebas","name":"IF Skip eBas","type":"n8n-nodes-base.if","typeVersion":2,"position":[-200,0]},{"parameters":{"jsCode":"// Return early - no personnummer provided\nreturn [{ json: { isMember: false, skipped: true, message: 'Inget personnummer angivet' }}];"},"id":"skip-return","name":"Skip - Return False","type":"n8n-nodes-base.code","typeVersion":2,"position":[-50,-100]}],"connections":{"Webhook - eBas Check":{"main":[[{"node":"Normalize Personnummer","type":"main","index":0}]]},"Normalize Personnummer":{"main":[[{"node":"IF Skip eBas","type":"main","index":0}]]},"Call eBas confirm_membership":{"main":[[{"node":"Parse Response","type":"main","index":0}]]},"IF Skip eBas":{"main":[[{"node":"Skip - Return False","type":"main","index":0}],[{"node":"Call eBas confirm_membership","type":"main","index":0}]]}},"settings":{"executionOrder":"v1","callerPolicy":"workflowsFromSameOwner","availableInMCP":false},"staticData":null,"meta":null,"pinData":{},"versionId":"259229f0-7ee2-4be3-8fa0-47a515ae138a","activeVersionId":"259229f0-7ee2-4be3-8fa0-47a515ae138a","versionCounter":77,"triggerCount":1,"shared":[{"updatedAt":"2025-12-16T14:14:49.106Z","createdAt":"2025-12-16T14:14:49.106Z","role":"workflow:owner","workflowId":"5zyWxQKRA7JcyuN3","projectId":"tR98KroyNUpJnsHc","project":{"updatedAt":"2025-08-29T10:50:07.477Z","createdAt":"2025-08-29T10:29:10.874Z","id":"tR98KroyNUpJnsHc","name":"viktor molina <viktor.molina@live.se>","type":"personal","icon":null,"description":null,"projectRelations":[{"updatedAt":"2025-08-29T10:29:10.874Z","createdAt":"2025-08-29T10:29:10.874Z","userId":"901af8b3-4c6c-4e09-b248-2441b0adba4f","projectId":"tR98KroyNUpJnsHc","user":{"updatedAt":"2026-01-30T08:05:21.000Z","createdAt":"2025-08-29T10:29:10.386Z","id":"901af8b3-4c6c-4e09-b248-2441b0adba4f","email":"viktor.molina@live.se","firstName":"viktor","lastName":"molina","personalizationAnswers":{"version":"v4","personalization_survey_submitted_at":"2025-08-29T10:51:38.359Z","personalization_survey_n8n_version":"1.106.3","automationGoalDevops":["ticketing-systems-integrations","reporting","monitoring-alerting","incident-response","data-syncing","cloud-infrastructure-orchestration","ci-cd"],"companyIndustryExtended":["other"],"otherCompanyIndustryExtended":"Im open to anything, freelancing and educating myself","companySize":"<20","companyType":"other","role":"engineering","reportedSource":"linkedin"},"settings":{"userActivated":true,"easyAIWorkflowOnboarded":true,"firstSuccessfulWorkflowId":"lD267zmGlYg2kfPt","userActivatedAt":1756545031075,"npsSurvey":{"responded":true,"lastShownAt":1758143169396}},"disabled":false,"mfaEnabled":false,"lastActiveAt":"2026-01-30","isPending":false}}]}}],"tags":[],"activeVersion":{"updatedAt":"2026-01-30T07:35:23.047Z","createdAt":"2026-01-30T07:35:23.047Z","versionId":"259229f0-7ee2-4be3-8fa0-47a515ae138a","workflowId":"5zyWxQKRA7JcyuN3","nodes":[{"parameters":{"httpMethod":"POST","path":"ebas/check","responseMode":"lastNode","options":{}},"id":"webhook-ebas-check","name":"Webhook - eBas Check","type":"n8n-nodes-base.webhook","typeVersion":1,"position":[112,208],"webhookId":"ebas-check"},{"parameters":{"jsCode":"// Normalize personnummer to 12 digits (YYYYMMDDXXXX)\nlet pnrRaw = $json.body?.personnummer ?? $json.personnummer ?? null;\n\nif (!pnrRaw) {\n  return [{ json: { \n    isMember: false, \n    skipEbas: true, \n    message: \"Inget personnummer angivet\" \n  }}];\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  return [{ json: { \n    isMember: false, \n    error: true, \n    message: \"Ogiltigt personnummer-format\" \n  }}];\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nreturn [{ json: { \n  ...$json, \n  _pnr_normalized: pnr \n}}];"},"name":"Normalize Personnummer","type":"n8n-nodes-base.code","typeVersion":2,"position":[320,208],"id":"normalize-pnr"},{"parameters":{"method":"POST","url":"https://ebas.sverok.se/apis/confirm_membership.json","sendBody":true,"specifyBody":"json","jsonBody":"={\n  \"request\": {\n    \"action\": \"confirm_membership\",\n    \"association_number\": \"{{ $env.EBAS_ASSOC }}\",\n    \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n    \"year_id\": {{ new Date().getFullYear() }},\n    \"socialsecuritynumber\": \"{{ $json._pnr_normalized }}\"\n  }\n}","options":{}},"name":"Call eBas confirm_membership","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[560,208],"id":"call-ebas-api"},{"parameters":{"jsCode":"// Parse eBas confirm_membership response\n// Expected response: { response: { member_found: true/false } }\n\nconst response = $json;\nconst memberFound = response?.response?.member_found === true;\n\n// Remove sensitive data before returning\nconst { _pnr_normalized, personnummer, ...safeData } = $input.first().json;\n\nreturn [{ \n  json: { \n    isMember: memberFound,\n    message: memberFound ? \"Medlem i Sverok\" : \"Ej medlem i Sverok\"\n  } \n}];"},"name":"Parse Response","type":"n8n-nodes-base.code","typeVersion":2,"position":[800,208],"id":"parse-response"},{"parameters":{"content":"## eBas Membership Check Sub-workflow\n\n**Purpose:** Verify if a person is a registered Sverok member.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Why Sverok membership?**\nSwedish gaming associations require membership for insurance coverage at events.\nSverok is the Swedish Gaming Federation.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isMember\": true/false,\n  \"message\": \"Medlem i Sverok\" / \"Ej medlem\"\n}\n```\n\n**Privacy:** Personnummer is NOT stored - only the boolean result.\nPersonnummer is cleared from localStorage after check-in.","height":596,"width":500,"color":4},"type":"n8n-nodes-base.stickyNote","position":[-320,-352],"typeVersion":1,"id":"note-ebas-overview","name":"Overview"},{"parameters":{"content":"## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX","height":324,"width":340,"color":6},"type":"n8n-nodes-base.stickyNote","position":[224,-352],"typeVersion":1,"id":"note-ebas-normalize","name":"Normalize"},{"parameters":{"content":"## eBas API Call\n\n**Endpoint:** confirm_membership.json\n**Auth:** API key (env: EBAS_API_KEY)\n**Assoc:** F161215-9 (FGC Trollhättan)\n\nChecks if personnummer is registered as member for current year.","height":224,"width":320,"color":5},"type":"n8n-nodes-base.stickyNote","position":[704,-336],"typeVersion":1,"id":"note-ebas-api","name":"API Call"},{"parameters":{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"skip-check","leftValue":"={{ $json.skipEbas }}","rightValue":true,"operator":{"type":"boolean","operation":"equals"}}],"combinator":"and"},"options":{}},"id":"if-skip-ebas","name":"IF Skip eBas","type":"n8n-nodes-base.if","typeVersion":2,"position":[-200,0]},{"parameters":{"jsCode":"// Return early - no personnummer provided\nreturn [{ json: { isMember: false, skipped: true, message: 'Inget personnummer angivet' }}];"},"id":"skip-return","name":"Skip - Return False","type":"n8n-nodes-base.code","typeVersion":2,"position":[-50,-100]}],"connections":{"Webhook - eBas Check":{"main":[[{"node":"Normalize Personnummer","type":"main","index":0}]]},"Normalize Personnummer":{"main":[[{"node":"IF Skip eBas","type":"main","index":0}]]},"Call eBas confirm_membership":{"main":[[{"node":"Parse Response","type":"main","index":0}]]},"IF Skip eBas":{"main":[[{"node":"Skip - Return False","type":"main","index":0}],[{"node":"Call eBas confirm_membership","type":"main","index":0}]]}},"authors":"viktor molina","name":null,"description":null}}
+{
+  "updatedAt": "2026-01-30T14:42:32.151Z",
+  "createdAt": "2026-01-30T14:42:32.151Z",
+  "id": "LAfnY2YOq5kJgLGV",
+  "name": "FGC THN - eBas Membership Check",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ebas/check",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-ebas-check",
+      "name": "Webhook - eBas Check",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        112,
+        208
+      ],
+      "webhookId": "ebas-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize personnummer to 12 digits (YYYYMMDDXXXX)\nlet pnrRaw = $json.body?.personnummer ?? $json.personnummer ?? null;\n\nif (!pnrRaw) {\n  return [{ json: { \n    isMember: false, \n    skipEbas: true, \n    message: \"Inget personnummer angivet\" \n  }}];\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  return [{ json: { \n    isMember: false, \n    error: true, \n    message: \"Ogiltigt personnummer-format\" \n  }}];\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nreturn [{ json: { \n  ...$json, \n  _pnr_normalized: pnr \n}}];"
+      },
+      "name": "Normalize Personnummer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        208
+      ],
+      "id": "normalize-pnr"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebas.sverok.se/apis/confirm_membership.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"request\": {\n    \"action\": \"confirm_membership\",\n    \"association_number\": \"{{ $env.EBAS_ASSOC }}\",\n    \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n    \"year_id\": {{ new Date().getFullYear() }},\n    \"socialsecuritynumber\": \"{{ $json._pnr_normalized }}\"\n  }\n}",
+        "options": {}
+      },
+      "name": "Call eBas confirm_membership",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        208
+      ],
+      "id": "call-ebas-api"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse eBas confirm_membership response\n// Expected response: { response: { member_found: true/false } }\n\nconst response = $json;\nconst memberFound = response?.response?.member_found === true;\n\n// Remove sensitive data before returning\nconst { _pnr_normalized, personnummer, ...safeData } = $input.first().json;\n\nreturn [{ \n  json: { \n    isMember: memberFound,\n    message: memberFound ? \"Medlem i Sverok\" : \"Ej medlem i Sverok\"\n  } \n}];"
+      },
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        208
+      ],
+      "id": "parse-response"
+    },
+    {
+      "parameters": {
+        "content": "## eBas Membership Check Sub-workflow\n\n**Purpose:** Verify if a person is a registered Sverok member.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Why Sverok membership?**\nSwedish gaming associations require membership for insurance coverage at events.\nSverok is the Swedish Gaming Federation.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isMember\": true/false,\n  \"message\": \"Medlem i Sverok\" / \"Ej medlem\"\n}\n```\n\n**Privacy:** Personnummer is NOT stored - only the boolean result.\nPersonnummer is cleared from localStorage after check-in.",
+        "height": 596,
+        "width": 500,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -320,
+        -352
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-overview",
+      "name": "Overview"
+    },
+    {
+      "parameters": {
+        "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
+        "height": 324,
+        "width": 340,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        224,
+        -352
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-normalize",
+      "name": "Normalize"
+    },
+    {
+      "parameters": {
+        "content": "## eBas API Call\n\n**Endpoint:** confirm_membership.json\n**Auth:** API key (env: EBAS_API_KEY)\n**Assoc:** F161215-9 (FGC Trollhättan)\n\nChecks if personnummer is registered as member for current year.",
+        "height": 224,
+        "width": 320,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        704,
+        -336
+      ],
+      "typeVersion": 1,
+      "id": "note-ebas-api",
+      "name": "API Call"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json.skipEbas }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-ebas",
+      "name": "IF Skip eBas",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return early - no personnummer provided\nreturn [{ json: { isMember: false, skipped: true, message: 'Inget personnummer angivet' }}];"
+      },
+      "id": "skip-return",
+      "name": "Skip - Return False",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -50,
+        -100
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - eBas Check": {
+      "main": [
+        [
+          {
+            "node": "Normalize Personnummer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Personnummer": {
+      "main": [
+        [
+          {
+            "node": "IF Skip eBas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call eBas confirm_membership": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Skip eBas": {
+      "main": [
+        [
+          {
+            "node": "Skip - Return False",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call eBas confirm_membership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": {},
+  "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+  "activeVersionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+  "versionCounter": 10,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-01-30T14:42:32.172Z",
+      "createdAt": "2026-01-30T14:42:32.172Z",
+      "role": "workflow:owner",
+      "workflowId": "LAfnY2YOq5kJgLGV",
+      "projectId": "KLSXsAxOoJYteZRt",
+      "project": {
+        "updatedAt": "2026-01-30T14:27:20.444Z",
+        "createdAt": "2026-01-30T13:36:18.336Z",
+        "id": "KLSXsAxOoJYteZRt",
+        "name": "viktor molina <viktor.molina@live.se>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+        "projectRelations": [
+          {
+            "updatedAt": "2026-01-30T13:36:18.337Z",
+            "createdAt": "2026-01-30T13:36:18.337Z",
+            "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+            "projectId": "KLSXsAxOoJYteZRt",
+            "user": {
+              "updatedAt": "2026-02-03T13:32:21.000Z",
+              "createdAt": "2026-01-30T13:36:16.343Z",
+              "id": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+              "email": "viktor.molina@live.se",
+              "firstName": "viktor",
+              "lastName": "molina",
+              "personalizationAnswers": {
+                "version": "v4",
+                "personalization_survey_submitted_at": "2026-01-30T14:28:30.347Z",
+                "personalization_survey_n8n_version": "1.122.5",
+                "companyIndustryExtended": [
+                  "other"
+                ],
+                "otherCompanyIndustryExtended": "events",
+                "companySize": "<20",
+                "companyType": "other",
+                "role": "business-owner",
+                "reportedSource": "twitter"
+              },
+              "settings": {
+                "userActivated": true,
+                "firstSuccessfulWorkflowId": "Dxs5S4sU1hkfZYrc",
+                "userActivatedAt": 1769819577837
+              },
+              "disabled": false,
+              "mfaEnabled": false,
+              "lastActiveAt": "2026-02-03",
+              "isPending": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-01-31T00:05:46.000Z",
+    "createdAt": "2026-01-30T15:37:31.080Z",
+    "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+    "workflowId": "LAfnY2YOq5kJgLGV",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "ebas/check",
+          "responseMode": "lastNode",
+          "options": {}
+        },
+        "id": "webhook-ebas-check",
+        "name": "Webhook - eBas Check",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [
+          112,
+          208
+        ],
+        "webhookId": "ebas-check"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Normalize personnummer to 12 digits (YYYYMMDDXXXX)\nlet pnrRaw = $json.body?.personnummer ?? $json.personnummer ?? null;\n\nif (!pnrRaw) {\n  return [{ json: { \n    isMember: false, \n    skipEbas: true, \n    message: \"Inget personnummer angivet\" \n  }}];\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  return [{ json: { \n    isMember: false, \n    error: true, \n    message: \"Ogiltigt personnummer-format\" \n  }}];\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? \"19\" : \"20\";\n  pnr = prefix + pnr;\n}\n\nreturn [{ json: { \n  ...$json, \n  _pnr_normalized: pnr \n}}];"
+        },
+        "name": "Normalize Personnummer",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          320,
+          208
+        ],
+        "id": "normalize-pnr"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://ebas.sverok.se/apis/confirm_membership.json",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"request\": {\n    \"action\": \"confirm_membership\",\n    \"association_number\": \"{{ $env.EBAS_ASSOC }}\",\n    \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n    \"year_id\": {{ new Date().getFullYear() }},\n    \"socialsecuritynumber\": \"{{ $json._pnr_normalized }}\"\n  }\n}",
+          "options": {}
+        },
+        "name": "Call eBas confirm_membership",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          560,
+          208
+        ],
+        "id": "call-ebas-api"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Parse eBas confirm_membership response\n// Expected response: { response: { member_found: true/false } }\n\nconst response = $json;\nconst memberFound = response?.response?.member_found === true;\n\n// Remove sensitive data before returning\nconst { _pnr_normalized, personnummer, ...safeData } = $input.first().json;\n\nreturn [{ \n  json: { \n    isMember: memberFound,\n    message: memberFound ? \"Medlem i Sverok\" : \"Ej medlem i Sverok\"\n  } \n}];"
+        },
+        "name": "Parse Response",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          800,
+          208
+        ],
+        "id": "parse-response"
+      },
+      {
+        "parameters": {
+          "content": "## eBas Membership Check Sub-workflow\n\n**Purpose:** Verify if a person is a registered Sverok member.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Why Sverok membership?**\nSwedish gaming associations require membership for insurance coverage at events.\nSverok is the Swedish Gaming Federation.\n\n**Input:**\n```json\n{\n  \"personnummer\": \"YYYYMMDDXXXX\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isMember\": true/false,\n  \"message\": \"Medlem i Sverok\" / \"Ej medlem\"\n}\n```\n\n**Privacy:** Personnummer is NOT stored - only the boolean result.\nPersonnummer is cleared from localStorage after check-in.",
+          "height": 596,
+          "width": 500,
+          "color": 4
+        },
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -320,
+          -352
+        ],
+        "typeVersion": 1,
+        "id": "note-ebas-overview",
+        "name": "Overview"
+      },
+      {
+        "parameters": {
+          "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
+          "height": 324,
+          "width": 340,
+          "color": 6
+        },
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          224,
+          -352
+        ],
+        "typeVersion": 1,
+        "id": "note-ebas-normalize",
+        "name": "Normalize"
+      },
+      {
+        "parameters": {
+          "content": "## eBas API Call\n\n**Endpoint:** confirm_membership.json\n**Auth:** API key (env: EBAS_API_KEY)\n**Assoc:** F161215-9 (FGC Trollhättan)\n\nChecks if personnummer is registered as member for current year.",
+          "height": 224,
+          "width": 320,
+          "color": 5
+        },
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          704,
+          -336
+        ],
+        "typeVersion": 1,
+        "id": "note-ebas-api",
+        "name": "API Call"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "skip-check",
+                "leftValue": "={{ $json.skipEbas }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "if-skip-ebas",
+        "name": "IF Skip eBas",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          -200,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Return early - no personnummer provided\nreturn [{ json: { isMember: false, skipped: true, message: 'Inget personnummer angivet' }}];"
+        },
+        "id": "skip-return",
+        "name": "Skip - Return False",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -50,
+          -100
+        ]
+      }
+    ],
+    "connections": {
+      "Webhook - eBas Check": {
+        "main": [
+          [
+            {
+              "node": "Normalize Personnummer",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Personnummer": {
+        "main": [
+          [
+            {
+              "node": "IF Skip eBas",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Call eBas confirm_membership": {
+        "main": [
+          [
+            {
+              "node": "Parse Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IF Skip eBas": {
+        "main": [
+          [
+            {
+              "node": "Skip - Return False",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Call eBas confirm_membership",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "system migration",
+    "name": "Version 259229f0",
+    "description": "",
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-01-31T00:05:46.230Z",
+        "id": 1,
+        "workflowId": "LAfnY2YOq5kJgLGV",
+        "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+        "event": "activated",
+        "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238"
+      }
+    ]
+  }
+}

@@ -1,5 +1,11 @@
 {
+  "updatedAt": "2026-01-30T14:36:46.314Z",
+  "createdAt": "2026-01-30T14:36:46.314Z",
+  "id": "Tt8amKeBzTjwBWmY",
   "name": "FGC THN - Start.gg Check",
+  "description": null,
+  "active": true,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -104,7 +110,6 @@
       "name": "Query"
     }
   ],
-  "pinData": {},
   "connections": {
     "Webhook": {
       "main": [
@@ -140,16 +145,235 @@
       ]
     }
   },
-  "active": true,
   "settings": {
     "executionOrder": "v1",
     "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false
   },
-  "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+  "staticData": null,
   "meta": {
     "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
   },
-  "id": "Tt8amKeBzTjwBWmY",
-  "tags": []
+  "pinData": {},
+  "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+  "activeVersionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+  "versionCounter": 10,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-01-30T14:36:46.335Z",
+      "createdAt": "2026-01-30T14:36:46.335Z",
+      "role": "workflow:owner",
+      "workflowId": "Tt8amKeBzTjwBWmY",
+      "projectId": "KLSXsAxOoJYteZRt",
+      "project": {
+        "updatedAt": "2026-01-30T14:27:20.444Z",
+        "createdAt": "2026-01-30T13:36:18.336Z",
+        "id": "KLSXsAxOoJYteZRt",
+        "name": "viktor molina <viktor.molina@live.se>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+        "projectRelations": [
+          {
+            "updatedAt": "2026-01-30T13:36:18.337Z",
+            "createdAt": "2026-01-30T13:36:18.337Z",
+            "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+            "projectId": "KLSXsAxOoJYteZRt",
+            "user": {
+              "updatedAt": "2026-02-03T13:32:21.000Z",
+              "createdAt": "2026-01-30T13:36:16.343Z",
+              "id": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+              "email": "viktor.molina@live.se",
+              "firstName": "viktor",
+              "lastName": "molina",
+              "personalizationAnswers": {
+                "version": "v4",
+                "personalization_survey_submitted_at": "2026-01-30T14:28:30.347Z",
+                "personalization_survey_n8n_version": "1.122.5",
+                "companyIndustryExtended": [
+                  "other"
+                ],
+                "otherCompanyIndustryExtended": "events",
+                "companySize": "<20",
+                "companyType": "other",
+                "role": "business-owner",
+                "reportedSource": "twitter"
+              },
+              "settings": {
+                "userActivated": true,
+                "firstSuccessfulWorkflowId": "Dxs5S4sU1hkfZYrc",
+                "userActivatedAt": 1769819577837
+              },
+              "disabled": false,
+              "mfaEnabled": false,
+              "lastActiveAt": "2026-02-03",
+              "isPending": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-01-31T00:12:39.000Z",
+    "createdAt": "2026-01-30T15:37:31.080Z",
+    "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+    "workflowId": "Tt8amKeBzTjwBWmY",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "startgg/check",
+          "responseMode": "lastNode",
+          "options": {}
+        },
+        "id": "webhook",
+        "name": "Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [
+          112,
+          208
+        ],
+        "webhookId": "startgg-check"
+      },
+      {
+        "parameters": {
+          "jsCode": "const body = $json.body || $json;\nconst tag = (body.tag || '').trim();\nconst slug = body.tournament_slug || body.slug || '';\n\nif (!tag || !slug) {\n  return [{ json: { isRegistered: false, error: true, message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\nreturn [{ json: { tag, slug } }];"
+        },
+        "name": "Parse Input",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          304,
+          208
+        ],
+        "id": "parse-input"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.start.gg/gql/alpha",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $env.STARTGG_TOKEN }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
+          "options": {}
+        },
+        "name": "Query Start.gg",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          528,
+          208
+        ],
+        "id": "query-startgg"
+      },
+      {
+        "parameters": {
+          "jsCode": "const data = $json.data;\nconst tournament = data?.tournament;\n\nif (!tournament) {\n  return [{ json: { isRegistered: false, error: true, message: 'Turnering hittades inte' } }];\n}\n\nconst participants = tournament.participants?.nodes || [];\nif (participants.length === 0) {\n  return [{ json: { isRegistered: false, tournament: tournament.name, message: 'Ej registrerad' } }];\n}\n\nconst player = participants[0];\nconst events = (player.events || []).map(e => e.name);\n\nreturn [{ json: {\n  isRegistered: true,\n  tournament: tournament.name,\n  tag: player.gamerTag,\n  name: player.user?.name || null,\n  events: events,\n  eventCount: events.length\n} }];"
+        },
+        "name": "Parse Response",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          752,
+          208
+        ],
+        "id": "parse-response"
+      },
+      {
+        "parameters": {
+          "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Case-insensitive:** Tag matching is handled by Start.gg API.",
+          "height": 576,
+          "width": 500,
+          "color": 4
+        },
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -400,
+          -304
+        ],
+        "typeVersion": 1,
+        "id": "note-startgg-overview",
+        "name": "Overview"
+      },
+      {
+        "parameters": {
+          "content": "## GraphQL Query\n\nQueries the tournament by slug, filters participants by gamerTag.\n\nReturns player's registered events (game names).",
+          "height": 168,
+          "width": 280,
+          "color": 6
+        },
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          272,
+          -304
+        ],
+        "typeVersion": 1,
+        "id": "note-startgg-query",
+        "name": "Query"
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Parse Input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Input": {
+        "main": [
+          [
+            {
+              "node": "Query Start.gg",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Query Start.gg": {
+        "main": [
+          [
+            {
+              "node": "Parse Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "system migration",
+    "name": "Version 26bc90ee",
+    "description": "",
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-01-31T00:12:39.765Z",
+        "id": 3,
+        "workflowId": "Tt8amKeBzTjwBWmY",
+        "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+        "event": "activated",
+        "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238"
+      }
+    ]
+  }
 }

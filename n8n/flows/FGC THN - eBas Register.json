@@ -1,5 +1,11 @@
 {
+  "updatedAt": "2026-01-31T01:45:26.060Z",
+  "createdAt": "2026-01-30T14:37:09.952Z",
+  "id": "O7qbXOsWUrs3vDDk",
   "name": "FGC THN - eBas Register",
+  "description": null,
+  "active": false,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -77,41 +83,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        1300,
+        1312,
         208
       ],
       "id": "if-success"
-    },
-    {
-      "parameters": {
-        "operation": "search",
-        "base": {
-          "__rl": true,
-          "mode": "id",
-          "value": "={{ $env.AIRTABLE_BASE_ID }}"
-        },
-        "table": {
-          "__rl": true,
-          "mode": "id",
-          "value": "active_event_data"
-        },
-        "filterByFormula": "=AND(LOWER(tag)='{{ $json.tag }}', event_slug='{{ $json.slug }}')",
-        "options": {}
-      },
-      "name": "Find Player in Airtable",
-      "type": "n8n-nodes-base.airtable",
-      "typeVersion": 2.1,
-      "position": [
-        1530,
-        100
-      ],
-      "id": "find-player",
-      "credentials": {
-        "airtableTokenApi": {
-          "id": "airtable-credentials",
-          "name": "Airtable Token"
-        }
-      }
     },
     {
       "parameters": {
@@ -126,7 +101,6 @@
           "mode": "id",
           "value": "active_event_data"
         },
-        "id": "={{ $json.id }}",
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
@@ -140,13 +114,13 @@
       "typeVersion": 2.1,
       "position": [
         1760,
-        100
+        112
       ],
       "id": "update-member",
       "credentials": {
         "airtableTokenApi": {
-          "id": "airtable-credentials",
-          "name": "Airtable Token"
+          "id": "4pOFRJlGet8aXQMA",
+          "name": "Airtable Personal Access Token account"
         }
       }
     },
@@ -163,8 +137,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1990,
-        100
+        2000,
+        112
       ],
       "id": "notify-sse",
       "continueOnFail": true
@@ -177,8 +151,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2220,
-        100
+        2224,
+        112
       ],
       "id": "return-success"
     },
@@ -190,7 +164,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1530,
+        1536,
         320
       ],
       "id": "return-error"
@@ -236,15 +210,49 @@
       },
       "type": "n8n-nodes-base.stickyNote",
       "position": [
-        1500,
+        1504,
         -128
       ],
       "typeVersion": 1,
       "id": "note-airtable-update",
       "name": "Airtable Update"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appYoqvkJ41wBFPuD",
+          "mode": "list",
+          "cachedResultName": "FGC CHECKIN",
+          "cachedResultUrl": "https://airtable.com/appYoqvkJ41wBFPuD"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblYyWIhth0s91ARH",
+          "mode": "list",
+          "cachedResultName": "active_event_data",
+          "cachedResultUrl": "https://airtable.com/appYoqvkJ41wBFPuD/tblYyWIhth0s91ARH"
+        },
+        "filterByFormula": "=AND(LOWER)({tag})=LOWER('{{ $json.tag }}'), {event_slug}='{{ $json.slug }}",
+        "options": {}
+      },
+      "name": "Find Player in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1536,
+        112
+      ],
+      "id": "find-player",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "4pOFRJlGet8aXQMA",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
     }
   ],
-  "pinData": {},
   "connections": {
     "Webhook - eBas Register": {
       "main": [
@@ -308,17 +316,6 @@
         ]
       ]
     },
-    "Find Player in Airtable": {
-      "main": [
-        [
-          {
-            "node": "Update Member Status",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Update Member Status": {
       "main": [
         [
@@ -340,18 +337,90 @@
           }
         ]
       ]
+    },
+    "Find Player in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Update Member Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": true,
   "settings": {
     "executionOrder": "v1",
     "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false
   },
-  "versionId": "90e2fe1a-63f9-43b4-a6f3-cde6a82cf612",
+  "staticData": null,
   "meta": {
     "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
   },
-  "id": "O7qbXOsWUrs3vDDk",
-  "tags": []
+  "pinData": {},
+  "versionId": "9661eebd-6e0e-4521-b2f2-f55b429f310a",
+  "activeVersionId": null,
+  "versionCounter": 43,
+  "triggerCount": 0,
+  "shared": [
+    {
+      "updatedAt": "2026-01-30T14:37:09.966Z",
+      "createdAt": "2026-01-30T14:37:09.966Z",
+      "role": "workflow:owner",
+      "workflowId": "O7qbXOsWUrs3vDDk",
+      "projectId": "KLSXsAxOoJYteZRt",
+      "project": {
+        "updatedAt": "2026-01-30T14:27:20.444Z",
+        "createdAt": "2026-01-30T13:36:18.336Z",
+        "id": "KLSXsAxOoJYteZRt",
+        "name": "viktor molina <viktor.molina@live.se>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+        "projectRelations": [
+          {
+            "updatedAt": "2026-01-30T13:36:18.337Z",
+            "createdAt": "2026-01-30T13:36:18.337Z",
+            "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+            "projectId": "KLSXsAxOoJYteZRt",
+            "user": {
+              "updatedAt": "2026-02-03T13:32:21.000Z",
+              "createdAt": "2026-01-30T13:36:16.343Z",
+              "id": "6833b6c3-90f7-479e-98d9-9c2d39599238",
+              "email": "viktor.molina@live.se",
+              "firstName": "viktor",
+              "lastName": "molina",
+              "personalizationAnswers": {
+                "version": "v4",
+                "personalization_survey_submitted_at": "2026-01-30T14:28:30.347Z",
+                "personalization_survey_n8n_version": "1.122.5",
+                "companyIndustryExtended": [
+                  "other"
+                ],
+                "otherCompanyIndustryExtended": "events",
+                "companySize": "<20",
+                "companyType": "other",
+                "role": "business-owner",
+                "reportedSource": "twitter"
+              },
+              "settings": {
+                "userActivated": true,
+                "firstSuccessfulWorkflowId": "Dxs5S4sU1hkfZYrc",
+                "userActivatedAt": 1769819577837
+              },
+              "disabled": false,
+              "mfaEnabled": false,
+              "lastActiveAt": "2026-02-03",
+              "isPending": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": null
 }
