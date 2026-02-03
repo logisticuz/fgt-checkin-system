@@ -48,6 +48,7 @@ OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protecti
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
 SSE_TOKEN = os.getenv("SSE_TOKEN")  # token for SSE authentication (used instead of Basic Auth)
+ADMIN_AUTH_COOKIE_TOKEN = os.getenv("ADMIN_AUTH_COOKIE_TOKEN")
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # for fetching tournament events
 
 # If n8n is protected with Basic Auth, set these for proxy + health
@@ -921,7 +922,9 @@ async def sse_stream(request: Request, token: str = None):
     """
     # Validate SSE token if configured
     if SSE_TOKEN and token != SSE_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid or missing SSE token")
+        cookie_token = request.cookies.get("fgc_admin_auth")
+        if not (ADMIN_AUTH_COOKIE_TOKEN and cookie_token == ADMIN_AUTH_COOKIE_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid or missing SSE token")
     async def event_generator():
         queue = await sse_manager.connect()
         try:

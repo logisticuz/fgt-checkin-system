@@ -59,24 +59,48 @@
         }
     }
 
-    function getSSEToken() {
-        // Read token from Dash dcc.Store (rendered as hidden div with JSON)
-        const storeEl = document.getElementById('sse-token-store');
-        if (storeEl) {
-            try {
-                // Dash stores data in a data attribute or as text content
-                const data = storeEl.textContent || storeEl.getAttribute('data-dash-is-loading');
-                if (data && data !== 'null' && data !== '""') {
-                    return JSON.parse(data);
-                }
-            } catch (e) {
-                console.log('Could not parse SSE token from store');
-            }
+    let cachedToken = null;
+
+    function findTokenInLayout(node) {
+        if (!node) return null;
+        if (node.props && node.props.id === 'sse-token-store') {
+            return node.props.data || '';
         }
-        return '';
+        const children = node.props && node.props.children;
+        if (Array.isArray(children)) {
+            for (const child of children) {
+                const found = findTokenInLayout(child);
+                if (found) return found;
+            }
+        } else if (children && typeof children === 'object') {
+            const found = findTokenInLayout(children);
+            if (found) return found;
+        }
+        return null;
     }
 
-    function connectSSE() {
+    async function getSSEToken() {
+        if (cachedToken) return cachedToken;
+
+        try {
+            const res = await fetch('/_dash-layout', { credentials: 'include' });
+            if (!res.ok) {
+                console.log('Failed to fetch Dash layout for SSE token:', res.status);
+                return '';
+            }
+            const layout = await res.json();
+            const token = findTokenInLayout(layout) || '';
+            if (token) {
+                cachedToken = token;
+            }
+            return token;
+        } catch (e) {
+            console.log('Could not fetch SSE token:', e);
+            return '';
+        }
+    }
+
+    async function connectSSE() {
         if (eventSource) {
             eventSource.close();
         }
@@ -90,7 +114,7 @@
             : '/api/events/stream';
 
         // Add token for authentication (required in prod where Basic Auth doesn't work with EventSource)
-        const token = getSSEToken();
+        const token = await getSSEToken();
         if (token) {
             sseUrl += '?token=' + encodeURIComponent(token);
         }
