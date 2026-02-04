@@ -320,6 +320,11 @@
     // Kiosk mode - auto-redirect back to start after check-in
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
 
+    // Store kiosk mode in sessionStorage so it persists through redirects
+    if (KIOSK_MODE) {
+      sessionStorage.setItem("kioskMode", "true");
+    }
+
     // Hide personnummer field if membership not required
     if (!REQUIRE_MEMBERSHIP) {
       document.getElementById("personnummer-group").style.display = "none";

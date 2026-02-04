@@ -443,10 +443,13 @@
     </button>
     <p class="auto-refresh-note">Auto-refreshes every 10 seconds</p>
 
-    <!-- Kiosk mode: show back button for next person in queue -->
+    <!-- Kiosk mode: show countdown and back button -->
     <div id="kiosk-back" class="hidden" style="margin-top: 1rem;">
-      <a href="/kiosk" class="btn-refresh" style="text-decoration: none; background: #666;">
-        ← Next person
+      <p id="kiosk-countdown" style="color: #888; font-size: 0.9rem; margin-bottom: 0.5rem;">
+        Next person in <span id="kiosk-seconds">15</span>s...
+      </p>
+      <a href="/kiosk" class="btn-refresh" style="text-decoration: none; background: #666;" onclick="sessionStorage.removeItem('kioskMode')">
+        ← Next person now
       </a>
     </div>
 
@@ -460,10 +463,26 @@
     // Name is passed from backend template
     const name = "{{ name }}";
 
-    // Kiosk mode - show back button and redirect to /kiosk when ready
-    const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
+    // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
+    const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
     if (KIOSK_MODE) {
       document.getElementById("kiosk-back").classList.remove("hidden");
+
+      // Auto-redirect countdown (15 seconds)
+      const KIOSK_REDIRECT_DELAY = 15;
+      let secondsLeft = KIOSK_REDIRECT_DELAY;
+      const countdownEl = document.getElementById("kiosk-seconds");
+
+      const countdownInterval = setInterval(() => {
+        secondsLeft--;
+        if (countdownEl) countdownEl.textContent = secondsLeft;
+
+        if (secondsLeft <= 0) {
+          clearInterval(countdownInterval);
+          sessionStorage.removeItem("kioskMode");  // Clear for next person
+          window.location.href = "/kiosk";
+        }
+      }, 1000);
     }
 
     // Swish config (from Airtable settings)

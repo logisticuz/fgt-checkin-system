@@ -321,7 +321,7 @@
     <footer>
       <img src="/static/logo.png" alt="FGC Trollhattan" class="logo">
       <p>Problems? Talk to a tournament organizer.</p>
-      <p><a href="/">Back to start</a></p>
+      <p><a href="/" id="back-link">Back to start</a></p>
     </footer>
   </div>
 
@@ -330,6 +330,9 @@
     // Config
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
+
+    // Kiosk mode - check sessionStorage (set by /kiosk page)
+    const KIOSK_MODE = sessionStorage.getItem("kioskMode") === "true";
 
     // Configurable requirements from event settings
     // If a requirement is disabled, we never show that section
@@ -592,7 +595,8 @@
           // In membership_only mode, redirect back to status page after short delay
           if (state.membershipOnly) {
             setTimeout(() => {
-              window.location.href = `/status/${encodeURIComponent(state.name)}`;
+              const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
+              window.location.href = `/status/${encodeURIComponent(state.name)}${kioskParam}`;
             }, 2000);
             return;
           }
@@ -685,9 +689,10 @@
       setButtonLoading(btn, true);
 
       try {
-        // Redirect to status page
+        // Redirect to status page (preserve kiosk mode)
         const name = state.name || localStorage.getItem("namn");
-        window.location.href = `/status/${encodeURIComponent(name)}`;
+        const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
+        window.location.href = `/status/${encodeURIComponent(name)}${kioskParam}`;
       } catch (err) {
         console.error("Final checkin error:", err);
         showMessage("Something went wrong. Please try again.", "error");
@@ -697,6 +702,15 @@
 
     // Initialize on load
     initUI();
+
+    // Update back link for kiosk mode
+    if (KIOSK_MODE) {
+      const backLink = document.getElementById("back-link");
+      if (backLink) {
+        backLink.href = "/kiosk";
+        backLink.onclick = function() { sessionStorage.removeItem("kioskMode"); };
+      }
+    }
   </script>
 </body>
 </html>
