@@ -18,6 +18,8 @@ CHECKINS_TABLE = "active_event_data"   # real-time check-ins
 EVENT_HISTORY_TABLE = "event_history"
 SETTINGS_TABLE = "settings"
 EVENT_HISTORY_DASHBOARD_TABLE = "event_history_dashboard"  # moved up
+SESSIONS_TABLE = "sessions"
+AUDIT_LOG_TABLE = "audit_log"
 
 if not AIRTABLE_API_KEY or not BASE_ID:
     logger.critical("❌ Missing Airtable config in .env (AIRTABLE_API_KEY / AIRTABLE_BASE_ID)")
@@ -344,6 +346,31 @@ def _delete_record(table: str, record_id: str) -> bool:
         return False
 
 
+def _create_record(
+    table: str, fields: Dict[str, Any], typecast: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Create a single record in Airtable. Returns created record or None on error.
+
+    Args:
+        table: Airtable table name
+        fields: Dict of field name -> value
+        typecast: If True, Airtable auto-creates single/multi-select options.
+    """
+    url = f"{BASE_URL}/{table}"
+    payload: Dict[str, Any] = {"fields": fields}
+    if typecast:
+        payload["typecast"] = True
+    try:
+        resp = session.post(url, json=payload, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(f"✅ Created record in '{table}': {data.get('id')}")
+        return data
+    except requests.RequestException as e:
+        logger.error(f"❌ Failed to create record in '{table}': {e}")
+        return None
+
+
 # -----------------------------
 # Settings operations
 # -----------------------------
@@ -429,3 +456,287 @@ def update_checkin(
 def delete_checkin(record_id: str) -> bool:
     """Delete a checkin record."""
     return _delete_record(CHECKINS_TABLE, record_id)
+
+
+# -----------------------------
+# Sessions (Airtable-backed)
+# -----------------------------
+import uuid
+from datetime import datetime, timezone, timedelta
+
+# Session timeouts (from 04-security-and-auth.md)
+SESSION_ABSOLUTE_TIMEOUT = timedelta(hours=8)   # Full event day
+SESSION_IDLE_TIMEOUT = timedelta(hours=2)        # Inactivity limit
+
+
+def create_session(user_info: dict, access_token: str) -> Optional[str]:
+    """
+    Create a new session in Airtable and return the session_id.
+
+    Args:
+        user_info: Dict from auth.get_startgg_user() with id, name, email, slug
+        access_token: Start.gg OAuth access token (stored for future API calls)
+
+    Returns:
+        session_id (uuid4 string) or None on failure
+    """
+    session_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+
+    fields = {
+        "session_id": session_id,
+        "user_id": str(user_info.get("id", "")),
+        "user_name": user_info.get("name", ""),
+        "user_email": user_info.get("email", ""),
+        "access_token": access_token,
+        "created_at": now.isoformat(),
+        "expires_at": (now + SESSION_ABSOLUTE_TIMEOUT).isoformat(),
+        "last_active": now.isoformat(),
+    }
+
+    record = _create_record(SESSIONS_TABLE, fields)
+    if record:
+        logger.info(f"🔐 Created session for user '{user_info.get('name')}' ({session_id[:8]}...)")
+        return session_id
+
+    logger.error("❌ Failed to create session in Airtable")
+    return None
+
+
+def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve and validate a session from Airtable.
+
+    Checks two timeouts:
+    1. Absolute timeout (8h from creation) - prevents indefinite sessions
+    2. Idle timeout (2h since last activity) - catches abandoned sessions
+
+    Returns dict with session fields or None if expired/invalid/not found.
+    """
+    if not session_id:
+        return None
+
+    safe_id = session_id.replace("'", "''")
+    formula = f"{{session_id}} = '{safe_id}'"
+    recs = _list_records(SESSIONS_TABLE, filter_formula=formula, max_records=1)
+
+    if not recs:
+        return None
+
+    fields = recs[0].get("fields", {})
+    record_id = recs[0].get("id")
+    now = datetime.now(timezone.utc)
+
+    # Check absolute expiry
+    expires_at_str = fields.get("expires_at", "")
+    if expires_at_str:
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            if now > expires_at:
+                logger.info(f"🔒 Session {session_id[:8]}... expired (absolute timeout)")
+                _delete_record(SESSIONS_TABLE, record_id)
+                return None
+        except ValueError:
+            pass
+
+    # Check idle timeout
+    last_active_str = fields.get("last_active", "")
+    if last_active_str:
+        try:
+            last_active = datetime.fromisoformat(last_active_str.replace("Z", "+00:00"))
+            if now - last_active > SESSION_IDLE_TIMEOUT:
+                logger.info(f"🔒 Session {session_id[:8]}... expired (idle timeout)")
+                _delete_record(SESSIONS_TABLE, record_id)
+                return None
+        except ValueError:
+            pass
+
+    # Session is valid - include record_id for updates
+    fields["_record_id"] = record_id
+    return fields
+
+
+def delete_session(session_id: str) -> bool:
+    """Delete a session from Airtable (logout)."""
+    if not session_id:
+        return False
+
+    safe_id = session_id.replace("'", "''")
+    formula = f"{{session_id}} = '{safe_id}'"
+    recs = _list_records(SESSIONS_TABLE, filter_formula=formula, max_records=1)
+
+    if not recs:
+        return False
+
+    record_id = recs[0].get("id")
+    return _delete_record(SESSIONS_TABLE, record_id)
+
+
+def update_session_activity(session_id: str) -> None:
+    """
+    Touch the last_active timestamp on a session.
+
+    Called from /auth/me (once per page load) to keep the idle timeout fresh.
+    Failures are logged but don't break the request.
+    """
+    if not session_id:
+        return
+
+    safe_id = session_id.replace("'", "''")
+    formula = f"{{session_id}} = '{safe_id}'"
+    recs = _list_records(SESSIONS_TABLE, filter_formula=formula, max_records=1, fields=["session_id"])
+
+    if not recs:
+        return
+
+    record_id = recs[0].get("id")
+    now = datetime.now(timezone.utc).isoformat()
+    _update_record(SESSIONS_TABLE, record_id, {"last_active": now})
+
+
+def cleanup_expired_sessions() -> int:
+    """
+    Delete all sessions past their absolute expiry.
+
+    Called on container startup and can be called periodically.
+    Returns number of sessions deleted.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    formula = f"IS_BEFORE({{expires_at}}, '{now}')"
+    recs = _list_records(SESSIONS_TABLE, filter_formula=formula)
+
+    deleted = 0
+    for rec in recs:
+        if _delete_record(SESSIONS_TABLE, rec.get("id")):
+            deleted += 1
+
+    if deleted:
+        logger.info(f"🧹 Cleaned up {deleted} expired sessions")
+    return deleted
+
+
+# -----------------------------
+# Audit Log
+# -----------------------------
+def log_action(
+    user: Dict[str, Any],
+    action: str,
+    target_table: str,
+    *,
+    target_event: str = "",
+    target_record: str = "",
+    target_player: str = "",
+    reason: str = "",
+    details: str = "",
+    before_state: str = "",
+    after_state: str = "",
+) -> Optional[str]:
+    """
+    Write an entry to the audit log.
+
+    Args:
+        user: Session dict with user_id, user_name, user_email
+        action: What happened (e.g., "event_archived", "player_deleted")
+        target_table: Which Airtable table was affected
+        **kwargs: Optional context fields (target_event, reason, before/after state)
+
+    Returns:
+        Record ID of the audit log entry, or None on failure.
+
+    Note: Best-effort - failures are logged but don't block the original operation.
+    Uses typecast=True so the action single-select auto-creates new options.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    fields: Dict[str, Any] = {
+        "timestamp": now,
+        "user_id": user.get("user_id", ""),
+        "user_name": user.get("user_name", "system"),
+        "user_email": user.get("user_email", ""),
+        "action": action,
+        "target_table": target_table,
+    }
+
+    # Only include non-empty optional fields
+    if target_event:
+        fields["target_event"] = target_event
+    if target_record:
+        fields["target_record"] = target_record
+    if target_player:
+        fields["target_player"] = target_player
+    if reason:
+        fields["reason"] = reason
+    if details:
+        fields["details"] = details
+    if before_state:
+        fields["before_state"] = before_state
+    if after_state:
+        fields["after_state"] = after_state
+
+    record = _create_record(AUDIT_LOG_TABLE, fields, typecast=True)
+
+    if record:
+        record_id = record.get("id", "")
+        logger.info(f"📋 Audit: {user.get('user_name', '?')} -> {action} on {target_table}")
+        return record_id
+
+    logger.error(f"❌ Failed to write audit log: {action}")
+    return None
+
+
+def get_audit_log(
+    *,
+    action: Optional[str] = None,
+    target_event: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve audit log entries with optional filters.
+
+    Returns list of audit log entries, newest first.
+    """
+    conditions = []
+    if action:
+        safe_action = action.replace("'", "''")
+        conditions.append(f"{{action}} = '{safe_action}'")
+    if target_event:
+        safe_event = target_event.replace("'", "''")
+        conditions.append(f"{{target_event}} = '{safe_event}'")
+    if user_id:
+        safe_uid = user_id.replace("'", "''")
+        conditions.append(f"{{user_id}} = '{safe_uid}'")
+
+    formula = None
+    if len(conditions) == 1:
+        formula = conditions[0]
+    elif len(conditions) > 1:
+        formula = f"AND({', '.join(conditions)})"
+
+    recs = _list_records(AUDIT_LOG_TABLE, filter_formula=formula, max_records=limit)
+
+    result = []
+    for r in recs:
+        f = r.get("fields", {})
+        result.append({
+            "id": r.get("id"),
+            "timestamp": f.get("timestamp"),
+            "user_id": f.get("user_id"),
+            "user_name": f.get("user_name"),
+            "user_email": f.get("user_email"),
+            "action": f.get("action"),
+            "target_table": f.get("target_table"),
+            "target_event": f.get("target_event"),
+            "target_record": f.get("target_record"),
+            "target_player": f.get("target_player"),
+            "reason": f.get("reason"),
+            "details": f.get("details"),
+            "before_state": f.get("before_state"),
+            "after_state": f.get("after_state"),
+        })
+
+    # Sort newest first
+    result.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+    logger.info(f"📋 Retrieved {len(result)} audit log entries")
+    return result

@@ -3,8 +3,15 @@
 FGC Dashboard Layout - Modern Esports Theme
 """
 import os
+import flask
 from dash import html, dcc, dash_table
-from shared.airtable_api import get_all_event_slugs, get_active_slug, get_checkins, get_active_settings
+from shared.airtable_api import (
+    get_all_event_slugs,
+    get_active_slug,
+    get_checkins,
+    get_active_settings,
+    get_session,
+)
 import pandas as pd
 import logging
 
@@ -12,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # SSE token for authenticated real-time updates
 SSE_TOKEN = os.getenv("SSE_TOKEN", "")
+SESSION_COOKIE_NAME = "fgc_session"
+IS_PROD = os.getenv("ENV", "dev") == "prod"
 
 # Color palette - Esports theme
 COLORS = {
@@ -143,11 +152,96 @@ STYLES = {
 }
 
 
+def _get_auth_state() -> dict:
+    """
+    Check current user's auth state from session cookie.
+
+    Returns dict with:
+        logged_in (bool), user_name (str), user_id (str), user_email (str)
+
+    Safe to call on every page load - returns empty state on any failure.
+    """
+    try:
+        cookie = flask.request.cookies.get(SESSION_COOKIE_NAME, "")
+        if not cookie:
+            return {"logged_in": False, "user_name": "", "user_id": "", "user_email": ""}
+
+        session_data = get_session(cookie)
+        if not session_data:
+            return {"logged_in": False, "user_name": "", "user_id": "", "user_email": ""}
+
+        return {
+            "logged_in": True,
+            "user_name": session_data.get("user_name", ""),
+            "user_id": session_data.get("user_id", ""),
+            "user_email": session_data.get("user_email", ""),
+        }
+    except Exception as e:
+        logger.warning(f"Auth state check failed: {e}")
+        return {"logged_in": False, "user_name": "", "user_id": "", "user_email": ""}
+
+
+def _build_auth_ui(auth_state: dict) -> html.Div:
+    """Build the login/logout component for the header."""
+    login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
+    logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
+
+    if auth_state.get("logged_in"):
+        return html.Div(
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "gap": "0.75rem",
+            },
+            children=[
+                html.Span(
+                    auth_state.get("user_name", "User"),
+                    style={
+                        "color": COLORS["accent_green"],
+                        "fontSize": "0.8rem",
+                        "fontWeight": "600",
+                    },
+                ),
+                html.A(
+                    "Logout",
+                    href=logout_path,
+                    style={
+                        "color": COLORS["text_muted"],
+                        "fontSize": "0.75rem",
+                        "textDecoration": "none",
+                        "padding": "0.3rem 0.6rem",
+                        "borderRadius": "4px",
+                        "border": f"1px solid {COLORS['border']}",
+                        "transition": "all 0.2s",
+                    },
+                ),
+            ],
+        )
+    else:
+        return html.A(
+            "Login with Start.gg",
+            href=login_path,
+            style={
+                "color": COLORS["accent_blue"],
+                "fontSize": "0.8rem",
+                "fontWeight": "600",
+                "textDecoration": "none",
+                "padding": "0.4rem 0.8rem",
+                "borderRadius": "6px",
+                "border": f"1px solid {COLORS['accent_blue']}",
+                "transition": "all 0.2s",
+            },
+        )
+
+
 def create_layout():
     """
     Build and return the layout for the FGC Check-in Dashboard.
     Modern esports-themed design with live stats and status tracking.
     """
+    # Auth state (checked on every page load via session cookie)
+    auth_state = _get_auth_state()
+
     # Fetch data
     try:
         active_slug = get_active_slug()
@@ -206,6 +300,7 @@ def create_layout():
         dcc.Store(id="active-filter", data="all"),  # Current filter: all, pending, ready, no-payment
         dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
         dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
+        dcc.Store(id="auth-store", data=auth_state),  # Current user auth state
         dcc.Store(id="requirements-store", data={
             # Airtable checkbox: checked = True, unchecked = field missing (None)
             # Use "is True" so that unchecked (None) = requirement OFF
@@ -217,6 +312,11 @@ def create_layout():
 
         # Header
         html.Header(style={**STYLES["header"], "position": "relative"}, children=[
+            # Auth UI (top left)
+            html.Div(
+                style={"position": "absolute", "top": "1.5rem", "left": "2rem"},
+                children=[_build_auth_ui(auth_state)],
+            ),
             # Centered logo
             html.Div(style={"display": "flex", "justifyContent": "center"}, children=[
                 html.Img(src="/assets/logo.png", style={"height": "60px", "width": "auto"}),
@@ -266,6 +366,12 @@ def create_layout():
                     dcc.Tab(
                         label="⚙️ Settings",
                         value="tab-settings",
+                        style={"backgroundColor": COLORS["bg_card"], "color": COLORS["text_secondary"], "border": "none", "padding": "1rem 1.5rem"},
+                        selected_style={"backgroundColor": COLORS["bg_dark"], "color": COLORS["accent_blue"], "borderTop": f"2px solid {COLORS['accent_blue']}", "padding": "1rem 1.5rem"},
+                    ),
+                    dcc.Tab(
+                        label="📋 Audit Log",
+                        value="tab-audit",
                         style={"backgroundColor": COLORS["bg_card"], "color": COLORS["text_secondary"], "border": "none", "padding": "1rem 1.5rem"},
                         selected_style={"backgroundColor": COLORS["bg_dark"], "color": COLORS["accent_blue"], "borderTop": f"2px solid {COLORS['accent_blue']}", "padding": "1rem 1.5rem"},
                     ),
@@ -718,6 +824,131 @@ def create_layout():
                             multi=True,
                             clearable=False,
                             style={"backgroundColor": COLORS["bg_dark"]},
+                        ),
+                    ]),
+                ]),
+
+                # ========== TAB 3: Audit Log ==========
+                html.Div(id="tab-audit-content", style={"display": "none"}, children=[
+                    html.Div(style=STYLES["card"], children=[
+                        html.H3("Audit Log", style=STYLES["section_title"]),
+                        html.P(
+                            "Track all administrative actions performed in the system.",
+                            style={"color": COLORS["text_secondary"], "marginBottom": "1.5rem"},
+                        ),
+
+                        # Filter row
+                        html.Div(style={
+                            "display": "flex",
+                            "gap": "1rem",
+                            "marginBottom": "1.5rem",
+                            "flexWrap": "wrap",
+                            "alignItems": "flex-end",
+                        }, children=[
+                            # Action type filter
+                            html.Div(style={"minWidth": "180px", "flex": "1"}, children=[
+                                html.Label("Action", style={
+                                    "fontSize": "0.75rem",
+                                    "color": COLORS["text_secondary"],
+                                    "marginBottom": "0.5rem",
+                                    "display": "block",
+                                }),
+                                dcc.Dropdown(
+                                    id="audit-filter-action",
+                                    options=[],  # Populated dynamically from data
+                                    value=None,
+                                    placeholder="All actions",
+                                    clearable=True,
+                                    style={"backgroundColor": COLORS["bg_dark"]},
+                                ),
+                            ]),
+                            # User filter
+                            html.Div(style={"minWidth": "180px", "flex": "1"}, children=[
+                                html.Label("User", style={
+                                    "fontSize": "0.75rem",
+                                    "color": COLORS["text_secondary"],
+                                    "marginBottom": "0.5rem",
+                                    "display": "block",
+                                }),
+                                dcc.Dropdown(
+                                    id="audit-filter-user",
+                                    options=[],  # Populated dynamically from data
+                                    value=None,
+                                    placeholder="All users",
+                                    clearable=True,
+                                    style={"backgroundColor": COLORS["bg_dark"]},
+                                ),
+                            ]),
+                            # Refresh button
+                            html.Button(
+                                "Refresh",
+                                id="btn-audit-refresh",
+                                n_clicks=0,
+                                style={**STYLES["button_secondary"], "height": "38px"},
+                            ),
+                        ]),
+
+                        # Audit log table
+                        dcc.Loading(
+                            type="circle",
+                            color=COLORS["accent_blue"],
+                            children=dash_table.DataTable(
+                                id="audit-log-table",
+                                columns=[
+                                    {"name": "Time", "id": "timestamp"},
+                                    {"name": "User", "id": "user_name"},
+                                    {"name": "Action", "id": "action"},
+                                    {"name": "Table", "id": "target_table"},
+                                    {"name": "Event", "id": "target_event"},
+                                    {"name": "Player", "id": "target_player"},
+                                    {"name": "Reason", "id": "reason"},
+                                ],
+                                data=[],
+                                page_size=25,
+                                sort_action="native",
+                                style_table={"overflowX": "auto"},
+                                style_header={
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                    "fontWeight": "600",
+                                    "fontSize": "0.75rem",
+                                    "textTransform": "uppercase",
+                                    "letterSpacing": "0.05em",
+                                    "padding": "1rem",
+                                    "borderBottom": f"2px solid {COLORS['accent_purple']}",
+                                },
+                                style_cell={
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "color": COLORS["text_primary"],
+                                    "border": "none",
+                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                    "padding": "0.75rem 1rem",
+                                    "fontSize": "0.8rem",
+                                    "textAlign": "left",
+                                    "maxWidth": "200px",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                },
+                                style_data_conditional=[
+                                    {
+                                        "if": {"row_index": "odd"},
+                                        "backgroundColor": COLORS["bg_dark"],
+                                    },
+                                ],
+                                tooltip_data=[],
+                                tooltip_duration=None,
+                            ),
+                        ),
+
+                        # Row count
+                        html.Div(
+                            id="audit-log-count",
+                            style={
+                                "color": COLORS["text_muted"],
+                                "fontSize": "0.75rem",
+                                "marginTop": "0.75rem",
+                            },
+                            children="0 entries",
                         ),
                     ]),
                 ]),

@@ -8,6 +8,7 @@ from shared.airtable_api import (
     update_settings,
     update_checkin,
     delete_checkin,
+    get_audit_log,
 )
 import pandas as pd
 import requests
@@ -671,16 +672,21 @@ def register_callbacks(app):
     @app.callback(
         Output("tab-checkins-content", "style"),
         Output("tab-settings-content", "style"),
+        Output("tab-audit-content", "style"),
         Input("tabs", "value"),
     )
     def switch_tabs(selected_tab):
         """
         Toggle visibility of tab content based on selected tab.
         """
+        hidden = {"display": "none"}
+        visible = {"display": "block"}
         if selected_tab == "tab-settings":
-            return {"display": "none"}, {"display": "block"}
+            return hidden, visible, hidden
+        elif selected_tab == "tab-audit":
+            return hidden, hidden, visible
         else:
-            return {"display": "block"}, {"display": "none"}
+            return visible, hidden, hidden
 
     # -------------------------------------------------------------------------
     # Reactive Stats - update stat cards when table data changes
@@ -1243,3 +1249,92 @@ def register_callbacks(app):
             )
         else:
             return html.Span("❌ Failed to save settings", style={"color": "#ef4444"})
+
+    # -------------------------------------------------------------------------
+    # Audit Log - load and filter entries
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("audit-log-table", "data"),
+        Output("audit-log-table", "tooltip_data"),
+        Output("audit-log-count", "children"),
+        Output("audit-filter-action", "options"),
+        Output("audit-filter-user", "options"),
+        Input("tabs", "value"),
+        Input("btn-audit-refresh", "n_clicks"),
+        Input("audit-filter-action", "value"),
+        Input("audit-filter-user", "value"),
+    )
+    def update_audit_log(selected_tab, _refresh_clicks, filter_action, filter_user):
+        """
+        Load audit log entries when the Audit Log tab is selected.
+        Applies optional action and user filters.
+        Only fetches data when the audit tab is active (avoids unnecessary API calls).
+        """
+        if selected_tab != "tab-audit":
+            return no_update, no_update, no_update, no_update, no_update
+
+        try:
+            # Fetch with server-side filters where possible
+            entries = get_audit_log(
+                action=filter_action or None,
+                user_id=filter_user or None,
+                limit=200,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load audit log: {e}")
+            return [], [], "Error loading audit log", [], []
+
+        if not entries:
+            return [], [], "0 entries", [], []
+
+        # Format timestamps for display (keep full ISO in tooltip)
+        for entry in entries:
+            raw_ts = entry.get("timestamp", "")
+            if raw_ts:
+                try:
+                    dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    entry["timestamp"] = dt.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    pass
+
+        # Build unique action and user options from ALL entries (unfiltered)
+        # For action options, re-fetch without action filter
+        try:
+            all_entries = get_audit_log(limit=200)
+        except Exception:
+            all_entries = entries
+
+        action_values = sorted({e.get("action") for e in all_entries if e.get("action")})
+        user_values = sorted(
+            {e.get("user_name") for e in all_entries if e.get("user_name")},
+            key=str.lower,
+        )
+
+        action_options = [{"label": a, "value": a} for a in action_values]
+        # User filter uses user_id for filtering but shows user_name
+        user_id_map = {}
+        for e in all_entries:
+            uid = e.get("user_id")
+            uname = e.get("user_name")
+            if uid and uname and uid not in user_id_map:
+                user_id_map[uid] = uname
+        user_options = [
+            {"label": name, "value": uid}
+            for uid, name in sorted(user_id_map.items(), key=lambda x: x[1].lower())
+        ]
+
+        # Build tooltip data for full details on hover
+        tooltip_data = []
+        for entry in entries:
+            row_tips = {}
+            details = entry.get("details", "")
+            reason = entry.get("reason", "")
+            if details:
+                row_tips["action"] = {"value": details, "type": "text"}
+            if reason:
+                row_tips["reason"] = {"value": reason, "type": "text"}
+            tooltip_data.append(row_tips)
+
+        count_text = f"{len(entries)} entries"
+
+        return entries, tooltip_data, count_text, action_options, user_options
