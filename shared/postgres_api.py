@@ -10,6 +10,7 @@ managed by psycopg3.
 
 import os
 import logging
+import json
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
@@ -32,16 +33,30 @@ def _get_pool():
     """Lazy-init a connection pool (import psycopg only when Postgres backend is active)."""
     global _pool
     if _pool is None:
-        import psycopg_pool
+        import psycopg_pool  # type: ignore
 
         _pool = psycopg_pool.ConnectionPool(
             conninfo=DATABASE_URL,
             min_size=2,
             max_size=10,
             open=True,
+            kwargs={"autocommit": True},
         )
         logger.info("✅ Postgres connection pool initialized")
     return _pool
+
+
+def _coerce_jsonb(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
 
 
 # Session timeouts (same as airtable_api.py)
@@ -92,7 +107,9 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
 # =============================================
 # Checkins (active_event_data)
 # =============================================
-def get_checkins(slug: str = None, include_all: bool = False) -> List[Dict[str, Any]]:
+def get_checkins(
+    slug: Optional[str] = None, include_all: bool = False
+) -> List[Dict[str, Any]]:  # type: ignore[assignment]
     """Return check-ins for a given event_slug from active_event_data."""
     raise NotImplementedError("Postgres: get_checkins")
 
@@ -150,27 +167,136 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
 # =============================================
 def create_session(user_info: dict, access_token: str) -> Optional[str]:
     """Create a new session and return the session_id."""
-    raise NotImplementedError("Postgres: create_session")
+    session_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+
+    user_info = user_info or {}
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sessions (
+                    session_id,
+                    user_id,
+                    user_name,
+                    user_email,
+                    access_token,
+                    created_at,
+                    expires_at,
+                    last_active
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    session_id,
+                    str(user_info.get("id", "")),
+                    user_info.get("name", ""),
+                    user_info.get("email", ""),
+                    access_token,
+                    now,
+                    now + SESSION_ABSOLUTE_TIMEOUT,
+                    now,
+                ),
+            )
+
+    logger.info(f"🔐 Created session for user '{user_info.get('name')}' ({session_id[:8]}...)")
+    return session_id
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve and validate a session (checks absolute + idle timeout)."""
-    raise NotImplementedError("Postgres: get_session")
+    if not session_id:
+        return None
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, session_id, user_id, user_name, user_email, access_token,
+                       created_at, expires_at, last_active
+                FROM sessions
+                WHERE session_id = %s
+                LIMIT 1
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    (
+        record_id,
+        session_id,
+        user_id,
+        user_name,
+        user_email,
+        access_token,
+        created_at,
+        expires_at,
+        last_active,
+    ) = row
+
+    now = datetime.now(timezone.utc)
+
+    if expires_at and now > expires_at:
+        logger.info(f"🔒 Session {session_id[:8]}... expired (absolute timeout)")
+        delete_session(session_id)
+        return None
+
+    if last_active and now - last_active > SESSION_IDLE_TIMEOUT:
+        logger.info(f"🔒 Session {session_id[:8]}... expired (idle timeout)")
+        delete_session(session_id)
+        return None
+
+    return {
+        "_record_id": record_id,
+        "session_id": session_id,
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_email": user_email,
+        "access_token": access_token,
+        "created_at": created_at.isoformat() if created_at else None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "last_active": last_active.isoformat() if last_active else None,
+    }
 
 
 def delete_session(session_id: str) -> bool:
     """Delete a session (logout)."""
-    raise NotImplementedError("Postgres: delete_session")
+    if not session_id:
+        return False
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
+            return cur.rowcount > 0
 
 
 def update_session_activity(session_id: str) -> None:
     """Touch the last_active timestamp on a session."""
-    raise NotImplementedError("Postgres: update_session_activity")
+    if not session_id:
+        return
+
+    now = datetime.now(timezone.utc)
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_active = %s WHERE session_id = %s",
+                (now, session_id),
+            )
 
 
 def cleanup_expired_sessions() -> int:
     """Delete all sessions past their absolute expiry. Returns count deleted."""
-    raise NotImplementedError("Postgres: cleanup_expired_sessions")
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE expires_at < now()")
+            deleted = cur.rowcount
+
+    if deleted:
+        logger.info(f"🧹 Cleaned up {deleted} expired sessions")
+    return deleted
 
 
 # =============================================
@@ -190,7 +316,50 @@ def log_action(
     after_state: str = "",
 ) -> Optional[str]:
     """Write an entry to the audit log. Returns record ID or None."""
-    raise NotImplementedError("Postgres: log_action")
+    now = datetime.now(timezone.utc)
+    user = user or {}
+
+    fields = {
+        "timestamp": now,
+        "user_id": user.get("user_id", ""),
+        "user_name": user.get("user_name", "system"),
+        "user_email": user.get("user_email", ""),
+        "action": action,
+        "target_table": target_table,
+        "target_event": target_event or None,
+        "target_record": target_record or None,
+        "target_player": target_player or None,
+        "reason": reason or None,
+        "details": details or None,
+        "before_state": _coerce_jsonb(before_state),
+        "after_state": _coerce_jsonb(after_state),
+    }
+
+    columns = [k for k, v in fields.items() if v is not None]
+    values = [fields[k] for k in columns]
+
+    from psycopg.types.json import Json  # type: ignore
+
+    values = [Json(v) if isinstance(v, (dict, list)) else v for v in values]
+
+    placeholders = ", ".join(["%s"] * len(columns))
+    col_sql = ", ".join(columns)
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO audit_log ({col_sql}) VALUES ({placeholders}) RETURNING id",
+                values,
+            )
+            row = cur.fetchone()
+
+    if row:
+        record_id = str(row[0])
+        logger.info(f"📋 Audit: {user.get('user_name', '?')} -> {action} on {target_table}")
+        return record_id
+
+    logger.error(f"❌ Failed to write audit log: {action}")
+    return None
 
 
 def get_audit_log(
@@ -201,4 +370,77 @@ def get_audit_log(
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     """Retrieve audit log entries with optional filters, newest first."""
-    raise NotImplementedError("Postgres: get_audit_log")
+    conditions = []
+    params: List[Any] = []
+
+    if action:
+        conditions.append("action = %s")
+        params.append(action)
+    if target_event:
+        conditions.append("target_event = %s")
+        params.append(target_event)
+    if user_id:
+        conditions.append("user_id = %s")
+        params.append(user_id)
+
+    where_sql = ""
+    if conditions:
+        where_sql = "WHERE " + " AND ".join(conditions)
+
+    params.append(limit)
+
+    query = f"""
+        SELECT id, timestamp, user_id, user_name, user_email, action,
+               target_table, target_event, target_record, target_player,
+               reason, details, before_state, after_state
+        FROM audit_log
+        {where_sql}
+        ORDER BY timestamp DESC
+        LIMIT %s
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        (
+            record_id,
+            timestamp,
+            row_user_id,
+            row_user_name,
+            row_user_email,
+            row_action,
+            row_target_table,
+            row_target_event,
+            row_target_record,
+            row_target_player,
+            row_reason,
+            row_details,
+            row_before_state,
+            row_after_state,
+        ) = row
+
+        result.append(
+            {
+                "id": record_id,
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "user_id": row_user_id,
+                "user_name": row_user_name,
+                "user_email": row_user_email,
+                "action": row_action,
+                "target_table": row_target_table,
+                "target_event": row_target_event,
+                "target_record": row_target_record,
+                "target_player": row_target_player,
+                "reason": row_reason,
+                "details": row_details,
+                "before_state": row_before_state,
+                "after_state": row_after_state,
+            }
+        )
+
+    logger.info(f"📋 Retrieved {len(result)} audit log entries")
+    return result
