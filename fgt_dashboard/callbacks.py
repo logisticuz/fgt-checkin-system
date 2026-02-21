@@ -1,7 +1,7 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State
 from dash import no_update, html, ctx
-from shared.airtable_api import (
+from shared.storage import (
     get_checkins,
     get_active_settings,
     get_active_settings_with_id,
@@ -443,7 +443,7 @@ def register_callbacks(app):
         logger.info(f"Updated settings in Airtable for slug: {slug}")
 
         # Build new dropdown options with the new slug
-        from shared.airtable_api import get_all_event_slugs
+        from shared.storage import get_all_event_slugs
         all_slugs = get_all_event_slugs() or []
         if slug not in all_slugs:
             all_slugs = [slug] + all_slugs

@@ -5,7 +5,7 @@ FGC Dashboard Layout - Modern Esports Theme
 import os
 import flask
 from dash import html, dcc, dash_table
-from shared.airtable_api import (
+from shared.storage import (
     get_all_event_slugs,
     get_active_slug,
     get_checkins,

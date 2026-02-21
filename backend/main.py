@@ -21,10 +21,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from airtable_api import (
-    get_players as airtable_get_players,
-    get_event_history as airtable_get_event_history,
-    get_active_settings as airtable_get_active_settings,
+from shared.storage import (
+    get_players as storage_get_players,
+    get_event_history as storage_get_event_history,
+    get_active_settings as storage_get_active_settings,
     get_checkin_by_name,
     get_checkin_by_tag,
     update_checkin,
@@ -36,6 +36,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === Config ===
+DATA_BACKEND = os.getenv("DATA_BACKEND", "airtable").lower().strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 # Updated to match your new table name in Airtable
 AIRTABLE_TABLE = "active_event_data"
@@ -55,8 +56,9 @@ STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # 
 N8N_BASIC_AUTH_USER = os.getenv("N8N_BASIC_AUTH_USER")
 N8N_BASIC_AUTH_PASSWORD = os.getenv("N8N_BASIC_AUTH_PASSWORD")
 
-assert AIRTABLE_API_KEY, "❌ Missing AIRTABLE_API_KEY in environment!"
-assert AIRTABLE_BASE_ID, "❌ Missing AIRTABLE_BASE_ID in environment!"
+if DATA_BACKEND == "airtable":
+    assert AIRTABLE_API_KEY, "❌ Missing AIRTABLE_API_KEY in environment!"
+    assert AIRTABLE_BASE_ID, "❌ Missing AIRTABLE_BASE_ID in environment!"
 
 # === SSE (Server-Sent Events) for real-time dashboard updates ===
 class SSEManager:
@@ -329,9 +331,9 @@ def get_active_settings() -> dict:
     Fetch active event settings from Airtable settings table.
     Returns dict with swish_number, swish_expected_per_game, active_event_slug,
     and configurable check-in requirements.
-    Uses shared airtable_api module.
+    Uses shared storage facade (airtable or postgres).
     """
-    fields = airtable_get_active_settings() or {}
+    fields = storage_get_active_settings() or {}
     return {
         "swish_number": fields.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": int(fields.get("swish_expected_per_game", 25)),
@@ -739,7 +741,7 @@ async def register_form_alias(request: Request):
 
 @app.get("/players", tags=["Dashboard"])
 async def get_players():
-    return airtable_get_players()
+    return storage_get_players()
 
 
 @app.patch("/players/{record_id}/payment", tags=["Dashboard"])
@@ -755,7 +757,7 @@ async def update_payment_status(record_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Update payment using shared airtable_api
+    # Update payment using shared storage backend
     result = update_checkin(record_id, {"payment_valid": payment_valid})
 
     if not result:
@@ -772,7 +774,7 @@ async def update_payment_status(record_id: str, request: Request):
 
 @app.get("/event-history", tags=["Dashboard"])
 async def get_event_history():
-    return airtable_get_event_history()
+    return storage_get_event_history()
 
 
 @app.patch("/api/player/games", tags=["Checkin"])
@@ -798,7 +800,7 @@ async def update_player_games(request: Request):
     if not isinstance(games, list):
         raise HTTPException(status_code=400, detail="games must be an array")
 
-    # Find the player record by tag + slug using shared airtable_api
+    # Find the player record by tag + slug using shared storage backend
     checkin = get_checkin_by_tag(tag, slug)
     if not checkin:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -856,7 +858,7 @@ async def update_player_member(request: Request):
     if not tag or not slug:
         raise HTTPException(status_code=400, detail="tag and slug are required")
 
-    # Find the player record by tag + slug using shared airtable_api
+    # Find the player record by tag + slug using shared storage backend
     checkin = get_checkin_by_tag(tag, slug)
     if not checkin:
         raise HTTPException(status_code=404, detail="Player not found")
