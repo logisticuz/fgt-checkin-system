@@ -59,6 +59,39 @@ def _coerce_jsonb(value: Any) -> Any:
     return value
 
 
+def _row_to_dict(columns: List[str], row: tuple) -> Dict[str, Any]:
+    return {col: row[idx] for idx, col in enumerate(columns)}
+
+
+def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": row.get("name"),
+        "email": row.get("email"),
+        "telephone": row.get("telephone"),
+        "tag": row.get("tag"),
+        "payment_amount": row.get("payment_amount"),
+        "payment_expected": row.get("payment_expected"),
+        "payment_valid": row.get("payment_valid"),
+        "member": row.get("member"),
+        "startgg": row.get("startgg"),
+        "is_guest": row.get("is_guest"),
+        "status": row.get("status"),
+        "tournament_games_registered": row.get("tournament_games_registered"),
+        "UUID": row.get("checkin_uuid"),
+        "event_slug": row.get("event_slug"),
+        "startgg_event_id": row.get("startgg_event_id"),
+        "external_id": row.get("external_id"),
+    }
+
+
+def _settings_value(key: str, value: Any) -> Any:
+    if key == "events_json":
+        from psycopg.types.json import Json  # type: ignore
+
+        return Json(value) if value is not None else None
+    return value
+
+
 # Session timeouts (same as airtable_api.py)
 SESSION_ABSOLUTE_TIMEOUT = timedelta(hours=8)
 SESSION_IDLE_TIMEOUT = timedelta(hours=2)
@@ -86,22 +119,109 @@ def compute_requirements(settings: Dict[str, Any]) -> Dict[str, bool]:
 # =============================================
 def get_active_settings() -> Optional[Dict[str, Any]]:
     """Return fields from the active settings row (is_active = true)."""
-    raise NotImplementedError("Postgres: get_active_settings")
+    columns = None
+    row = None
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM settings
+                WHERE is_active = true
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                columns = [desc[0] for desc in cur.description]
+
+    if not row or not columns:
+        logger.warning("⚠️ No active settings row found.")
+        return None
+
+    data = _row_to_dict(columns, row)
+    data.pop("id", None)
+    return data
 
 
 def get_active_slug() -> Optional[str]:
     """Return active_event_slug from the active settings row."""
-    raise NotImplementedError("Postgres: get_active_slug")
+    settings = get_active_settings() or {}
+    slug = settings.get("active_event_slug")
+    if slug:
+        logger.info(f"🎯 Active slug: {slug}")
+    else:
+        logger.warning("⚠️ active_event_slug missing on active settings row.")
+    return slug
 
 
 def get_active_settings_with_id() -> Optional[Dict[str, Any]]:
     """Return the active settings row with its record_id included."""
-    raise NotImplementedError("Postgres: get_active_settings_with_id")
+    columns = None
+    row = None
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM settings
+                WHERE is_active = true
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                columns = [desc[0] for desc in cur.description]
+
+    if not row or not columns:
+        logger.warning("⚠️ No active settings row found.")
+        return None
+
+    data = _row_to_dict(columns, row)
+    record_id = data.pop("id", None)
+    return {"record_id": str(record_id) if record_id is not None else None, "fields": data}
 
 
 def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update fields on a settings record."""
-    raise NotImplementedError("Postgres: update_settings")
+    if not record_id:
+        return None
+
+    try:
+        record_id = int(record_id)
+    except (TypeError, ValueError):
+        return None
+
+    columns = []
+    values: List[Any] = []
+    for key, value in (fields or {}).items():
+        columns.append(f"{key} = %s")
+        values.append(_settings_value(key, value))
+
+    if not columns:
+        return None
+
+    values.append(record_id)
+
+    columns_out = None
+    row = None
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE settings SET {', '.join(columns)} WHERE id = %s RETURNING *",
+                values,
+            )
+            row = cur.fetchone()
+            if row:
+                columns_out = [desc[0] for desc in cur.description]
+
+    if not row or not columns_out:
+        return None
+
+    data = _row_to_dict(columns_out, row)
+    return {"record_id": str(data.get("id")), "fields": {k: v for k, v in data.items() if k != "id"}}
 
 
 # =============================================
@@ -111,34 +231,253 @@ def get_checkins(
     slug: Optional[str] = None, include_all: bool = False
 ) -> List[Dict[str, Any]]:  # type: ignore[assignment]
     """Return check-ins for a given event_slug from active_event_data."""
-    raise NotImplementedError("Postgres: get_checkins")
+    if not slug and not include_all:
+        return []
+
+    params: List[Any] = []
+    where_sql = ""
+    if not include_all:
+        where_sql = "WHERE event_slug = %s"
+        params.append(slug)
+
+    query = f"""
+        SELECT record_id, created, event_slug, status, member, startgg, is_guest,
+               payment_amount, payment_expected, payment_valid,
+               name, email, tag, telephone,
+               tournament_games_registered, checkin_uuid, startgg_event_id, external_id
+        FROM active_event_data
+        {where_sql}
+        ORDER BY created DESC
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        (
+            record_id,
+            created,
+            event_slug,
+            status,
+            member,
+            startgg,
+            is_guest,
+            payment_amount,
+            payment_expected,
+            payment_valid,
+            name,
+            email,
+            tag,
+            telephone,
+            tournament_games_registered,
+            checkin_uuid,
+            startgg_event_id,
+            external_id,
+        ) = row
+
+        result.append(
+            {
+                "record_id": record_id,
+                "created": created.isoformat() if created else None,
+                "event_slug": event_slug,
+                "status": status,
+                "member": member,
+                "startgg": startgg,
+                "is_guest": is_guest,
+                "payment_amount": payment_amount,
+                "payment_expected": payment_expected,
+                "payment_valid": payment_valid,
+                "name": name,
+                "email": email,
+                "tag": tag,
+                "telephone": telephone,
+                "tournament_games_registered": tournament_games_registered,
+                "UUID": checkin_uuid,
+                "startgg_event_id": startgg_event_id,
+                "external_id": external_id,
+            }
+        )
+
+    if include_all:
+        logger.info(f"📥 Found {len(result)} checkins (ALL events)")
+    else:
+        logger.info(f"📥 Found {len(result)} checkins for slug '{slug}'")
+    return result
 
 
 def get_all_event_slugs() -> List[str]:
     """Collect unique event_slug values from active_event_data + settings."""
-    raise NotImplementedError("Postgres: get_all_event_slugs")
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT event_slug FROM active_event_data WHERE event_slug IS NOT NULL")
+            rows = cur.fetchall()
+
+    slugs = {row[0] for row in rows if row and row[0]}
+
+    active = get_active_slug()
+    if active:
+        slugs.add(active)
+
+    out = sorted(slugs)
+    logger.info(f"📚 Retrieved {len(out)} unique event slugs (including active fallback).")
+    return out
 
 
 def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Find a checkin record by name (case-insensitive)."""
-    raise NotImplementedError("Postgres: get_checkin_by_name")
+    if not name:
+        return None
+
+    params: List[Any] = [name]
+    where_sql = "LOWER(name) = LOWER(%s)"
+
+    if slug:
+        where_sql += " AND event_slug = %s"
+        params.append(slug)
+
+    query = f"""
+        SELECT record_id, name, tag, email, telephone, status, member, startgg,
+               payment_valid, payment_amount, payment_expected,
+               tournament_games_registered, checkin_uuid, event_slug,
+               startgg_event_id, external_id, is_guest, created
+        FROM active_event_data
+        WHERE {where_sql}
+        ORDER BY created DESC
+        LIMIT 1
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    columns = [
+        "record_id",
+        "name",
+        "tag",
+        "email",
+        "telephone",
+        "status",
+        "member",
+        "startgg",
+        "payment_valid",
+        "payment_amount",
+        "payment_expected",
+        "tournament_games_registered",
+        "checkin_uuid",
+        "event_slug",
+        "startgg_event_id",
+        "external_id",
+        "is_guest",
+        "created",
+    ]
+    row_dict = _row_to_dict(columns, row)
+    return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
 def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
     """Find a checkin record by tag + event_slug (case-insensitive tag match)."""
-    raise NotImplementedError("Postgres: get_checkin_by_tag")
+    if not tag or not slug:
+        return None
+
+    query = """
+        SELECT record_id, name, tag, email, telephone, status, member, startgg,
+               payment_valid, payment_amount, payment_expected,
+               tournament_games_registered, checkin_uuid, event_slug,
+               startgg_event_id, external_id, is_guest, created
+        FROM active_event_data
+        WHERE LOWER(tag) = LOWER(%s) AND event_slug = %s
+        ORDER BY created DESC
+        LIMIT 1
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (tag, slug))
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    columns = [
+        "record_id",
+        "name",
+        "tag",
+        "email",
+        "telephone",
+        "status",
+        "member",
+        "startgg",
+        "payment_valid",
+        "payment_amount",
+        "payment_expected",
+        "tournament_games_registered",
+        "checkin_uuid",
+        "event_slug",
+        "startgg_event_id",
+        "external_id",
+        "is_guest",
+        "created",
+    ]
+    row_dict = _row_to_dict(columns, row)
+    return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
 def update_checkin(
     record_id: str, fields: Dict[str, Any], typecast: bool = False
 ) -> Optional[Dict[str, Any]]:
     """Update fields on a checkin record."""
-    raise NotImplementedError("Postgres: update_checkin")
+    if not record_id:
+        return None
+
+    update_fields = {}
+    for key, value in (fields or {}).items():
+        if key == "UUID":
+            update_fields["checkin_uuid"] = value
+        else:
+            update_fields[key] = value
+
+    if not update_fields:
+        return None
+
+    set_sql = ", ".join([f"{k} = %s" for k in update_fields.keys()])
+    params = list(update_fields.values())
+    params.append(record_id)
+
+    columns = None
+    row = None
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE active_event_data SET {set_sql} WHERE record_id = %s RETURNING *",
+                params,
+            )
+            row = cur.fetchone()
+            if row:
+                columns = [desc[0] for desc in cur.description]
+
+    if not row or not columns:
+        return None
+
+    row_dict = _row_to_dict(columns, row)
+    return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
 def delete_checkin(record_id: str) -> bool:
     """Delete a checkin record."""
-    raise NotImplementedError("Postgres: delete_checkin")
+    if not record_id:
+        return False
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM active_event_data WHERE record_id = %s", (record_id,))
+            return cur.rowcount > 0
 
 
 # =============================================
