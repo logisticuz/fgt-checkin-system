@@ -914,10 +914,24 @@ def archive_event(
         startgg_snapshot = settings.get("events_json")
 
     now = datetime.now(timezone.utc)
+    replaced_rows = 0
 
     with _get_pool().connection() as conn:
         with conn.transaction():
             with conn.cursor() as cur:
+                # Replace mode: keep one current archive snapshot per event_slug
+                cur.execute(
+                    "SELECT COUNT(*) FROM event_archive WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                existing_archive_rows = cur.fetchone()[0] or 0
+                if existing_archive_rows > 0:
+                    cur.execute(
+                        "DELETE FROM event_archive WHERE event_slug = %s",
+                        (event_slug,),
+                    )
+                    replaced_rows = cur.rowcount or 0
+
                 # 1. Read active checkins for this slug
                 cur.execute(
                     """
@@ -1069,9 +1083,10 @@ def archive_event(
 
     # 7. Audit log (after commit, best-effort)
     archive_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    audit_action = "event_rearchived" if replaced_rows > 0 else "event_archived"
     log_action(
         archive_user,
-        "event_archived",
+        audit_action,
         "event_archive",
         target_event=event_slug,
         details=json.dumps({
@@ -1079,6 +1094,7 @@ def archive_event(
             "total_revenue": str(stats["total_revenue"]),
             "new_players": new_players,
             "returning_players": returning_players,
+            "replaced_rows": replaced_rows,
             "cleared_active": clear_active,
         }),
     )
@@ -1103,6 +1119,7 @@ def archive_event(
         "games_breakdown": stats["games_breakdown"],
         "most_popular_game": stats["most_popular_game"],
         "status_breakdown": stats["status_breakdown"],
+        "replaced_rows": replaced_rows,
         "cleared_active": deleted_count if clear_active else 0,
     }
 
