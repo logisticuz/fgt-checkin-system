@@ -23,8 +23,8 @@ services:
 
   # Postgres database
   postgres:
-    image: postgres:16-alpine
-    ports: ["5433:5432"]  # Dev uses 5433 to avoid conflict with prod
+    image: postgres:16
+    ports: ["5434:5432"]  # Dev uses 5434 to avoid conflict with other projects
     environment:
       POSTGRES_DB: fgc_checkin
       POSTGRES_USER: fgc
