@@ -808,6 +808,23 @@ def create_layout():
                         ),
                         html.Button("Archive Current Event", id="btn-archive-event", n_clicks=0, style=STYLES["button_primary"]),
                         html.Div(id="archive-feedback", style={"marginTop": "1rem"}),
+
+                        html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.25rem 0"}),
+
+                        html.H3("Reopen Event", style=STYLES["section_title"]),
+                        html.P(
+                            "Reopen archived event and optionally restore active check-ins from archive snapshot.",
+                            style={"color": COLORS["text_secondary"], "marginBottom": "1rem"},
+                        ),
+                        dcc.Checklist(
+                            id="reopen-restore-active-toggle",
+                            options=[{"label": " Restore active check-ins from archive", "value": "restore"}],
+                            value=["restore"],
+                            style={"marginBottom": "1rem", "color": COLORS["text_secondary"]},
+                            inputStyle={"marginRight": "0.5rem"},
+                        ),
+                        html.Button("Reopen Current Event", id="btn-reopen-event", n_clicks=0, style=STYLES["button_secondary"]),
+                        html.Div(id="reopen-feedback", style={"marginTop": "1rem"}),
                     ]),
 
                     # Hidden elements to satisfy callback dependencies

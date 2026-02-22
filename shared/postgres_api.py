@@ -1124,6 +1124,148 @@ def archive_event(
     }
 
 
+def reopen_event(
+    event_slug: str,
+    *,
+    restore_active: bool = True,
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Reopen an archived event for continued check-ins.
+
+    - Sets active_event_slug in settings
+    - Optionally restores active_event_data rows from event_archive snapshot
+      when there are currently no active rows for the slug.
+    """
+    if not event_slug:
+        raise ValueError("event_slug is required")
+
+    now = datetime.now(timezone.utc)
+    restored_rows = 0
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event_date, event_display_name
+                    FROM event_stats
+                    WHERE event_slug = %s
+                    LIMIT 1
+                    """,
+                    (event_slug,),
+                )
+                stats_row = cur.fetchone()
+
+                if not stats_row:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM event_archive WHERE event_slug = %s",
+                        (event_slug,),
+                    )
+                    if (cur.fetchone()[0] or 0) == 0:
+                        raise ValueError(f"No archived data found for event_slug '{event_slug}'")
+                    stats_row = (None, "")
+
+                event_date, event_display_name = stats_row
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM settings
+                    WHERE is_active = true
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    settings_id = row[0]
+                else:
+                    cur.execute("INSERT INTO settings (is_active, created_at, updated_at) VALUES (true, now(), now()) RETURNING id")
+                    settings_id = cur.fetchone()[0]
+
+                event_date_value = event_date.isoformat() if event_date is not None and hasattr(event_date, "isoformat") else event_date
+
+                cur.execute(
+                    """
+                    UPDATE settings
+                    SET is_active = true,
+                        active_event_slug = %s,
+                        event_display_name = COALESCE(NULLIF(%s, ''), event_display_name),
+                        event_date = COALESCE(%s::date, event_date),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        event_slug,
+                        event_display_name or "",
+                        event_date_value,
+                        settings_id,
+                    ),
+                )
+
+                if restore_active:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM active_event_data WHERE event_slug = %s",
+                        (event_slug,),
+                    )
+                    active_count = cur.fetchone()[0] or 0
+
+                    if active_count == 0:
+                        cur.execute(
+                            """
+                            INSERT INTO active_event_data (
+                                record_id, event_slug, external_id,
+                                name, tag, email, telephone,
+                                status, member, startgg, payment_valid,
+                                payment_amount, payment_expected,
+                                tournament_games_registered, checkin_uuid,
+                                startgg_event_id, is_guest, created
+                            )
+                            SELECT
+                                gen_random_uuid()::text,
+                                event_slug,
+                                external_id,
+                                name,
+                                tag,
+                                email,
+                                telephone,
+                                status,
+                                member,
+                                startgg,
+                                payment_valid,
+                                payment_amount,
+                                payment_expected,
+                                tournament_games_registered,
+                                checkin_uuid,
+                                startgg_event_id,
+                                is_guest,
+                                %s
+                            FROM event_archive
+                            WHERE event_slug = %s
+                            """,
+                            (now, event_slug),
+                        )
+                        restored_rows = cur.rowcount or 0
+
+    reopen_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    log_action(
+        reopen_user,
+        "event_reopened",
+        "settings",
+        target_event=event_slug,
+        details=json.dumps({"restore_active": restore_active, "restored_rows": restored_rows}),
+    )
+
+    logger.info(f"🔓 Reopened event '{event_slug}' (restored_rows={restored_rows})")
+    return {
+        "event_slug": event_slug,
+        "reopened": True,
+        "restore_active": restore_active,
+        "restored_rows": restored_rows,
+    }
+
+
 # =============================================
 # Sessions
 # =============================================

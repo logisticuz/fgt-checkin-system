@@ -22,11 +22,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Airtable & Start.gg API config
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-SETTINGS_TABLE = "settings"
-CHECKINS_TABLE = "active_event_data"
+# Storage backend + Start.gg API config
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
 
@@ -34,8 +30,8 @@ def register_callbacks(app):
     """
     Register all Dash callbacks for:
     - Live check-ins table updates
-    - Admin "Fetch Event Data" (Start.gg -> Airtable settings)
-    - Populate game dropdown from Airtable (default_game) and expose events map
+    - Admin "Fetch Event Data" (Start.gg -> settings)
+    - Populate game dropdown from settings (default_game) and expose events map
     """
 
     # ---------------------------------------------------------------------
@@ -327,8 +323,6 @@ def register_callbacks(app):
         # Guards for env
         if not STARTGG_API_KEY:
             return "❌ Missing STARTGG_API_KEY.", no_update, no_update
-        if not AIRTABLE_API_KEY or not BASE_ID:
-            return "❌ Missing Airtable env (AIRTABLE_API_KEY/BASE_ID).", no_update, no_update
 
         # 1) Extract slug robustly
         try:
@@ -398,10 +392,10 @@ def register_callbacks(app):
         ]
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
-        # 3) Find active settings row using shared airtable_api
+        # 3) Find active settings row using storage backend
         settings_data = get_active_settings_with_id()
         if not settings_data:
-            return "❌ No settings record found in Airtable.", no_update, no_update
+            return "❌ No active settings record found.", no_update, no_update
         settings_id = settings_data["record_id"]
         current_fields = settings_data.get("fields", {}) or {}
 
@@ -432,7 +426,7 @@ def register_callbacks(app):
             seen = set(keep)
             new_selected = keep + [n for n in new_candidates if n not in seen]
 
-        # 5) Patch Airtable settings using shared airtable_api
+        # 5) Update settings using storage backend
         patch_fields = {
             "active_event_slug": slug,
             "event_display_name": tournament.get("name", ""),  # Store proper tournament name with åäö
@@ -440,9 +434,9 @@ def register_callbacks(app):
         }
         result = update_settings(settings_id, patch_fields)
         if not result:
-            return "❌ Airtable update failed", no_update, no_update
+            return "❌ Settings update failed", no_update, no_update
 
-        logger.info(f"Updated settings in Airtable for slug: {slug}")
+        logger.info(f"Updated settings for slug: {slug}")
 
         # Build new dropdown options with the new slug
         from shared.storage import get_all_event_slugs
@@ -460,14 +454,14 @@ def register_callbacks(app):
         return f"✅ Updated {tournament_name} • {len(events)} events", dropdown_options, slug
 
     # ---------------------------------------------------------------------
-    # Helper: read active settings.fields from Airtable (uses shared airtable_api)
+    # Helper: read active settings.fields from storage backend
     # ---------------------------------------------------------------------
     def _get_active_settings_fields():
         result = get_active_settings_with_id()
         return result.get("fields") if result else None
 
     # ---------------------------------------------------------------------
-    # Populate game-dropdown from Airtable (default_game) + mapping store
+    # Populate game-dropdown from settings (default_game) + mapping store
     # ---------------------------------------------------------------------
     @app.callback(
         Output("game-dropdown", "options"),
@@ -481,12 +475,12 @@ def register_callbacks(app):
     )
     def fill_game_dropdown(_n_clicks, _ticks, _selected_slug):
         """
-        Populate the game dropdown from Airtable (default_game multi-select).
+        Populate the game dropdown from settings (default_game multi-select).
         Also provide name->(id, slug) mapping through events-map-store (from events_json).
         """
         fields = _get_active_settings_fields()
         if not fields:
-            return [], None, "⚠️ Could not read active settings from Airtable.", []
+            return [], None, "⚠️ Could not read active settings.", []
 
         # 1) Options from default_game (multi-select)
         names = fields.get("default_game") or []  # list[str]
@@ -511,7 +505,7 @@ def register_callbacks(app):
         value = options[0]["value"] if options else None
 
         # 4) Help text
-        help_text = "Games populated from Airtable (default_game)."
+        help_text = "Games populated from settings (default_game)."
 
         return options, value, help_text, mapping
 
@@ -1049,7 +1043,7 @@ def register_callbacks(app):
         return dict(content=df.to_csv(index=False), filename=filename), feedback
 
     # -------------------------------------------------------------------------
-    # Save Check-in Requirements - update settings in Airtable
+    # Save Check-in Requirements - update settings
     # -------------------------------------------------------------------------
     @app.callback(
         Output("requirements-save-feedback", "children"),
@@ -1063,7 +1057,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def save_requirements(n_clicks, req_payment, req_membership, req_startgg, offer_membership, current_store):
-        """Save check-in requirement settings to Airtable."""
+        """Save check-in requirement settings to storage backend."""
         if not n_clicks:
             return no_update, no_update
 
@@ -1214,7 +1208,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def save_payment_settings(n_clicks, price_per_game, swish_number):
-        """Save payment settings (price per game, swish number) to Airtable."""
+        """Save payment settings (price per game, swish number) to storage backend."""
         if not n_clicks:
             return no_update
 
@@ -1323,6 +1317,70 @@ def register_callbacks(app):
                 html.Div(
                     f"Replaced rows: {result.get('replaced_rows', 0)} | "
                     f"Cleared active: {result.get('cleared_active', 0)}"
+                ),
+            ],
+        )
+
+    # -------------------------------------------------------------------------
+    # Reopen archived event and optionally restore active check-ins
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("reopen-feedback", "children"),
+        Input("btn-reopen-event", "n_clicks"),
+        State("event-dropdown", "value"),
+        State("reopen-restore-active-toggle", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def reopen_current_event(n_clicks, selected_slug, restore_flags, auth_state):
+        if not n_clicks:
+            return no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return html.Span("❌ Select a specific event before reopening.", style={"color": "#ef4444"})
+
+        restore_active = "restore" in (restore_flags or [])
+        payload = {
+            "event_slug": selected_slug,
+            "restore_active": restore_active,
+            "user": {
+                "user_id": (auth_state or {}).get("user_id", ""),
+                "user_name": (auth_state or {}).get("user_name", "system"),
+                "user_email": (auth_state or {}).get("user_email", ""),
+            },
+        }
+
+        reopen_fn = getattr(storage_api, "reopen_event", None)
+        if reopen_fn:
+            try:
+                result = reopen_fn(**payload)
+            except Exception as e:
+                logger.exception(f"Reopen failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Reopen failed: {e}", style={"color": "#ef4444"})
+        else:
+            try:
+                resp = requests.post(
+                    f"{BACKEND_INTERNAL_URL}/api/archive/reopen",
+                    json=payload,
+                    timeout=30,
+                )
+                if not resp.ok:
+                    return html.Span(
+                        f"❌ Reopen failed ({resp.status_code}): {resp.text}",
+                        style={"color": "#ef4444"},
+                    )
+                result = resp.json()
+            except Exception as e:
+                logger.exception(f"Reopen API call failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"})
+
+        return html.Div(
+            style={"color": "#10b981", "lineHeight": "1.5"},
+            children=[
+                html.Div(f"✅ Reopened event: {result.get('event_slug', selected_slug)}"),
+                html.Div(
+                    f"Restore active: {result.get('restore_active', restore_active)} | "
+                    f"Restored rows: {result.get('restored_rows', 0)}"
                 ),
             ],
         )

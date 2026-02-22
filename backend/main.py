@@ -748,7 +748,7 @@ async def get_players():
 @app.patch("/players/{record_id}/payment", tags=["Dashboard"])
 async def update_payment_status(record_id: str, request: Request):
     """
-    Update payment_valid status for a player in Airtable.
+    Update payment_valid status for a player in storage backend.
     Body: { "payment_valid": true/false }
     Used by TO dashboard to mark Swish payments.
     """
@@ -762,7 +762,7 @@ async def update_payment_status(record_id: str, request: Request):
     result = update_checkin(record_id, {"payment_valid": payment_valid})
 
     if not result:
-        raise HTTPException(status_code=500, detail="Airtable update failed")
+        raise HTTPException(status_code=500, detail="Storage update failed")
 
     # Broadcast SSE update to all connected clients (including player status pages)
     await sse_manager.broadcast("update", {
@@ -813,6 +813,37 @@ async def archive_event_endpoint(request: Request):
     return {"success": True, **result}
 
 
+@app.post("/api/archive/reopen", tags=["Dashboard"])
+async def reopen_event_endpoint(request: Request):
+    """Reopen an archived event and optionally restore active check-ins."""
+    reopen_fn = getattr(storage_api, "reopen_event", None)
+    if not reopen_fn:
+        raise HTTPException(status_code=501, detail="Reopen is not available for current backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event_slug = (body.get("event_slug") or "").strip()
+    if not event_slug:
+        raise HTTPException(status_code=400, detail="event_slug is required")
+
+    try:
+        result = reopen_fn(
+            event_slug,
+            restore_active=bool(body.get("restore_active", True)),
+            user=body.get("user") or None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Reopen failed for '{event_slug}': {e}")
+        raise HTTPException(status_code=500, detail=f"Reopen failed: {e}")
+
+    return {"success": True, **result}
+
+
 @app.patch("/api/player/games", tags=["Checkin"])
 async def update_player_games(request: Request):
     """
@@ -856,7 +887,7 @@ async def update_player_games(request: Request):
     result = update_checkin(record_id, fields, typecast=True)
 
     if not result:
-        raise HTTPException(status_code=500, detail="Airtable update failed")
+        raise HTTPException(status_code=500, detail="Storage update failed")
 
     # Broadcast SSE update for dashboard
     await sse_manager.broadcast("update", {
@@ -881,7 +912,7 @@ async def update_player_member(request: Request):
 
     This separates concerns:
     - n8n handles external API (Sverok eBas)
-    - Backend handles internal database (Airtable)
+    - Backend handles internal database (storage backend)
     """
     try:
         body = await request.json()
@@ -905,7 +936,7 @@ async def update_player_member(request: Request):
     result = update_checkin(record_id, {"member": member})
 
     if not result:
-        raise HTTPException(status_code=500, detail="Airtable update failed")
+        raise HTTPException(status_code=500, detail="Storage update failed")
 
     # Broadcast SSE update for dashboard
     await sse_manager.broadcast("update", {
