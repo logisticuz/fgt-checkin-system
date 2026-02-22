@@ -13,6 +13,7 @@ import logging
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -623,6 +624,487 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
 
     logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
     return result
+
+
+# =============================================
+# Archive / Event Stats (write operations)
+# =============================================
+def compute_event_stats(checkins: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute aggregated event statistics from a list of checkin rows.
+
+    Takes raw checkin dicts from active_event_data (DB types: Decimal for amounts,
+    bool for flags, list for TEXT[] games).
+
+    Returns a dict matching event_stats columns (minus identifiers/retention).
+    Retention (new_players, returning_players, retention_rate) requires player
+    table lookups and is computed separately in archive_event().
+    """
+    total = len(checkins)
+    if total == 0:
+        return {
+            "total_participants": 0,
+            "total_revenue": Decimal("0"),
+            "avg_payment": Decimal("0"),
+            "member_count": 0,
+            "member_percentage": Decimal("0"),
+            "guest_count": 0,
+            "startgg_count": 0,
+            "games_breakdown": {},
+            "most_popular_game": None,
+            "status_breakdown": {},
+        }
+
+    # Revenue
+    total_revenue = sum(
+        Decimal(str(c.get("payment_amount") or 0)) for c in checkins
+    )
+    avg_payment = (total_revenue / total).quantize(Decimal("0.01"))
+
+    # Segments
+    member_count = sum(1 for c in checkins if c.get("member"))
+    guest_count = sum(1 for c in checkins if c.get("is_guest"))
+    startgg_count = sum(1 for c in checkins if c.get("startgg"))
+    member_pct = (Decimal(member_count) / Decimal(total) * 100).quantize(Decimal("0.01"))
+
+    # Games breakdown
+    games: Dict[str, int] = {}
+    for c in checkins:
+        for g in (c.get("tournament_games_registered") or []):
+            games[g] = games.get(g, 0) + 1
+
+    most_popular = max(games, key=games.get) if games else None
+
+    # Status breakdown
+    statuses: Dict[str, int] = {}
+    for c in checkins:
+        s = c.get("status") or "Unknown"
+        statuses[s] = statuses.get(s, 0) + 1
+
+    return {
+        "total_participants": total,
+        "total_revenue": total_revenue,
+        "avg_payment": avg_payment,
+        "member_count": member_count,
+        "member_percentage": member_pct,
+        "guest_count": guest_count,
+        "startgg_count": startgg_count,
+        "games_breakdown": games,
+        "most_popular_game": most_popular,
+        "status_breakdown": statuses,
+    }
+
+
+def _match_or_create_player(
+    cur,
+    checkin: Dict[str, Any],
+    event_slug: str,
+    event_date: str,
+    now: datetime,
+) -> tuple:
+    """
+    Match a checkin to an existing player or create a new one.
+
+    Match priority: tag (case-insensitive) > email (case-insensitive).
+    Updates player totals, games, timeline on match.
+    Creates new player profile if no match found.
+
+    Returns:
+        (player_uuid: str, is_new: bool)
+    """
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    tag = checkin.get("tag")
+    email = checkin.get("email")
+
+    # Try match by tag, then email
+    player_row = None
+    select_cols = """
+        uuid, games_played, total_events, total_paid,
+        events_list, game_counts, first_seen
+    """
+
+    if tag:
+        cur.execute(
+            f"SELECT {select_cols} FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
+            (tag,),
+        )
+        player_row = cur.fetchone()
+
+    if not player_row and email:
+        cur.execute(
+            f"SELECT {select_cols} FROM players WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+            (email,),
+        )
+        player_row = cur.fetchone()
+
+    new_games = checkin.get("tournament_games_registered") or []
+    payment = Decimal(str(checkin.get("payment_amount") or 0))
+
+    if player_row:
+        # ---- Existing player: update ----
+        (
+            p_uuid, p_games, p_total_events, p_total_paid,
+            p_events_list, p_game_counts, p_first_seen,
+        ) = player_row
+
+        p_games = p_games or []
+        p_total_events = p_total_events or 0
+        p_events_list = p_events_list if isinstance(p_events_list, list) else []
+        p_game_counts = p_game_counts if isinstance(p_game_counts, dict) else {}
+
+        # Merge games_played (unique set)
+        updated_games = list(set(p_games) | set(new_games))
+
+        # Accumulate game_counts
+        for g in new_games:
+            p_game_counts[g] = p_game_counts.get(g, 0) + 1
+        favorite = max(p_game_counts, key=p_game_counts.get) if p_game_counts else None
+
+        # Append to events_list (skip if already archived for this slug)
+        is_new_event = event_slug not in p_events_list
+        if is_new_event:
+            updated_events = p_events_list + [event_slug]
+            new_total_events = p_total_events + 1
+        else:
+            updated_events = p_events_list
+            new_total_events = p_total_events
+
+        # Only add payment if this is a new event for the player (avoid double-counting)
+        payment_to_add = payment if is_new_event else Decimal("0")
+
+        cur.execute(
+            """
+            UPDATE players SET
+                tag = COALESCE(%s, tag),
+                email = COALESCE(%s, email),
+                name = COALESCE(%s, name),
+                telephone = COALESCE(%s, telephone),
+                games_played = %s,
+                game_counts = %s,
+                favorite_game = %s,
+                total_events = %s,
+                total_paid = total_paid + %s,
+                last_seen = %s::date,
+                last_event = %s,
+                events_list = %s,
+                is_member = COALESCE(%s, is_member),
+                updated_at = %s
+            WHERE uuid = %s
+            """,
+            (
+                tag, email, checkin.get("name"), checkin.get("telephone"),
+                updated_games,
+                _Json(p_game_counts),
+                favorite,
+                new_total_events,
+                payment_to_add,
+                event_date, event_slug,
+                _Json(updated_events),
+                checkin.get("member"),
+                now,
+                p_uuid,
+            ),
+        )
+        return (p_uuid, False)
+
+    else:
+        # ---- New player: create ----
+        game_counts: Dict[str, int] = {}
+        for g in new_games:
+            game_counts[g] = game_counts.get(g, 0) + 1
+        favorite = max(game_counts, key=game_counts.get) if game_counts else None
+
+        cur.execute(
+            """
+            INSERT INTO players (
+                name, tag, email, telephone,
+                games_played, game_counts, favorite_game,
+                total_events, total_paid,
+                first_seen, last_seen, first_event, last_event,
+                events_list, is_member, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s::date, %s::date, %s, %s,
+                %s, %s, %s, %s
+            )
+            RETURNING uuid
+            """,
+            (
+                checkin.get("name"), tag, email, checkin.get("telephone"),
+                new_games or [],
+                _Json(game_counts) if game_counts else _Json({}),
+                favorite,
+                1,
+                payment,
+                event_date, event_date, event_slug, event_slug,
+                _Json([event_slug]),
+                checkin.get("member") or False,
+                now, now,
+            ),
+        )
+        new_uuid = cur.fetchone()[0]
+        return (new_uuid, True)
+
+
+def archive_event(
+    event_slug: str,
+    *,
+    event_date: Optional[str] = None,
+    event_display_name: str = "",
+    swish_expected_per_game: int = 0,
+    startgg_snapshot: Optional[Dict[str, Any]] = None,
+    user: Optional[Dict[str, Any]] = None,
+    clear_active: bool = False,
+) -> Dict[str, Any]:
+    """
+    Archive an event: match/create players, copy checkins to event_archive,
+    compute + store stats, audit log.
+
+    All writes happen in a single transaction (all-or-nothing).
+    Audit log is written after commit (best-effort).
+
+    Args:
+        event_slug: The event to archive.
+        event_date: ISO date string (YYYY-MM-DD). Falls back to settings.event_date.
+        event_display_name: Human-readable event name.
+        swish_expected_per_game: Payment config snapshot at archive time.
+        startgg_snapshot: Start.gg event data as JSONB (stored in event_stats).
+        user: Session dict for audit log (user_id, user_name, user_email).
+        clear_active: If True, delete from active_event_data after archiving.
+
+    Returns:
+        Dict with archive summary (participant count, revenue, breakdowns, etc.).
+
+    Raises:
+        ValueError: If event_date cannot be resolved from parameter or settings.
+    """
+    from psycopg.types.json import Json  # type: ignore
+
+    # 0. Resolve defaults from settings where parameters are missing
+    needs_settings = (
+        not event_date or not event_display_name
+        or not swish_expected_per_game or startgg_snapshot is None
+    )
+    if needs_settings:
+        settings = get_active_settings()
+    else:
+        settings = None
+
+    if not event_date:
+        if settings:
+            ed = settings.get("event_date")
+            if ed:
+                event_date = ed.isoformat() if hasattr(ed, "isoformat") else str(ed)
+        if not event_date:
+            raise ValueError(
+                "event_date is required for archiving "
+                "(not provided as parameter and not found in active settings)"
+            )
+
+    if not event_display_name and settings:
+        event_display_name = settings.get("event_display_name") or ""
+
+    if not swish_expected_per_game and settings:
+        swish_expected_per_game = settings.get("swish_expected_per_game") or 0
+
+    if startgg_snapshot is None and settings:
+        startgg_snapshot = settings.get("events_json")
+
+    now = datetime.now(timezone.utc)
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                # 1. Read active checkins for this slug
+                cur.execute(
+                    """
+                    SELECT name, tag, email, telephone, status,
+                           member, startgg, payment_valid,
+                           payment_amount, payment_expected,
+                           tournament_games_registered, checkin_uuid,
+                           external_id, startgg_event_id, is_guest
+                    FROM active_event_data
+                    WHERE event_slug = %s
+                    """,
+                    (event_slug,),
+                )
+                columns = [desc[0] for desc in cur.description]
+                raw_rows = cur.fetchall()
+
+                if not raw_rows:
+                    logger.warning(f"⚠️ No checkins found for slug '{event_slug}'")
+                    return {"archived": 0, "event_slug": event_slug}
+
+                checkins = [_row_to_dict(columns, row) for row in raw_rows]
+
+                # 2. Match/create players (returns uuid + new/returning flag)
+                player_results = []
+                for c in checkins:
+                    p_uuid, is_new = _match_or_create_player(
+                        cur, c, event_slug, event_date, now
+                    )
+                    player_results.append((p_uuid, is_new))
+
+                # 3. Insert into event_archive (with player_uuid)
+                cur.executemany(
+                    """
+                    INSERT INTO event_archive (
+                        event_slug, event_date, event_display_name,
+                        name, tag, email, telephone, status,
+                        member, startgg, payment_valid,
+                        payment_amount, payment_expected,
+                        swish_expected_per_game,
+                        tournament_games_registered, checkin_uuid,
+                        external_id, startgg_event_id, is_guest,
+                        archived_at, player_uuid
+                    ) VALUES (
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s
+                    )
+                    """,
+                    [
+                        (
+                            event_slug, event_date, event_display_name,
+                            c.get("name"), c.get("tag"), c.get("email"),
+                            c.get("telephone"), c.get("status"),
+                            c.get("member"), c.get("startgg"), c.get("payment_valid"),
+                            c.get("payment_amount"), c.get("payment_expected"),
+                            swish_expected_per_game,
+                            c.get("tournament_games_registered"), c.get("checkin_uuid"),
+                            c.get("external_id"), c.get("startgg_event_id"),
+                            c.get("is_guest"),
+                            now, player_results[i][0],
+                        )
+                        for i, c in enumerate(checkins)
+                    ],
+                )
+
+                # 4. Compute stats + retention from player matching results
+                stats = compute_event_stats(checkins)
+
+                new_players = sum(1 for _, is_new in player_results if is_new)
+                total = stats["total_participants"]
+                returning_players = total - new_players
+                retention_rate = (
+                    (Decimal(returning_players) / Decimal(total) * 100).quantize(
+                        Decimal("0.01")
+                    )
+                    if total > 0
+                    else Decimal("0")
+                )
+
+                # 5. Upsert event_stats (including startgg_snapshot)
+                cur.execute(
+                    """
+                    INSERT INTO event_stats (
+                        event_slug, event_date, event_display_name, archived_at,
+                        total_participants, total_revenue, avg_payment,
+                        member_count, member_percentage, guest_count, startgg_count,
+                        new_players, returning_players, retention_rate,
+                        games_breakdown, most_popular_game, status_breakdown,
+                        startgg_snapshot
+                    ) VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s
+                    )
+                    ON CONFLICT (event_slug) DO UPDATE SET
+                        event_date = EXCLUDED.event_date,
+                        event_display_name = EXCLUDED.event_display_name,
+                        archived_at = EXCLUDED.archived_at,
+                        total_participants = EXCLUDED.total_participants,
+                        total_revenue = EXCLUDED.total_revenue,
+                        avg_payment = EXCLUDED.avg_payment,
+                        member_count = EXCLUDED.member_count,
+                        member_percentage = EXCLUDED.member_percentage,
+                        guest_count = EXCLUDED.guest_count,
+                        startgg_count = EXCLUDED.startgg_count,
+                        new_players = EXCLUDED.new_players,
+                        returning_players = EXCLUDED.returning_players,
+                        retention_rate = EXCLUDED.retention_rate,
+                        games_breakdown = EXCLUDED.games_breakdown,
+                        most_popular_game = EXCLUDED.most_popular_game,
+                        status_breakdown = EXCLUDED.status_breakdown,
+                        startgg_snapshot = EXCLUDED.startgg_snapshot
+                    """,
+                    (
+                        event_slug, event_date, event_display_name, now,
+                        stats["total_participants"],
+                        stats["total_revenue"],
+                        stats["avg_payment"],
+                        stats["member_count"],
+                        stats["member_percentage"],
+                        stats["guest_count"],
+                        stats["startgg_count"],
+                        new_players,
+                        returning_players,
+                        retention_rate,
+                        Json(stats["games_breakdown"]),
+                        stats["most_popular_game"],
+                        Json(stats["status_breakdown"]),
+                        Json(startgg_snapshot) if startgg_snapshot else None,
+                    ),
+                )
+
+                # 6. Optionally clear active data
+                deleted_count = 0
+                if clear_active:
+                    cur.execute(
+                        "DELETE FROM active_event_data WHERE event_slug = %s",
+                        (event_slug,),
+                    )
+                    deleted_count = cur.rowcount
+
+    # 7. Audit log (after commit, best-effort)
+    archive_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    log_action(
+        archive_user,
+        "event_archived",
+        "event_archive",
+        target_event=event_slug,
+        details=json.dumps({
+            "participants": stats["total_participants"],
+            "total_revenue": str(stats["total_revenue"]),
+            "new_players": new_players,
+            "returning_players": returning_players,
+            "cleared_active": clear_active,
+        }),
+    )
+
+    logger.info(
+        f"📦 Archived event '{event_slug}': "
+        f"{stats['total_participants']} participants, "
+        f"revenue {stats['total_revenue']}"
+    )
+
+    return {
+        "event_slug": event_slug,
+        "archived": stats["total_participants"],
+        "total_revenue": float(stats["total_revenue"]),
+        "avg_payment": float(stats["avg_payment"]),
+        "member_count": stats["member_count"],
+        "guest_count": stats["guest_count"],
+        "startgg_count": stats["startgg_count"],
+        "new_players": new_players,
+        "returning_players": returning_players,
+        "retention_rate": float(retention_rate),
+        "games_breakdown": stats["games_breakdown"],
+        "most_popular_game": stats["most_popular_game"],
+        "status_breakdown": stats["status_breakdown"],
+        "cleared_active": deleted_count if clear_active else 0,
+    }
 
 
 # =============================================

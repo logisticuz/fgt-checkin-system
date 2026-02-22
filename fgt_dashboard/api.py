@@ -19,7 +19,7 @@ from starlette.middleware.wsgi import WSGIMiddleware
 
 from app import app as dash_app
 from auth import build_authorize_url, exchange_code_for_token, get_startgg_user
-from airtable_api import (
+from shared.storage import (
     create_session,
     get_session,
     delete_session,

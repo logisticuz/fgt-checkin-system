@@ -10,4 +10,5 @@ fastapi
 uvicorn
 starlette
 psycopg[binary]==3.2.6
+psycopg-pool==3.2.6
 
