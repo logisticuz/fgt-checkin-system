@@ -190,7 +190,7 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
         return None
 
     try:
-        record_id = int(record_id)
+        record_id_int: int = int(record_id)
     except (TypeError, ValueError):
         return None
 
@@ -203,7 +203,7 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
     if not columns:
         return None
 
-    values.append(record_id)
+    values.append(record_id_int)
 
     columns_out = None
     row = None
@@ -485,7 +485,33 @@ def delete_checkin(record_id: str) -> bool:
 # =============================================
 def get_players() -> List[Dict[str, Any]]:
     """Return all player profiles."""
-    raise NotImplementedError("Postgres: get_players")
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT uuid, name, email, tag, telephone, created_at
+                FROM players
+                ORDER BY created_at DESC NULLS LAST
+                """
+            )
+            rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        uuid_val, name, email, tag, telephone, created_at = row
+        result.append(
+            {
+                "id": uuid_val,
+                "name": name,
+                "email": email,
+                "tag": tag,
+                "telephone": telephone,
+                "created": created_at.isoformat() if created_at else None,
+            }
+        )
+
+    logger.info(f"👥 Retrieved {len(result)} players.")
+    return result
 
 
 # =============================================
@@ -493,12 +519,110 @@ def get_players() -> List[Dict[str, Any]]:
 # =============================================
 def get_event_history() -> List[Dict[str, Any]]:
     """Return archived event rows."""
-    raise NotImplementedError("Postgres: get_event_history")
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_slug, event_date, event_display_name, archived_at,
+                       total_participants, total_revenue, avg_payment
+                FROM event_stats
+                ORDER BY archived_at DESC NULLS LAST
+                """
+            )
+            rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        (
+            event_slug,
+            event_date,
+            event_display_name,
+            archived_at,
+            total_participants,
+            total_revenue,
+            avg_payment,
+        ) = row
+
+        result.append(
+            {
+                "event_slug": event_slug,
+                "event_date": event_date.isoformat() if event_date else None,
+                "event_display_name": event_display_name,
+                "participants": total_participants,
+                "total_participants": total_participants,
+                "total_revenue": total_revenue,
+                "avg_payment": avg_payment,
+                "created": archived_at.isoformat() if archived_at else None,
+                "archived_at": archived_at.isoformat() if archived_at else None,
+                "status": None,
+            }
+        )
+
+    logger.info(f"📦 Retrieved {len(result)} historical rows.")
+    return result
 
 
 def get_event_history_dashboard() -> List[Dict[str, Any]]:
     """Return event history for dashboard view."""
-    raise NotImplementedError("Postgres: get_event_history_dashboard")
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_slug, event_date, event_display_name, archived_at,
+                       total_participants, total_revenue, avg_payment,
+                       member_count, guest_count, startgg_count,
+                       new_players, returning_players, retention_rate,
+                       games_breakdown, most_popular_game, status_breakdown
+                FROM event_stats
+                ORDER BY archived_at DESC NULLS LAST
+                """
+            )
+            rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        (
+            event_slug,
+            event_date,
+            event_display_name,
+            archived_at,
+            total_participants,
+            total_revenue,
+            avg_payment,
+            member_count,
+            guest_count,
+            startgg_count,
+            new_players,
+            returning_players,
+            retention_rate,
+            games_breakdown,
+            most_popular_game,
+            status_breakdown,
+        ) = row
+
+        result.append(
+            {
+                "event_slug": event_slug,
+                "event_date": event_date.isoformat() if event_date else None,
+                "event_display_name": event_display_name,
+                "archived_at": archived_at.isoformat() if archived_at else None,
+                "total_participants": total_participants,
+                "total_revenue": total_revenue,
+                "avg_payment": avg_payment,
+                "member_count": member_count,
+                "guest_count": guest_count,
+                "startgg_count": startgg_count,
+                "new_players": new_players,
+                "returning_players": returning_players,
+                "retention_rate": retention_rate,
+                "games_breakdown": games_breakdown,
+                "most_popular_game": most_popular_game,
+                "status_breakdown": status_breakdown,
+            }
+        )
+
+    logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
+    return result
 
 
 # =============================================
