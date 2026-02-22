@@ -10,6 +10,7 @@ from shared.storage import (
     delete_checkin,
     get_audit_log,
 )
+import shared.storage as storage_api
 import pandas as pd
 import requests
 import os
@@ -27,6 +28,7 @@ BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 SETTINGS_TABLE = "settings"
 CHECKINS_TABLE = "active_event_data"
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
+BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
 
 def register_callbacks(app):
     """
@@ -1249,6 +1251,81 @@ def register_callbacks(app):
             )
         else:
             return html.Span("❌ Failed to save settings", style={"color": "#ef4444"})
+
+    # -------------------------------------------------------------------------
+    # Archive current event to event_archive + event_stats
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("archive-feedback", "children"),
+        Input("btn-archive-event", "n_clicks"),
+        State("event-dropdown", "value"),
+        State("archive-clear-active-toggle", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def archive_current_event(n_clicks, selected_slug, clear_flags, auth_state):
+        if not n_clicks:
+            return no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return html.Span("❌ Select a specific event before archiving.", style={"color": "#ef4444"})
+
+        clear_active = "clear" in (clear_flags or [])
+
+        settings = get_active_settings() or {}
+        payload = {
+            "event_slug": selected_slug,
+            "event_date": settings.get("event_date"),
+            "event_display_name": settings.get("event_display_name", ""),
+            "swish_expected_per_game": settings.get("swish_expected_per_game", 0),
+            "startgg_snapshot": settings.get("events_json"),
+            "clear_active": clear_active,
+            "user": {
+                "user_id": (auth_state or {}).get("user_id", ""),
+                "user_name": (auth_state or {}).get("user_name", "system"),
+                "user_email": (auth_state or {}).get("user_email", ""),
+            },
+        }
+
+        archive_fn = getattr(storage_api, "archive_event", None)
+        if archive_fn:
+            try:
+                result = archive_fn(**payload)
+            except Exception as e:
+                logger.exception(f"Archive failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Archive failed: {e}", style={"color": "#ef4444"})
+        else:
+            try:
+                resp = requests.post(
+                    f"{BACKEND_INTERNAL_URL}/api/archive/event",
+                    json=payload,
+                    timeout=30,
+                )
+                if not resp.ok:
+                    return html.Span(
+                        f"❌ Archive failed ({resp.status_code}): {resp.text}",
+                        style={"color": "#ef4444"},
+                    )
+                result = resp.json()
+            except Exception as e:
+                logger.exception(f"Archive API call failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"})
+
+        return html.Div(
+            style={"color": "#10b981", "lineHeight": "1.5"},
+            children=[
+                html.Div(f"✅ Archived event: {result.get('event_slug', selected_slug)}"),
+                html.Div(
+                    f"Participants: {result.get('archived', 0)} | "
+                    f"Revenue: {result.get('total_revenue', 0)} | "
+                    f"New: {result.get('new_players', 0)} | Returning: {result.get('returning_players', 0)}"
+                ),
+                html.Div(
+                    f"Replaced rows: {result.get('replaced_rows', 0)} | "
+                    f"Cleared active: {result.get('cleared_active', 0)}"
+                ),
+            ],
+        )
 
     # -------------------------------------------------------------------------
     # Audit Log - load and filter entries

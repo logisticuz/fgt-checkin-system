@@ -30,6 +30,7 @@ from shared.storage import (
     update_checkin,
     delete_checkin,
 )
+import shared.storage as storage_api
 from validation import sanitize_checkin_payload, validate_checkin_payload
 
 logging.basicConfig(level=logging.INFO)
@@ -775,6 +776,41 @@ async def update_payment_status(record_id: str, request: Request):
 @app.get("/event-history", tags=["Dashboard"])
 async def get_event_history():
     return storage_get_event_history()
+
+
+@app.post("/api/archive/event", tags=["Dashboard"])
+async def archive_event_endpoint(request: Request):
+    """Archive current event into event_archive/event_stats using storage backend."""
+    archive_fn = getattr(storage_api, "archive_event", None)
+    if not archive_fn:
+        raise HTTPException(status_code=501, detail="Archive is not available for current backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event_slug = (body.get("event_slug") or "").strip()
+    if not event_slug:
+        raise HTTPException(status_code=400, detail="event_slug is required")
+
+    try:
+        result = archive_fn(
+            event_slug,
+            event_date=body.get("event_date"),
+            event_display_name=body.get("event_display_name") or "",
+            swish_expected_per_game=body.get("swish_expected_per_game") or 0,
+            startgg_snapshot=body.get("startgg_snapshot"),
+            user=body.get("user") or None,
+            clear_active=bool(body.get("clear_active", False)),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Archive failed for '{event_slug}': {e}")
+        raise HTTPException(status_code=500, detail=f"Archive failed: {e}")
+
+    return {"success": True, **result}
 
 
 @app.patch("/api/player/games", tags=["Checkin"])

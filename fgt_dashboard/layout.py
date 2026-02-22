@@ -792,6 +792,24 @@ def create_layout():
                         html.Div(id="payment-settings-feedback", style={"marginTop": "1rem"}),
                     ]),
 
+                    # Archive Event
+                    html.Div(style=STYLES["card"], children=[
+                        html.H3("Event Archive", style=STYLES["section_title"]),
+                        html.P(
+                            "Archive current event data to historical tables (event_archive + event_stats).",
+                            style={"color": COLORS["text_secondary"], "marginBottom": "1rem"},
+                        ),
+                        dcc.Checklist(
+                            id="archive-clear-active-toggle",
+                            options=[{"label": " Clear active check-ins after archive", "value": "clear"}],
+                            value=[],
+                            style={"marginBottom": "1rem", "color": COLORS["text_secondary"]},
+                            inputStyle={"marginRight": "0.5rem"},
+                        ),
+                        html.Button("Archive Current Event", id="btn-archive-event", n_clicks=0, style=STYLES["button_primary"]),
+                        html.Div(id="archive-feedback", style={"marginTop": "1rem"}),
+                    ]),
+
                     # Hidden elements to satisfy callback dependencies
                     html.Div(style={"display": "none"}, children=[
                         dcc.Dropdown(id="game-dropdown", options=[], value=None),
