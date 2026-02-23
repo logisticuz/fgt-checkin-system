@@ -37,7 +37,8 @@ behover n8n bara orkestrara externa API-anrop (Start.gg, eBas), aldrig skriva ti
 
 **register.html (line 557)**
 - `fetch('/n8n/webhook/ebas/register...')` -> `fetch('/api/ebas/register', ...)`
-- Existing `/api/player/member` fallback call is now redundant but harmless (idempotent)
+- Removed redundant `/api/player/member` fallback update call after successful eBas register
+  (member status is now owned by `POST /api/checkin/{checkin_id}/member-status` in the v2 flow)
 
 ### n8n Workflows
 
@@ -97,6 +98,12 @@ Form -> /api/checkin/orchestrate -> begin_checkin(Postgres)
 4. Test API failure: n8n returns error -> checkin exists with Pending status
 5. Test eBas register: personnummer -> Sverok API -> member=true in Postgres
 6. When green: disable old v4 Orchestrator + v1 eBas Register workflows
+
+## Post-cutover smoke (DEV)
+- `POST /api/checkin/orchestrate` returns `200` with expected payload fields:
+  `ready`, `missing[]`, `status`, `slug`, `checkin_id`
+- `POST /api/ebas/register` returns workflow response format and preserves `checkin_id`, `tag`, `slug`
+- SSE verification: subscribed client received `event: checkin` after orchestration call
 
 ## Rollback plan (quick)
 1. Re-activate old workflows: `Checkin Orchestrator v4` and `eBas Register v1`.

@@ -550,7 +550,7 @@
       clearMessages();
 
       try {
-        // Include tag and slug so n8n can update the Airtable record
+        // Include tag and slug so backend can resolve current checkin
         const tag = state.tag || localStorage.getItem("tag") || "";
         const slug = state.eventSlug || localStorage.getItem("eventSlug") || "";
 
@@ -563,28 +563,6 @@
         const data = await response.json();
 
         if (data.success || data.already_member) {
-          // eBas registration successful - now update Airtable via backend
-          // This separates concerns: n8n handles Sverok API, backend handles Airtable
-          try {
-            const memberResponse = await fetch("/api/player/member", {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                tag: tag,
-                slug: slug,
-                member: true
-              })
-            });
-
-            if (!memberResponse.ok) {
-              console.warn("Could not update member status in Airtable:", await memberResponse.text());
-              // Don't fail the whole flow - eBas registration was successful
-            }
-          } catch (memberErr) {
-            console.warn("Error updating member status:", memberErr);
-            // Don't fail - eBas registration was successful
-          }
-
           showMessage(data.already_member
             ? "You are already a member - perfect!"
             : "Membership registered! Thank you for supporting us!", "success");
