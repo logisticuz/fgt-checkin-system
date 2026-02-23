@@ -64,9 +64,8 @@ CHANGELOG*.md
 context/
 todoishhh.txt
 
-# Keep changelogs tracked
-!docs/changelogs/
-!docs/changelogs/**
+# Local-only changelogs are kept in agent-docs, not in repo
+docs/changelogs/
 
 # -- Local-only files ------------------
 fix_events_null.py
