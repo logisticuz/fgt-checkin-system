@@ -23,6 +23,25 @@ services:
       retries: 3
     networks: [fgt-net]
 
+  # Postgres database
+  postgres:
+    image: postgres:16
+    # No port exposed - internal only via fgt-net
+    environment:
+      POSTGRES_DB: fgc_checkin
+      POSTGRES_USER: fgc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fgc -d fgc_checkin"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [fgt-net]
+
   # FastAPI backend (proxy to n8n)
   backend:
     build:
@@ -42,6 +61,7 @@ services:
     restart: unless-stopped
     depends_on:
       - n8n
+      - postgres
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -101,6 +121,7 @@ volumes:
   n8n_data:
     external: true
     name: fgt-checkin-system_n8n_data
+  pgdata_prod:
 
 networks:
   fgt-net:

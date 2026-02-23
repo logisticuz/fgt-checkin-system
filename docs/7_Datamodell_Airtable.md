@@ -1,6 +1,8 @@
 # 7. Datamodell - Airtable
 
-Airtable fungerar som den centrala databasen för systemet, där all viktig information om eventinställningar och deltagarstatus lagras. Denna dokumentation beskriver schemat för de viktigaste tabellerna.
+> **Historiskt dokument.** Postgres är nu systemets primära databas (sedan 2026-02). Det auktoritativa schemat finns i `shared/postgres_api.py`. Airtable stöds fortfarande som legacy fallback via `DATA_BACKEND=airtable`, och detta dokument är relevant som referens för det läget. Tabellschemat är identiskt mellan Postgres och Airtable.
+
+Airtable fungerade tidigare som den centrala databasen för systemet. Denna dokumentation beskriver schemat för de viktigaste tabellerna, som fortfarande gäller för både Postgres- och Airtable-backenderna.
 
 ---
 

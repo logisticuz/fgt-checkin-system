@@ -27,9 +27,12 @@ Denna guide beskriver hur man sätter upp och kör projektet i en lokal utveckli
     *   Hitta filen `.env.example` i projektets rotmapp.
     *   Skapa en kopia av denna fil och döp den till `.env`.
     *   Öppna den nya `.env`-filen och fyll i alla nödvändiga värden. Detta inkluderar:
-        *   `AIRTABLE_API_KEY` och `AIRTABLE_BASE_ID` från ditt Airtable-konto.
-        *   `STARTGG_API_KEY` från ditt Start.gg-konto.
-        *   Andra relevanta nycklar och konfigurationer.
+        *   `DATABASE_URL` — Postgres-anslutningssträng (t.ex. `postgresql://fgt:pass@postgres:5432/fgt_checkin`). **Krävs.**
+        *   `POSTGRES_PASSWORD` — Lösenord för Postgres-användaren. **Krävs.**
+        *   `DATA_BACKEND` — `postgres` (standard) eller `airtable` (legacy fallback).
+        *   `STARTGG_API_KEY` eller `STARTGG_TOKEN` — API-nyckel för Start.gg. **Krävs.**
+        *   `AIRTABLE_API_KEY` och `AIRTABLE_BASE_ID` — Endast om `DATA_BACKEND=airtable`.
+        *   Andra relevanta nycklar och konfigurationer (se `.env.example` för komplett lista).
 
 3.  **Konfigurera N8N (`n8n.env`)**
     Även `n8n`-tjänsten behöver sina egna miljövariabler, särskilt för att sätta upp användarnamn och lösenord.
@@ -75,12 +78,12 @@ Både `docker-compose.dev.yml` och `docker-compose.prod.yml` är konfigurerade a
 *   **Se loggar:** Om en tjänst inte startar korrekt kan du se dess loggar genom att köra:
     ```bash
     # Se alla loggar i realtid
-    docker-compose -f docker-compose.dev.yml logs -f
+    docker compose -f docker-compose.dev.yml logs -f
 
     # Se loggen för en specifik tjänst (t.ex. backend)
-    docker-compose -f docker-compose.dev.yml logs -f backend
+    docker compose -f docker-compose.dev.yml logs -f backend
     ```
 *   **Stänga av systemet:** För att stoppa alla tjänster, kör:
     ```bash
-    docker-compose -f docker-compose.dev.yml down
+    docker compose -f docker-compose.dev.yml down
     ```

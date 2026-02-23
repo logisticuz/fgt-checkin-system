@@ -33,3 +33,6 @@ Här är en översikt över de olika delarna av dokumentationen. Vi rekommendera
 
 8.  **[Datamodell - Airtable](./7_Datamodell_Airtable.md)**
     *   En översikt över schemat för de centrala Airtable-tabellerna (`settings`, `active_event_data`), inklusive fält, datatyper och syfte.
+
+9.  **[Postgres Migration Plan](./postgres-migration-plan.md)**
+    *   Plan för att ersätta Airtable med Postgres, inklusive schema, adapter och cutover.

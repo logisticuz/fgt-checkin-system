@@ -1,0 +1,271 @@
+{
+  "name": "FGC THN - Checkin Orchestrator v5 (PG)",
+  "description": "Postgres-backed orchestrator. No Airtable nodes. Receives checkin_id from backend, runs Start.gg + eBas checks, reports results back to backend via /api/integration/result.",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "checkin/validate-v5",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wh-v5-checkin",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [-800, 160],
+      "webhookId": "checkin-validate-v5"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
+      },
+      "id": "parse-input-v5",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-576, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://n8n:5678/webhook/ebas/check",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({personnummer: $('Parse Input').first().json.personnummer}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "ebas-check-v5",
+      "name": "eBas Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-224, 64],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://n8n:5678/webhook/startgg/check",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({tag: $('Parse Input').first().json.tag, slug: $('Parse Input').first().json.slug}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "startgg-check-v5",
+      "name": "Start.gg Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-224, 256],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "merge-v5",
+      "name": "Wait for Both",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [0, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine results from eBas and Start.gg checks\nconst ctx = $('Parse Input').first().json;\n\n// Get eBas result\nlet ebas = { isMember: false };\ntry {\n  const ebasItems = $('eBas Check').all();\n  if (ebasItems.length > 0 && ebasItems[0].json && !ebasItems[0].json.error) {\n    ebas = ebasItems[0].json;\n  }\n} catch (e) { /* treat as not member */ }\n\n// Get Start.gg result\nlet sgg = { isRegistered: false, events: [] };\ntry {\n  const sggItems = $('Start.gg Check').all();\n  if (sggItems.length > 0 && sggItems[0].json && !sggItems[0].json.error) {\n    sgg = sggItems[0].json;\n  }\n} catch (e) { /* treat as not registered */ }\n\nconst isActualMember = ebas.isMember === true;\nconst isActualStartgg = sgg.isRegistered === true;\nconst events = sgg.events || [];\nconst now = new Date().toISOString();\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: isActualMember,\n  startgg: isActualStartgg,\n  events: events,\n  _ebasOk: isActualMember,\n  _startggOk: isActualStartgg,\n  _ebasError: ebas.error || null,\n  _startggError: sgg.error || null,\n  fetched_at: now,\n}}];"
+      },
+      "id": "combine-v5",
+      "name": "Combine Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/integration/result",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $json.checkin_id,\n  source: 'startgg',\n  ok: $json._startggOk,\n  data: { registered: $json._startggOk, events: $json.events },\n  error: $json._startggError ? { code: 'api_error', message: String($json._startggError) } : null,\n  fetched_at: $json.fetched_at\n}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "report-startgg-v5",
+      "name": "Report Start.gg Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 64],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/integration/result",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'ebas',\n  ok: $('Combine Results').first().json._ebasOk,\n  data: { member: $('Combine Results').first().json._ebasOk },\n  error: $('Combine Results').first().json._ebasError ? { code: 'api_error', message: String($('Combine Results').first().json._ebasError) } : null,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "report-ebas-v5",
+      "name": "Report eBas Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 256],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "wait-reports-v5",
+      "name": "Wait for Reports",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [720, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return summary to the waiting backend orchestrate endpoint\nconst ctx = $('Combine Results').first().json;\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: ctx.member,\n  startgg: ctx.startgg,\n  events: ctx.events,\n  integration_complete: true,\n}}];"
+      },
+      "id": "return-v5",
+      "name": "Return Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [944, 160]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "eBas Check",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Start.gg Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "eBas Check": {
+      "main": [
+        [
+          {
+            "node": "Wait for Both",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start.gg Check": {
+      "main": [
+        [
+          {
+            "node": "Wait for Both",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Wait for Both": {
+      "main": [
+        [
+          {
+            "node": "Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Results": {
+      "main": [
+        [
+          {
+            "node": "Report Start.gg Result",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Report eBas Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Start.gg Result": {
+      "main": [
+        [
+          {
+            "node": "Wait for Reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report eBas Result": {
+      "main": [
+        [
+          {
+            "node": "Wait for Reports",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Wait for Reports": {
+      "main": [
+        [
+          {
+            "node": "Return Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Stockholm",
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

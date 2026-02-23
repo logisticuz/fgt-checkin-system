@@ -8,15 +8,15 @@ Det finns två huvudsakliga dataflöden i systemet: ett för administratören (T
 
 Detta flöde beskriver hur en turneringsorganisatör (TO) förbereder systemet för ett nytt event. All interaktion sker via **FGT Dashboard**.
 
-1.  **Öppna Instrumentpanelen:** TO navigerar till `https://admin.fgctrollhattan.se` (eller `http://localhost/admin/` i utvecklingsmiljö).
+1.  **Öppna Instrumentpanelen:** TO navigerar till `https://admin.fgctrollhattan.se` (eller `http://localhost:8088/admin/` i utvecklingsmiljö).
 2.  **Klistra in Länk:** I "Settings"-fliken klistrar TO in den fullständiga URL:en till den specifika turneringen på Start.gg.
 3.  **Hämta Eventdata:** TO klickar på knappen "Fetch Event Data".
 4.  **Anrop till Start.gg:**
     *   `fgt_dashboard`-tjänsten tar emot anropet.
     *   Den extraherar turnerings-sluggen från URL:en.
     *   Den skickar en GraphQL-förfrågan till **Start.gg:s API** för att hämta turneringsinformation, inklusive namn, datum och en lista över alla spelevent som ingår.
-5.  **Uppdatera Airtable:**
-    *   `fgt_dashboard` ansluter sedan till **Airtable API**.
+5.  **Uppdatera Postgres:**
+    *   `fgt_dashboard` anropar storage-facaden (`shared/storage.py`) som skriver till Postgres.
     *   Den hittar den "aktiva" raden i `settings`-tabellen (där `is_active = TRUE`).
     *   Den uppdaterar raden med den hämtade informationen: turnerings-slug, namn, datum, och en JSON-lista över alla spelevent.
 6.  **Bekräftelse:** Instrumentpanelen visar ett meddelande som bekräftar att inställningarna har uppdaterats. Systemet är nu konfigurerat och redo att ta emot incheckningar för det specifika eventet.
@@ -25,87 +25,79 @@ Detta flöde beskriver hur en turneringsorganisatör (TO) förbereder systemet f
 
 ### Flöde 2: Deltagare - Incheckning
 
-Detta flöde beskriver vad som händer från det att en deltagare öppnar incheckningssidan till att statusen visas.
+Detta flöde beskriver vad som händer från det att en deltagare öppnar incheckningssidan till att statusen visas. **Backend orkestrerar hela flödet** — n8n används enbart som integration engine för externa API-anrop.
 
-1.  **Öppna Incheckningssidan:** Deltagaren navigerar till `https://checkin.fgctrollhattan.se` (eller `http://localhost/` i utvecklingsmiljö). `Backend`-tjänsten serverar `checkin.html`.
+1.  **Öppna Incheckningssidan:** Deltagaren navigerar till `https://checkin.fgctrollhattan.se` (eller `http://localhost:8088/` i utvecklingsmiljö). `Backend`-tjänsten serverar `checkin.html`.
 2.  **Fylla i Formulär:** Deltagaren fyller i sitt namn, telefonnummer, personnummer och **tag**.
 3.  **Validering (Frontend):** När deltagaren klickar på "Check In", körs `validation.js` i webbläsaren:
     *   Grundläggande kontroller utförs (t.ex. att fält inte är tomma, att personnummer har rätt längd).
     *   Om fel upptäcks, visas ett felmeddelande direkt på sidan och formuläret skickas inte.
-4.  **Anrop till Backend-proxy:**
-    *   Om frontend-valideringen passerar, skickas datan som en `POST`-förfrågan i `JSON`-format till `Backend`-tjänstens proxy-endpoint: `/n8n/webhook/checkin/validate`.
-5.  **Validering (Backend):** `Backend`-tjänsten tar emot anropet innan det skickas till `n8n`.
+4.  **Anrop till Backend Orchestrator:**
+    *   Om frontend-valideringen passerar, skickas datan som en `POST`-förfrågan i `JSON`-format till `POST /api/checkin/orchestrate`.
+5.  **Validering (Backend):** `Backend`-tjänsten tar emot anropet.
     *   Den använder `validation.py` för att utföra samma validering igen på serversidan (som en säkerhetsåtgärd).
-    *   Den "tvättar" även datan, t.ex. genom att ta bort bindestreck och mellanslag från personnummer och telefonnummer för att skapa ett konsekvent format.
-6.  **Anrop till N8N:** Den validerade och tvättade datan skickas vidare till `n8n`-tjänstens webhook.
+    *   Den "tvättar" datan, t.ex. genom att ta bort bindestreck och mellanslag från personnummer och telefonnummer.
+6.  **Skapa Incheckning i Postgres:** Backend skriver direkt till Postgres via `begin_checkin()`. Denna funktion använder UPSERT (ON CONFLICT) för atomär dedupliceringskontroll — ingen race condition möjlig.
+7.  **Anropa n8n:** Backend anropar n8n v5-orkestratorn (`checkin/validate-v5`) med check-in-data och checkin-ID.
+8.  **n8n utför externa kontroller:** n8n anropar Start.gg och eBas parallellt via sub-workflows. n8n skriver **inte** till databasen.
+9.  **n8n rapporterar tillbaka:** n8n skickar resultaten (per källa) till backend via `POST /api/integration/result`. Backend tar emot, uppdaterar Postgres med resultat (member, startgg, etc.), och beräknar slutstatus.
+10. **SSE Broadcast:** Backend skickar en SSE-broadcast med uppdaterad status till alla anslutna klienter (dashboard + status-sidor).
+11. **Svar till Frontend:** Backend returnerar ett JSON-svar till formuläret med status och eventuella saknade krav.
 
-7.  **N8N-Workflow Exekverar:** Kärnlogiken för validering och datainsamling exekveras av en serie sammankopplade arbetsflöden i n8n. En mer detaljerad beskrivning av dessa flöden följer nedan.
-
-8.  **Uppdatera Airtable:** Baserat på resultaten från kontrollerna ovan, skickar `n8n` en `PATCH`-förfrågan till **Airtable API** för att uppdatera (eller skapa) deltagarens rad i `active_event_data`-tabellen med deras status (`Ready`, `Pending`, etc.).
-
-9.  **Svar till Frontend:** `n8n` skickar ett `JSON`-svar tillbaka till `Backend`-proxyn, som i sin tur skickar det till användarens webbläsare. Svaret innehåller information om statusen. Exempel: `{"ready": false, "missing": ["Membership"]}`.
-
-10. **Omdirigering (Redirect):** JavaScript-koden i `checkin.html` tar emot svaret och agerar baserat på innehållet:
+12. **Omdirigering (Redirect):** JavaScript-koden i `checkin.html` tar emot svaret och agerar baserat på innehållet:
     *   **Om `ready` är `true`:** Användaren omdirigeras till sin personliga statussida (`status_ready.html`), där de ser en bekräftelse på att allt är klart.
     *   **Om `ready` är `false`:** Användaren omdirigeras till registreringssidan (`register.html`) med query-parametrar som indikerar vad som saknas. Denna sida visar dynamiskt de formulär som krävs, inklusive en Swish-integration med QR-kod (desktop) eller deep link (mobil) om betalning saknas.
 
 ### Logik för 'Ready'-status
 
-För att en deltagare ska få statusen `Ready` måste **samtliga** av följande villkor vara uppfyllda:
-*   `member` är `true`.
-*   `startgg` är `true`.
-*   `payment_valid` är `true`.
+För att en deltagare ska få statusen `Ready` kontrolleras kraven mot eventets inställningar i `settings`-tabellen. Kraven är **konfigurerbara per event**:
 
-Denna logik är för närvarande **hårdkodad** i systemet (`backend/main.py` och `fgt_dashboard/callbacks.py`). Funktionalitet för att göra dessa krav konfigurerbara via `settings`-tabellen i Airtable är planerad men inte implementerad.
+| Krav | Setting | Default |
+|------|---------|---------|
+| Betalt | `require_payment` | On |
+| Sverok-medlem | `require_membership` | On |
+| Start.gg-registrerad | `require_startgg` | On |
+
+Logiken (i `backend/main.py` och `fgt_dashboard/callbacks.py`):
+```python
+is_ready = (
+    (not require_payment or payment_valid) and
+    (not require_membership or member) and
+    (not require_startgg or startgg)
+)
+```
+
+Om en TO t.ex. stänger av `require_startgg` för en casual weekly, blir spelare `Ready` utan Start.gg-registrering.
 
 ---
 
 ### Djupdykning: N8N-arbetsflöden
 
-Nedan beskrivs de aktiva n8n-arbetsflödena som hanterar incheckningsprocessen.
+N8N fungerar som en **integration engine** — den anropar externa API:er och rapporterar resultat tillbaka till backend. Den äger ingen data och skriver inte till databasen.
 
-#### `Checkin_Orchestrator.json` (Huvud-orkestratorn)
+#### Checkin Orchestrator v5 (PG) — `checkin/validate-v5`
 
-Detta är det centrala arbetsflödet som orkestrerar hela incheckningsprocessen.
+Det primära arbetsflödet för check-in-verifiering.
 
-*   **Trigger:** `Webhook` (POST `/webhook/checkin/validate`) - Tar emot incheckningsdata från `backend`-tjänsten.
-*   **Load Settings:** Hämtar aktiva inställningar från Airtable (`settings`-tabellen).
-*   **Parse Input:** Extraherar och transformerar data från webhook och inställningar.
-*   **Check Duplicate:** Kontrollerar om spelaren redan är incheckad.
-*   **IF Duplicate:** Returnerar den befintliga statusen om spelaren hittas.
-*   **eBas Check & Start.gg Check:** Anropar sub-workflows för att verifiera medlemskap och turneringsregistrering.
-*   **Merge Results:** Sammanställer resultaten, genererar en `UUID`, sätter initial `status` ("Pending") och `is_guest`-flaggan baserat på Start.gg-resultatet.
-*   **Save to Airtable:** Skapar en ny post i `active_event_data`-tabellen.
-*   **Post-Save Duplicate Handling:** Inkluderar noder för att hantera "race conditions".
-*   **Notify Dashboard:** Anropar `http://backend:8000/api/notify/checkin` för att trigga en SSE broadcast.
-*   **Return Results:** Returnerar det slutliga resultatet.
+*   **Trigger:** Webhook (POST) — anropas av backend med check-in-data och checkin-ID.
+*   **Parallella kontroller:** Anropar eBas Membership Check och Start.gg Check som sub-workflows parallellt.
+*   **Felhantering:** `onError: continueRegularOutput` / `continueOnFail: true` — om ett externt API är nere rapporteras det som ett partiellt resultat istället för att hela flödet fallerar.
+*   **Rapportera tillbaka:** Skickar resultaten (per källa: `startgg`, `ebas`) till backend via `POST /api/integration/result`.
+*   **Notera:** v5 innehåller inga Airtable-noder. All datapersistens hanteras av backend.
 
-#### `eBas_Membership_Check.json` (Medlemskapskontroll)
+#### eBas Register v2 (PG) — `ebas/register-v2`
 
-Detta arbetsflöde validerar en deltagares medlemskap i Sverok.
+Hanterar registrering av nya Sverok-medlemmar.
 
-*   **Trigger:** `Webhook` (POST `/webhook/ebas/check`) - Tar emot `personnummer`.
-*   **Normalize Personnummer:** Validerar och normaliserar personnumret.
-*   **Call eBas confirm_membership:** Anropar Sveroks eBas API.
-*   **Parse Response:** Parsar svaret och returnerar `isMember` (true/false).
+*   **Trigger:** Webhook (POST) — anropas av backend med personnummer och medlemsdata.
+*   **Registrering:** Anropar Sveroks eBas API för att registrera en ny medlem.
+*   **Rapportera tillbaka:** Skickar resultatet till backend via `POST /api/checkin/{id}/member-status`.
+*   **Notera:** v2 innehåller inga Airtable-noder.
 
-#### `eBas_Register.json` (eBas-registrering)
+#### Sub-workflows (oförändrade)
 
-Detta arbetsflöde registrerar nya medlemmar i Sverok.
-
-*   **Trigger:** `Webhook` (POST `/webhook/ebas/register`) - Tar emot medlemsdata.
-*   **Normalize Input:** Validerar och normaliserar indata.
-*   **Call eBas API:** Anropar Sveroks eBas API för registrering.
-*   **Parse Response:** Parsar svaret för att bekräfta framgång.
-
-#### `Startgg_Check.json` (Start.gg-verifiering)
-
-Detta arbetsflöde verifierar om en spelare är registrerad i en specifik Start.gg-turnering.
-
-*   **Trigger:** `Webhook` (POST `/webhook/startgg/check`) - Tar emot `tag` och `slug`.
-*   **Parse Input:** Validerar och rensar indata.
-*   **Query Start.gg:** Anropar Start.gg:s GraphQL API.
-*   **Parse Response:** Parsar svaret och returnerar `isRegistered` (true/false).
+*   **eBas Membership Check** — Anropar eBas `confirm_membership` med personnummer. Returnerar `isMember` (true/false).
+*   **Start.gg Check** — Anropar Start.gg GraphQL med tag och slug. Returnerar `isRegistered` (true/false) och matchade events.
 
 ---
 
@@ -115,12 +107,16 @@ Systemet använder Server-Sent Events (SSE) för att skicka omedelbara uppdateri
 
 1.  **Klient Ansluter:** När **FGT Dashboard** eller en deltagares `status_pending.html`-sida laddas, ansluter en JavaScript-klient (`sse-client.js`) till `GET /api/events/stream` på `Backend`-tjänsten. Detta håller en öppen anslutning.
 2.  **Händelse Sker:** En händelse som kräver en uppdatering inträffar. Det finns två huvudtyper:
-    *   **Ny incheckning:** `n8n`-flödet slutförs och gör ett `POST`-anrop till `/api/notify/checkin`.
-    *   **Manuell uppdatering:** En TO klickar på en knapp i dashboarden (t.ex. godkänner en betalning). Dashboarden anropar en API-endpoint (t.ex. `PATCH /players/{id}/payment`), som i sin tur anropar `/api/notify/update`.
-3.  **Backend Broadcast:** `Backend`-tjänstens `SSEManager` tar emot notifikationen från anropet i steg 2.
-4.  **Event Skickas:** `SSEManager` skickar omedelbart ett data-paket över alla öppna anslutningar som skapades i steg 1.
-5.  **Klient Agerar:** JavaScript-klienten på respektive sida tar emot eventet:
+    *   **Ny incheckning eller integrationsresultat:** Backend tar emot data (via orchestrate-endpointen eller n8n-callbacks), uppdaterar Postgres, och triggar en SSE-broadcast.
+    *   **Manuell uppdatering:** En TO klickar på en knapp i dashboarden (t.ex. godkänner en betalning). Dashboarden anropar en API-endpoint (t.ex. `PATCH /players/{id}/payment`), som i sin tur triggar en SSE-broadcast.
+3.  **Backend Broadcast:** `Backend`-tjänstens `SSEManager` skickar omedelbart ett data-paket över alla öppna anslutningar.
+4.  **Klient Agerar:** JavaScript-klienten på respektive sida tar emot eventet:
     *   **Dashboard:** Triggar en automatisk uppdatering av deltagartabellen.
     *   **`status_pending.html`:** Kontrollerar om statusen nu är "Ready". Om så är fallet, omdirigeras sidan automatiskt till den färdiga statussidan (`status_ready.html`).
+
+**Anslutningsindikatorer:** SSE-klienten visar anslutningsstatus i dashboarden:
+- 🟢 Live — ansluten och tar emot events
+- 🟡 Connecting — försöker återansluta
+- 🔴 Disconnected — fallback till manuell refresh
 
 Detta system minskar antalet API-anrop drastiskt, sänker latensen för uppdateringar från minuter till millisekunder, och ger en mycket mer responsiv upplevelse för både TOs och deltagare.

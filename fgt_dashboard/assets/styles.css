@@ -1,6 +1,178 @@
 /* FGC Dashboard - Dark Theme Styles */
 
 /* === Dropdown Styling === */
+/* Strong selectors for Dash dropdowns (dev/prod consistency) */
+.dash-dropdown .Select-control,
+.dash-dropdown .Select-menu-outer,
+.dash-dropdown .Select-menu,
+.dash-dropdown .Select-option,
+.dash-dropdown .Select-placeholder,
+.dash-dropdown .Select-value-label,
+.dash-dropdown .Select-input > input,
+.dash-dropdown .Select-arrow-zone,
+.dash-dropdown .Select-clear-zone {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+.dash-dropdown .Select-menu-outer,
+.dash-dropdown .Select-menu,
+.dash-dropdown .Select-option {
+    background-color: #12121a !important;
+}
+
+.dash-dropdown .Select-option:hover,
+.dash-dropdown .Select-option.is-focused {
+    background-color: #1a1a25 !important;
+    color: #00d4ff !important;
+}
+
+.dash-dropdown .Select-option.is-selected {
+    background-color: #00d4ff !important;
+    color: #000000 !important;
+}
+
+/* React-Select v2+/Dash variants */
+.dash-dropdown .css-1wa3eu0-placeholder,
+.dash-dropdown .css-1uccc91-singleValue,
+.dash-dropdown .css-1hwfws3,
+.dash-dropdown .css-1g6gooi,
+.dash-dropdown .css-yk16xz-control,
+.dash-dropdown .css-1pahdxg-control,
+.dash-dropdown .css-26l3qy-menu,
+.dash-dropdown .css-4ljt47-MenuList,
+.dash-dropdown .css-9gakcf-option,
+.dash-dropdown .css-d7l1ni-option,
+.dash-dropdown .css-1n7v3ny-option {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+.dash-dropdown .css-26l3qy-menu,
+.dash-dropdown .css-4ljt47-MenuList,
+.dash-dropdown .css-9gakcf-option,
+.dash-dropdown .css-d7l1ni-option,
+.dash-dropdown .css-1n7v3ny-option {
+    background-color: #12121a !important;
+}
+
+/* Generic fallback for any inline-styled select divs */
+.dash-dropdown [style*="background-color: rgb(255, 255, 255)"],
+.dash-dropdown [style*="background-color:white"],
+.dash-dropdown [style*="background-color: white"] {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+/* Target by component ids (works even when class names differ) */
+#event-dropdown [class*="control"],
+#event-dropdown [class*="menu"],
+#event-dropdown [class*="option"],
+#event-dropdown [class*="singleValue"],
+#event-dropdown [class*="placeholder"],
+#event-dropdown [class*="input"],
+#game-filter [class*="control"],
+#game-filter [class*="menu"],
+#game-filter [class*="option"],
+#game-filter [class*="singleValue"],
+#game-filter [class*="placeholder"],
+#game-filter [class*="input"] {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+#event-dropdown [class*="menu"],
+#event-dropdown [class*="option"],
+#game-filter [class*="menu"],
+#game-filter [class*="option"] {
+    background-color: #12121a !important;
+}
+
+/* Explicit class-based dropdown theme */
+.fgc-dropdown .Select-control,
+.fgc-dropdown .Select-menu-outer,
+.fgc-dropdown .Select-menu,
+.fgc-dropdown .Select-option,
+.fgc-dropdown .Select-placeholder,
+.fgc-dropdown .Select-value-label,
+.fgc-dropdown .Select-input > input,
+.fgc-dropdown .Select-arrow-zone,
+.fgc-dropdown .Select-clear-zone,
+.fgc-dropdown [class*="control"],
+.fgc-dropdown [class*="menu"],
+.fgc-dropdown [class*="option"],
+.fgc-dropdown [class*="singleValue"],
+.fgc-dropdown [class*="placeholder"],
+.fgc-dropdown [class*="input"] {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+.fgc-dropdown .Select-menu,
+.fgc-dropdown .Select-menu-outer,
+.fgc-dropdown .Select-option,
+.fgc-dropdown [class*="menu"],
+.fgc-dropdown [class*="option"] {
+    background-color: #12121a !important;
+}
+
+/* Dash wrappers can apply className on different levels; force all nested containers dark */
+.fgc-dropdown,
+.fgc-dropdown > div,
+.fgc-dropdown > div > div,
+#event-dropdown,
+#event-dropdown > div,
+#event-dropdown > div > div,
+#game-filter,
+#game-filter > div,
+#game-filter > div > div,
+#column-visibility-dropdown,
+#column-visibility-dropdown > div,
+#column-visibility-dropdown > div > div,
+#audit-filter-action,
+#audit-filter-action > div,
+#audit-filter-action > div > div,
+#audit-filter-user,
+#audit-filter-user > div,
+#audit-filter-user > div > div {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+/* Keep text inputs and controls vertically centered after dropdown overrides */
+#search-input,
+#input-startgg-link,
+#input-swish-number {
+    min-height: 44px !important;
+    line-height: 1.4 !important;
+    box-sizing: border-box !important;
+}
+
+#search-input::placeholder,
+#input-startgg-link::placeholder,
+#input-swish-number::placeholder {
+    line-height: 1.4 !important;
+}
+
+/* Archive/Reopen checklist readability */
+#archive-clear-active-toggle,
+#reopen-restore-active-toggle {
+    color: #cbd5e1 !important;
+}
+
+#archive-clear-active-toggle label,
+#reopen-restore-active-toggle label,
+#archive-clear-active-toggle span,
+#reopen-restore-active-toggle span {
+    color: #cbd5e1 !important;
+}
+
 /* Base dropdown container */
 .Select-control,
 .Select-menu-outer {

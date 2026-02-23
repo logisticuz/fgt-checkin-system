@@ -402,7 +402,7 @@
       // NOTE: personnummer is NOT stored for privacy/security reasons
 
       try {
-        const response = await fetch(`/n8n/webhook/checkin/validate${tokenParam}`, {
+        const response = await fetch(`/api/checkin/orchestrate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(sanitized)
