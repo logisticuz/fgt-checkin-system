@@ -554,7 +554,7 @@
         const tag = state.tag || localStorage.getItem("tag") || "";
         const slug = state.eventSlug || localStorage.getItem("eventSlug") || "";
 
-        const response = await fetch(`/n8n/webhook/ebas/register${tokenParam}`, {
+        const response = await fetch(`/api/ebas/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ personnummer: pnr, email, telephone: phone, tag, slug })

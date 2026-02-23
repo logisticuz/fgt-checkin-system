@@ -1,0 +1,222 @@
+{
+  "name": "FGC THN - eBas Register v2 (PG)",
+  "description": "Postgres-backed eBas registration. No Airtable nodes. Reports member status to backend via /api/checkin/{id}/member-status.",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ebas/register-v2",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wh-ebas-v2",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [112, 208],
+      "webhookId": "ebas-register-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize personnummer to 12 digits and preserve checkin_id/tag/slug\nconst body = $json.body ?? $json;\nlet pnrRaw = body.personnummer ?? null;\n\nif (!pnrRaw) {\n  throw new Error('Personnummer krävs för registrering');\n}\n\nlet pnr = pnrRaw.toString().replace(/\\D/g, '');\n\nif (pnr.length < 10) {\n  throw new Error('Ogiltigt personnummer-format');\n}\n\n// Convert 10-digit to 12-digit\nif (pnr.length === 10) {\n  const yy = parseInt(pnr.slice(0, 2), 10);\n  const prefix = yy > 30 ? '19' : '20';\n  pnr = prefix + pnr;\n}\n\nconst email = body.email || '';\nconst phone = (body.telephone || body.telefon || '').replace(/[\\s-]/g, '');\nconst nick = body.nick || body.tag || null;\nconst discord = body.discord || null;\n\nconst tag = (body.tag || '').toLowerCase().trim();\nconst slug = body.slug || '';\nconst checkin_id = body.checkin_id || '';\n\nconst today = new Date().toISOString().split('T')[0];\n\nreturn [{ json: {\n  pnr,\n  email,\n  phone,\n  nick,\n  discord,\n  renewed: today,\n  tag,\n  slug,\n  checkin_id,\n}}];"
+      },
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 208],
+      "id": "normalize-v2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebas.sverok.se/apis/submit_member_with_lookup.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n  \"member\": {\n    \"socialsecuritynumber\": \"{{ $json.pnr }}\",\n    \"renewed\": \"{{ $json.renewed }}\",\n    \"firstname\": \"\",\n    \"lastname\": \"\",\n    \"street\": \"\",\n    \"zip_code_id\": \"\",\n    \"city\": \"\",\n    \"country_id\": \"1\",\n    \"email\": \"{{ $json.email }}\",\n    \"phone1\": \"{{ $json.phone }}\",\n    \"co\": [],\n    \"member_nick\": {{ $json.nick ? '\"' + $json.nick + '\"' : 'null' }},\n    \"discord_user_id\": {{ $json.discord ? '\"' + $json.discord + '\"' : 'null' }}\n  }\n}",
+        "options": {}
+      },
+      "name": "Call eBas API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [736, 208],
+      "id": "call-ebas-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse eBas submit_member_with_lookup response\nconst response = $json;\nconst input = $('Normalize Input').first().json;\nconst tag = input.tag || '';\nconst slug = input.slug || '';\nconst checkin_id = input.checkin_id || '';\n\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{\n    json: {\n      success: true,\n      registered: true,\n      message: 'Medlem registrerad i Sverok',\n      tag,\n      slug,\n      checkin_id,\n    }\n  }];\n}\n\nif (response.member_errors) {\n  const errors = Object.entries(response.member_errors)\n    .map(([field, msgs]) => field + ': ' + msgs.join(', '))\n    .join('; ');\n  return [{\n    json: {\n      success: false,\n      error: true,\n      message: errors || 'Kunde inte registrera medlem',\n      details: response.member_errors,\n      tag,\n      slug,\n      checkin_id,\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    success: false,\n    error: true,\n    message: response.request_result || 'Okänt fel',\n    raw_response: response,\n    tag,\n    slug,\n    checkin_id,\n  }\n}];"
+      },
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1072, 208],
+      "id": "parse-response-v2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.success }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "If Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1312, 208],
+      "id": "if-success-v2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://backend:8000/api/checkin/{{ $json.checkin_id }}/member-status",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ member: true }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Report Member Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1536, 112],
+      "id": "report-member-v2",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/notify/update",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"event_type\": \"member_update\",\n  \"tag\": \"{{ $('Parse Response').first().json.tag }}\",\n  \"member\": true\n}",
+        "options": {}
+      },
+      "name": "Notify SSE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 112],
+      "id": "notify-sse-v2",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return success response\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+      },
+      "name": "Return Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 112],
+      "id": "return-success-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return error response\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+      },
+      "name": "Return Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1536, 320],
+      "id": "return-error-v2"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Call eBas API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call eBas API": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Response": {
+      "main": [
+        [
+          {
+            "node": "If Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Success": {
+      "main": [
+        [
+          {
+            "node": "Report Member Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Member Status": {
+      "main": [
+        [
+          {
+            "node": "Notify SSE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify SSE": {
+      "main": [
+        [
+          {
+            "node": "Return Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Stockholm",
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

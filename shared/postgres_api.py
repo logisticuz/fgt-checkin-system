@@ -115,6 +115,37 @@ def compute_requirements(settings: Dict[str, Any]) -> Dict[str, bool]:
     }
 
 
+def compute_checkin_status(
+    checkin_fields: Dict[str, Any], settings: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Compute Ready/Pending status for a checkin based on active requirements.
+
+    Args:
+        checkin_fields: The checkin record fields (member, startgg, payment_valid, etc.)
+        settings: Active settings row (require_payment, require_membership, require_startgg)
+
+    Returns:
+        { "status": "Ready"|"Pending", "ready": bool, "missing": [...] }
+    """
+    reqs = compute_requirements(settings)
+
+    missing: List[str] = []
+    if reqs["require_membership"] and not checkin_fields.get("member"):
+        missing.append("Membership")
+    if reqs["require_payment"] and not checkin_fields.get("payment_valid"):
+        missing.append("Payment")
+    if reqs["require_startgg"] and not checkin_fields.get("startgg"):
+        missing.append("Start.gg")
+
+    ready = len(missing) == 0
+    return {
+        "status": "Ready" if ready else "Pending",
+        "ready": ready,
+        "missing": missing,
+    }
+
+
 # =============================================
 # Settings
 # =============================================
@@ -430,6 +461,53 @@ def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
     return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
+def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
+    """Find a checkin record by its record_id (primary key)."""
+    if not record_id:
+        return None
+
+    query = """
+        SELECT record_id, name, tag, email, telephone, status, member, startgg,
+               payment_valid, payment_amount, payment_expected,
+               tournament_games_registered, checkin_uuid, event_slug,
+               startgg_event_id, external_id, is_guest, created
+        FROM active_event_data
+        WHERE record_id = %s
+        LIMIT 1
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (record_id,))
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    columns = [
+        "record_id",
+        "name",
+        "tag",
+        "email",
+        "telephone",
+        "status",
+        "member",
+        "startgg",
+        "payment_valid",
+        "payment_amount",
+        "payment_expected",
+        "tournament_games_registered",
+        "checkin_uuid",
+        "event_slug",
+        "startgg_event_id",
+        "external_id",
+        "is_guest",
+        "created",
+    ]
+    row_dict = _row_to_dict(columns, row)
+    return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
+
+
 def update_checkin(
     record_id: str, fields: Dict[str, Any], typecast: bool = False
 ) -> Optional[Dict[str, Any]]:
@@ -479,6 +557,180 @@ def delete_checkin(record_id: str) -> bool:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM active_event_data WHERE record_id = %s", (record_id,))
             return cur.rowcount > 0
+
+
+def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create or update a check-in attempt and return checkin_id.
+
+    Dedupe strategy (backend-owned):
+    - event_slug + tag (case-insensitive) if tag exists
+    - else event_slug + name (case-insensitive) if name exists
+    """
+    if not event_slug:
+        raise ValueError("event_slug is required")
+
+    payload = payload or {}
+    tag = (payload.get("tag") or "").strip() or None
+    name = (payload.get("name") or "").strip() or None
+
+    existing = None
+    if tag:
+        existing = get_checkin_by_tag(tag, event_slug)
+    elif name:
+        existing = get_checkin_by_name(name, event_slug)
+
+    games = payload.get("tournament_games_registered")
+    if isinstance(games, str):
+        games = [g.strip() for g in games.split(",") if g.strip()]
+    if not isinstance(games, list):
+        games = []
+
+    fields: Dict[str, Any] = {
+        "event_slug": event_slug,
+        "name": payload.get("name"),
+        "tag": payload.get("tag"),
+        "email": payload.get("email"),
+        "telephone": payload.get("telephone"),
+        "status": payload.get("status") or "Pending",
+        "member": bool(payload.get("member", False)),
+        "startgg": bool(payload.get("startgg", False)),
+        "is_guest": bool(payload.get("is_guest", False)),
+        "payment_valid": bool(payload.get("payment_valid", False)),
+        "payment_amount": payload.get("payment_amount") or 0,
+        "payment_expected": payload.get("payment_expected") or 0,
+        "tournament_games_registered": games,
+        "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
+        "startgg_event_id": payload.get("startgg_event_id"),
+        "external_id": payload.get("external_id"),
+    }
+
+    if existing and existing.get("record_id"):
+        checkin_id = existing["record_id"]
+        updated = update_checkin(checkin_id, fields)
+        if not updated:
+            raise RuntimeError("Failed to update existing checkin")
+        return {
+            "checkin_id": checkin_id,
+            "record_id": checkin_id,
+            "event_slug": event_slug,
+            "created": False,
+        }
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO active_event_data (
+                    event_slug, external_id,
+                    name, tag, email, telephone,
+                    status, member, startgg, payment_valid,
+                    payment_amount, payment_expected,
+                    tournament_games_registered, checkin_uuid,
+                    startgg_event_id, is_guest
+                ) VALUES (
+                    %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s
+                )
+                RETURNING record_id
+                """,
+                (
+                    event_slug,
+                    fields["external_id"],
+                    fields["name"],
+                    fields["tag"],
+                    fields["email"],
+                    fields["telephone"],
+                    fields["status"],
+                    fields["member"],
+                    fields["startgg"],
+                    fields["payment_valid"],
+                    fields["payment_amount"],
+                    fields["payment_expected"],
+                    fields["tournament_games_registered"],
+                    fields.get("checkin_uuid") or fields.get("UUID"),
+                    fields["startgg_event_id"],
+                    fields["is_guest"],
+                ),
+            )
+            checkin_id = cur.fetchone()[0]
+
+    return {
+        "checkin_id": checkin_id,
+        "record_id": checkin_id,
+        "event_slug": event_slug,
+        "created": True,
+    }
+
+
+def apply_integration_result(
+    checkin_id: str,
+    source: str,
+    ok: bool,
+    data: Optional[Dict[str, Any]] = None,
+    error: Optional[Dict[str, Any]] = None,
+    fetched_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply integration result to a checkin record and write audit log."""
+    if not checkin_id:
+        raise ValueError("checkin_id is required")
+    if not source:
+        raise ValueError("source is required")
+
+    data = data or {}
+    update_fields: Dict[str, Any] = {}
+
+    src = source.lower().strip()
+    if src == "startgg":
+        update_fields["startgg"] = bool(ok and data.get("registered", True))
+        if data.get("startgg_event_id"):
+            update_fields["startgg_event_id"] = str(data.get("startgg_event_id"))
+    elif src == "ebas":
+        update_fields["member"] = bool(ok and data.get("member", True))
+    elif src in ("swish", "stripe"):
+        if data.get("payment_amount") is not None:
+            update_fields["payment_amount"] = data.get("payment_amount")
+        if data.get("payment_expected") is not None:
+            update_fields["payment_expected"] = data.get("payment_expected")
+        if data.get("payment_valid") is not None:
+            update_fields["payment_valid"] = bool(data.get("payment_valid"))
+        else:
+            update_fields["payment_valid"] = bool(ok)
+
+    updated = update_checkin(checkin_id, update_fields) if update_fields else None
+    if update_fields and not updated:
+        raise RuntimeError("Failed to update checkin from integration result")
+
+    fields = (updated or {}).get("fields", {})
+    event_slug = fields.get("event_slug") if isinstance(fields, dict) else None
+
+    log_action(
+        {"user_id": "integration", "user_name": f"n8n:{src}", "user_email": ""},
+        "integration_result",
+        "active_event_data",
+        target_event=event_slug,
+        target_record=checkin_id,
+        details=json.dumps(
+            {
+                "source": src,
+                "ok": ok,
+                "data": data,
+                "error": error,
+                "fetched_at": fetched_at,
+            }
+        ),
+    )
+
+    return {
+        "checkin_id": checkin_id,
+        "source": src,
+        "ok": ok,
+        "updated": bool(update_fields),
+    }
 
 
 # =============================================

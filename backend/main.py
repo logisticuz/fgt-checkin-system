@@ -30,6 +30,16 @@ from shared.storage import (
     update_checkin,
     delete_checkin,
 )
+
+# Postgres-only functions (graceful import for airtable backend compatibility)
+try:
+    from shared.storage import (
+        get_checkin_by_record_id,
+        compute_checkin_status,
+    )
+except ImportError:
+    get_checkin_by_record_id = None
+    compute_checkin_status = None
 import shared.storage as storage_api
 from validation import sanitize_checkin_payload, validate_checkin_payload
 
@@ -44,10 +54,13 @@ AIRTABLE_TABLE = "active_event_data"
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
 STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET")
-STARTGG_REDIRECT_URI = "https://checkin.fgctrollhattan.se/auth/callback"
+STARTGG_REDIRECT_URI = os.getenv(
+    "STARTGG_REDIRECT_URI", "https://checkin.fgctrollhattan.se/auth/callback"
+)
 OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/data
 OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
+INTEGRATION_ENGINE = os.getenv("INTEGRATION_ENGINE", "n8n").lower().strip()
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
 SSE_TOKEN = os.getenv("SSE_TOKEN")  # token for SSE authentication (used instead of Basic Auth)
 ADMIN_AUTH_COOKIE_TOKEN = os.getenv("ADMIN_AUTH_COOKIE_TOKEN")
@@ -448,8 +461,8 @@ def get_tournament_events(tournament_slug: str) -> list:
 
 def check_participant_status(name: str) -> dict:
     """
-    Fetch and evaluate a participant's registration status from Airtable.
-    Uses flexible match on name/gametag fields.
+    Fetch and evaluate a participant's registration status from current storage backend.
+    Uses flexible match on name/tag fields.
     """
     status = {
         "name": name,
@@ -459,65 +472,89 @@ def check_participant_status(name: str) -> dict:
         "startgg": False,
     }
 
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    # Escape for Airtable formula (double single-quotes) + lower-case match
-    def _esc_for_formula(s: str) -> str:
-        return (s or "").replace("'", "''").lower()
-
-    q = _esc_for_formula(name)
-
-    # Match both name and tag fields
-    formula = f"OR(LOWER(name)='{q}',LOWER(tag)='{q}')"
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}"
-    r = safe_get(url, headers=headers)
-    if not r:
-        status["summary"] = "Airtable error"
+    query = (name or "").strip()
+    if not query:
         return status
 
     try:
-        records = r.json().get("records", [])
-        if records:
-            f = records[0].get("fields", {}) or {}
+        active_slug = get_active_settings().get("active_event_slug", "")
+        record = None
+        if active_slug:
+            record = get_checkin_by_tag(query, active_slug) or get_checkin_by_name(query, active_slug)
+        if not record:
+            record = get_checkin_by_name(query)
 
-            # Check membership status
-            status["member"] = bool(f.get("member"))
+        if not record:
+            return status
 
-            # Check Start.gg registration
-            startgg_ok = False
-            for key in ("startgg", "startgg_registered", "startgg_event_id"):
-                val = f.get(key)
-                if isinstance(val, bool) and val:
-                    startgg_ok = True
-                    break
-                if isinstance(val, (int, str)) and str(val).strip():
-                    startgg_ok = True
-                    break
-            status["startgg"] = startgg_ok
+        f = (record.get("fields") or {}) if isinstance(record, dict) else {}
 
-            # Check payment status
-            amt = _to_float(f.get("payment_amount"))
-            exp = _to_float(f.get("payment_expected"))
-            payment_ok = (f.get("payment_valid") is True) or (exp > 0 and amt >= exp)
-            status["payment"] = payment_ok
+        # Check membership status
+        status["member"] = bool(f.get("member"))
 
-            # Build summary
-            if all([status["member"], status["payment"], status["startgg"]]):
-                status["summary"] = "Ready"
-            elif not status["member"]:
-                status["summary"] = "Missing membership"
-            elif not status["payment"]:
-                status["summary"] = "Missing payment"
-            elif not status["startgg"]:
-                status["summary"] = "Missing tournament registration"
-            else:
-                status["summary"] = "Partially complete"
+        # Check Start.gg registration
+        startgg_ok = False
+        for key in ("startgg", "startgg_registered", "startgg_event_id"):
+            val = f.get(key)
+            if isinstance(val, bool) and val:
+                startgg_ok = True
+                break
+            if isinstance(val, (int, str)) and str(val).strip():
+                startgg_ok = True
+                break
+        status["startgg"] = startgg_ok
+
+        # Check payment status
+        amt = _to_float(f.get("payment_amount"))
+        exp = _to_float(f.get("payment_expected"))
+        payment_ok = (f.get("payment_valid") is True) or (exp > 0 and amt >= exp)
+        status["payment"] = payment_ok
+
+        # Build summary
+        if all([status["member"], status["payment"], status["startgg"]]):
+            status["summary"] = "Ready"
+        elif not status["member"]:
+            status["summary"] = "Missing membership"
+        elif not status["payment"]:
+            status["summary"] = "Missing payment"
+        elif not status["startgg"]:
+            status["summary"] = "Missing tournament registration"
+        else:
+            status["summary"] = "Partially complete"
     except Exception as e:
-        logger.warning(f"Airtable parse error: {e}")
-        status["summary"] = "Airtable error"
+        logger.warning(f"Participant status lookup failed: {e}")
+        status["summary"] = "Storage error"
 
     return status
+
+
+async def _integration_engine_health() -> bool:
+    """Check integration engine status based on configured engine."""
+    if INTEGRATION_ENGINE != "n8n":
+        return True
+
+    try:
+        auth = None
+        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+            auth = (N8N_BASIC_AUTH_USER, N8N_BASIC_AUTH_PASSWORD)
+        resp = await httpx_client.get(f"{N8N_INTERNAL}/healthz", auth=auth)
+        return 200 <= resp.status_code < 300
+    except Exception:
+        return False
+
+
+def _data_backend_health() -> bool:
+    """Check data backend status with lightweight calls."""
+    if DATA_BACKEND == "airtable":
+        headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+        test_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?maxRecords=1"
+        return bool(safe_get(test_url, headers=headers))
+
+    try:
+        storage_get_active_settings()
+        return True
+    except Exception:
+        return False
 
 # === Health ===
 @app.get("/health", tags=["System"])
@@ -527,19 +564,17 @@ async def health_check():
     Does NOT call external APIs (Airtable) to avoid burning API quota.
     Use /health/deep for full diagnostics.
     """
-    # n8n health – Basic Auth if enabled; only 2xx is OK
-    try:
-        auth = None
-        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
-            auth = (N8N_BASIC_AUTH_USER, N8N_BASIC_AUTH_PASSWORD)
-        resp = await httpx_client.get(f"{N8N_INTERNAL}/healthz", auth=auth)
-        n8n_ok = 200 <= resp.status_code < 300
-    except Exception:
-        n8n_ok = False
+    integration_ok = await _integration_engine_health()
 
     return {
-        "status": "ok" if n8n_ok else "degraded",
-        "components": {"checkin": True, "dashboard": True, "n8n": n8n_ok},
+        "status": "ok" if integration_ok else "degraded",
+        "components": {
+            "checkin": True,
+            "dashboard": True,
+            "integration": integration_ok,
+            "data_backend": DATA_BACKEND,
+            "integration_engine": INTEGRATION_ENGINE,
+        },
         "version": "1.0.0",
     }
 
@@ -550,56 +585,49 @@ async def health_check_deep():
     Full health check including external APIs.
     Use this manually for diagnostics – NOT for automated polling.
     """
-    # Airtable check
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    test_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?maxRecords=1"
-    airtable_ok = bool(safe_get(test_url, headers=headers))
-
-    # n8n health
-    try:
-        auth = None
-        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
-            auth = (N8N_BASIC_AUTH_USER, N8N_BASIC_AUTH_PASSWORD)
-        resp = await httpx_client.get(f"{N8N_INTERNAL}/healthz", auth=auth)
-        n8n_ok = 200 <= resp.status_code < 300
-    except Exception:
-        n8n_ok = False
+    data_ok = _data_backend_health()
+    integration_ok = await _integration_engine_health()
 
     return {
-        "status": "ok" if airtable_ok and n8n_ok else "degraded",
-        "components": {"checkin": True, "dashboard": True, "airtable": airtable_ok, "n8n": n8n_ok},
+        "status": "ok" if data_ok and integration_ok else "degraded",
+        "components": {
+            "checkin": True,
+            "dashboard": True,
+            "data_backend": DATA_BACKEND,
+            "data": data_ok,
+            "integration_engine": INTEGRATION_ENGINE,
+            "integration": integration_ok,
+        },
         "version": "1.0.0",
     }
 
 # === Views ===
 def get_participant_details(namn: str) -> dict:
     """
-    Fetch full participant details from Airtable for status display.
+    Fetch full participant details from current storage backend for status display.
     Returns tag, event_name, games, etc.
     """
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    def _esc(s: str) -> str:
-        return (s or "").replace("'", "''").lower()
-
-    q = _esc(namn)
-    formula = f"OR(LOWER(name)='{q}',LOWER(tag)='{q}')"
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?filterByFormula={quote(formula)}"
-
-    r = safe_get(url, headers=headers)
-    if not r:
+    query = (namn or "").strip()
+    if not query:
         return {}
 
     try:
-        records = r.json().get("records", [])
-        if records:
-            f = records[0].get("fields", {})
+        active_slug = get_active_settings().get("active_event_slug", "")
+        record = None
+        if active_slug:
+            record = get_checkin_by_tag(query, active_slug) or get_checkin_by_name(query, active_slug)
+        if not record:
+            record = get_checkin_by_name(query)
+
+        if record:
+            f = (record.get("fields") or {}) if isinstance(record, dict) else {}
             games = f.get("tournament_games_registered", [])
             if isinstance(games, str):
                 games = [g.strip() for g in games.split(",") if g.strip()]
+            event_slug = f.get("event_slug", "FGC Weekly")
             return {
                 "tag": f.get("tag", ""),
-                "event_name": f.get("event_slug", "FGC Weekly").replace("-", " ").title(),
+                "event_name": event_slug.replace("-", " ").title(),
                 "games": games,
                 "payment_expected": f.get("payment_expected", 0),
             }
@@ -842,6 +870,327 @@ async def reopen_event_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=f"Reopen failed: {e}")
 
     return {"success": True, **result}
+
+
+@app.post("/api/checkin/begin", tags=["Integrations"])
+async def begin_checkin_endpoint(request: Request):
+    """Start or upsert a check-in attempt and return checkin_id."""
+    begin_fn = getattr(storage_api, "begin_checkin", None)
+    if not begin_fn:
+        raise HTTPException(status_code=501, detail="begin_checkin is not available for current backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event_slug = (body.get("event_slug") or "").strip()
+    if not event_slug:
+        event_slug = get_active_settings().get("active_event_slug", "")
+    if not event_slug:
+        raise HTTPException(status_code=400, detail="event_slug is required")
+
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+
+    try:
+        result = begin_fn(event_slug, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"checkin begin failed for '{event_slug}': {e}")
+        raise HTTPException(status_code=500, detail=f"checkin begin failed: {e}")
+
+    return {"success": True, **result}
+
+
+@app.post("/api/integration/result", tags=["Integrations"])
+async def integration_result_endpoint(request: Request):
+    """Apply integration result from n8n/external checks to a checkin."""
+    apply_fn = getattr(storage_api, "apply_integration_result", None)
+    if not apply_fn:
+        raise HTTPException(status_code=501, detail="integration_result is not available for current backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    checkin_id = (body.get("checkin_id") or "").strip()
+    source = (body.get("source") or "").strip()
+    if not checkin_id or not source:
+        raise HTTPException(status_code=400, detail="checkin_id and source are required")
+
+    ok = bool(body.get("ok", False))
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    error = body.get("error") if isinstance(body.get("error"), dict) else None
+    fetched_at = body.get("fetched_at")
+
+    try:
+        result = apply_fn(
+            checkin_id=checkin_id,
+            source=source,
+            ok=ok,
+            data=data,
+            error=error,
+            fetched_at=fetched_at,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"integration result failed for '{checkin_id}': {e}")
+        raise HTTPException(status_code=500, detail=f"integration result failed: {e}")
+
+    return {"success": True, **result}
+
+
+@app.post("/api/checkin/{checkin_id}/member-status", tags=["Integrations"])
+async def checkin_member_status_endpoint(checkin_id: str, request: Request):
+    """Thin endpoint for eBas flow to set member status by checkin_id."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    member = bool(body.get("member", False))
+
+    result = update_checkin(checkin_id, {"member": member})
+    if not result:
+        raise HTTPException(status_code=500, detail="Storage update failed")
+
+    return {"success": True, "checkin_id": checkin_id, "member": member}
+
+
+# === Orchestration endpoints (n8n migration) ===
+
+
+@app.post("/api/checkin/orchestrate", tags=["Checkin"])
+async def orchestrate_checkin(request: Request):
+    """
+    Main check-in orchestration endpoint.
+
+    Replaces the direct n8n webhook call from the frontend.
+    Flow:
+      1. Validate & sanitize form data
+      2. begin_checkin() in Postgres (dedupe by tag+slug)
+      3. Forward to n8n v5 webhook (Start.gg + eBas checks)
+      4. n8n calls /api/integration/result during execution
+      5. Re-read updated checkin, compute final status
+      6. Update status, broadcast SSE, return result
+
+    Returns response compatible with checkin.html:
+      { ready, slug, missing[], member, payment_valid, startgg }
+    """
+    begin_fn = getattr(storage_api, "begin_checkin", None)
+    if not begin_fn:
+        raise HTTPException(status_code=501, detail="Orchestration requires postgres backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Validate check-in payload (same as n8n proxy did)
+    errors = validate_checkin_payload(body)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    # Sanitize
+    sanitized = sanitize_checkin_payload(body)
+
+    # Get active settings
+    settings = get_active_settings()
+    slug = settings.get("active_event_slug", "")
+    if not slug:
+        raise HTTPException(status_code=400, detail="No active event configured")
+
+    requirements = compute_requirements(settings)
+    per_game = settings.get("swish_expected_per_game", 25)
+
+    # Extract fields
+    tag = (sanitized.get("tag") or "").strip()
+    name = sanitized.get("namn") or sanitized.get("name") or ""
+    telefon = sanitized.get("telefon") or sanitized.get("telephone") or ""
+    email = sanitized.get("email") or ""
+    personnummer = sanitized.get("personnummer") or ""
+
+    # 1. begin_checkin (dedupe by tag+slug)
+    try:
+        checkin_result = begin_fn(slug, {
+            "name": name,
+            "tag": tag,
+            "email": email,
+            "telephone": telefon,
+            "status": "Pending",
+        })
+    except Exception as e:
+        logger.exception(f"begin_checkin failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Check-in creation failed: {e}")
+
+    checkin_id = checkin_result["checkin_id"]
+    logger.info(f"Orchestrate: checkin_id={checkin_id}, tag={tag}, slug={slug}")
+
+    # 2. Forward to n8n v5 webhook (synchronous - n8n calls /api/integration/result internally)
+    n8n_payload = {
+        "checkin_id": checkin_id,
+        "tag": tag,
+        "slug": slug,
+        "personnummer": personnummer,
+        "name": name,
+    }
+
+    n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
+    n8n_response_data = {}
+
+    try:
+        n8n_headers = {"Content-Type": "application/json"}
+        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+            import base64
+            token = base64.b64encode(
+                f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
+            ).decode()
+            n8n_headers["authorization"] = f"Basic {token}"
+
+        n8n_resp = await httpx_client.post(
+            n8n_url,
+            json=n8n_payload,
+            headers=n8n_headers,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+        )
+
+        if n8n_resp.status_code < 400:
+            n8n_response_data = n8n_resp.json()
+        else:
+            logger.warning(f"n8n v5 returned {n8n_resp.status_code}: {n8n_resp.text}")
+    except Exception as e:
+        logger.warning(f"n8n v5 call failed (graceful): {e}")
+        # Continue - checkin is created, integrations just didn't run
+
+    # 3. Re-read the updated checkin record
+    get_by_id = getattr(storage_api, "get_checkin_by_record_id", None)
+    checkin_record = None
+    if get_by_id:
+        checkin_record = get_by_id(checkin_id)
+
+    if not checkin_record:
+        # Fallback to tag+slug lookup
+        checkin_record = get_checkin_by_tag(tag.lower(), slug) if tag else None
+
+    fields = (checkin_record or {}).get("fields", {})
+
+    # 4. Compute final status based on requirements
+    member_ok = bool(fields.get("member"))
+    startgg_ok = bool(fields.get("startgg"))
+    payment_ok = bool(fields.get("payment_valid"))
+
+    status_dict = {
+        "member": member_ok,
+        "payment": payment_ok,
+        "startgg": startgg_ok,
+    }
+    ready, missing = compute_ready_and_missing(status_dict, requirements)
+    final_status = "Ready" if ready else "Pending"
+
+    # 5. Update status in DB
+    record_id = (checkin_record or {}).get("record_id", checkin_id)
+    update_checkin(record_id, {"status": final_status})
+
+    # 6. Broadcast SSE
+    await sse_manager.broadcast("checkin", {
+        "type": "new_checkin",
+        "name": name,
+        "tag": tag,
+        "status": final_status,
+        "timestamp": time.time(),
+    })
+
+    # 7. Return response compatible with checkin.html
+    return {
+        "ready": ready,
+        "slug": slug,
+        "missing": missing,
+        "member": member_ok,
+        "payment_valid": payment_ok,
+        "startgg": startgg_ok,
+        "status": final_status,
+        "name": name,
+        "tag": tag,
+        "checkin_id": checkin_id,
+    }
+
+
+@app.post("/api/ebas/register", tags=["Checkin"])
+async def ebas_register(request: Request):
+    """
+    eBas membership registration endpoint.
+
+    Replaces the direct n8n webhook call from register.html.
+    Flow:
+      1. Sanitize personnummer
+      2. Find checkin by tag+slug → get checkin_id
+      3. Forward to n8n eBas Register v2 webhook
+      4. n8n calls Sverok API + reports member status via backend callback
+      5. Return result to frontend (same format as old n8n response)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Sanitize
+    sanitized = sanitize_checkin_payload(body)
+
+    personnummer = sanitized.get("personnummer") or ""
+    email = sanitized.get("email") or ""
+    telephone = sanitized.get("telephone") or sanitized.get("telefon") or ""
+    tag = (sanitized.get("tag") or "").strip().lower()
+    slug = sanitized.get("slug") or ""
+
+    if not personnummer:
+        raise HTTPException(status_code=400, detail="Personnummer is required")
+
+    # Find checkin_id by tag+slug (for n8n v2 callback)
+    checkin_id = None
+    if tag and slug:
+        checkin = get_checkin_by_tag(tag, slug)
+        if checkin:
+            checkin_id = checkin.get("record_id")
+
+    # Forward to n8n eBas Register v2
+    n8n_payload = {
+        "checkin_id": checkin_id or "",
+        "personnummer": personnummer,
+        "email": email,
+        "telephone": telephone,
+        "tag": tag,
+        "slug": slug,
+    }
+
+    n8n_url = f"{N8N_INTERNAL}/webhook/ebas/register-v2"
+
+    try:
+        n8n_headers = {"Content-Type": "application/json"}
+        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+            import base64
+            token = base64.b64encode(
+                f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
+            ).decode()
+            n8n_headers["authorization"] = f"Basic {token}"
+
+        n8n_resp = await httpx_client.post(
+            n8n_url,
+            json=n8n_payload,
+            headers=n8n_headers,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+        )
+
+        if n8n_resp.status_code < 400:
+            return n8n_resp.json()
+        else:
+            logger.warning(f"n8n eBas v2 returned {n8n_resp.status_code}: {n8n_resp.text}")
+            raise HTTPException(status_code=502, detail="eBas registration service error")
+    except httpx.HTTPError as e:
+        logger.error(f"n8n eBas v2 call failed: {e}")
+        raise HTTPException(status_code=502, detail=f"eBas registration service unavailable: {e}")
 
 
 @app.patch("/api/player/games", tags=["Checkin"])
