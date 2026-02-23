@@ -134,6 +134,10 @@ def register_callbacks(app):
                     df[col] = df[col].apply(lambda x: "✓" if x is True or str(x).lower() == "true" else "✗")
 
             # Apply quick filter
+            # If payment is not required, disable the no-payment filter behavior.
+            if active_filter == "no-payment" and requirements.get("require_payment") is not True:
+                active_filter = "all"
+
             if active_filter == "pending":
                 df = df[df["status"] == "Pending"]
             elif active_filter == "ready":
@@ -227,9 +231,10 @@ def register_callbacks(app):
         Input("filter-pending", "n_clicks"),
         Input("filter-ready", "n_clicks"),
         Input("filter-no-payment", "n_clicks"),
+        State("requirements-store", "data"),
         prevent_initial_call=True,
     )
-    def update_active_filter(all_clicks, pending_clicks, ready_clicks, no_payment_clicks):
+    def update_active_filter(all_clicks, pending_clicks, ready_clicks, no_payment_clicks, requirements):
         """Update the active filter based on which button was clicked."""
         triggered = ctx.triggered_id
         if triggered == "filter-pending":
@@ -237,6 +242,8 @@ def register_callbacks(app):
         elif triggered == "filter-ready":
             return "ready"
         elif triggered == "filter-no-payment":
+            if (requirements or {}).get("require_payment") is not True:
+                return "all"
             return "no-payment"
         return "all"
 
@@ -249,8 +256,9 @@ def register_callbacks(app):
         Output("filter-pending", "style"),
         Output("filter-no-payment", "style"),
         Input("active-filter", "data"),
+        Input("requirements-store", "data"),
     )
-    def update_stat_card_styles(active_filter):
+    def update_stat_card_styles(active_filter, requirements):
         """Highlight the active stat card filter with subtle indicator."""
         base_style = {
             "backgroundColor": "#12121a",
@@ -290,10 +298,16 @@ def register_callbacks(app):
                     "borderTop": f"3px solid {color}",
                 }
 
+        if (requirements or {}).get("require_payment") is not True:
+            styles["no-payment"] = {
+                **styles["no-payment"],
+                "display": "none",
+            }
+
         return styles["all"], styles["ready"], styles["pending"], styles["no-payment"]
 
     # ---------------------------------------------------------------------
-    # Admin: Fetch event data from Start.gg and update Airtable settings
+    # Admin: Fetch event data from Start.gg and update settings
     # ---------------------------------------------------------------------
     @app.callback(
         Output("settings-output", "children"),
@@ -307,7 +321,7 @@ def register_callbacks(app):
         Admin action:
         1) Extract tournament slug from Start.gg URL
         2) Fetch tournament + events via GraphQL
-        3) PATCH Airtable 'settings' row (is_active=TRUE()) with:
+        3) Update settings via storage facade with:
            - active_event_slug
            - event_date (ISO YYYY-MM-DD, UTC)
            - events_json (compact list)
@@ -761,9 +775,10 @@ def register_callbacks(app):
         Input("checkins-table", "active_cell"),
         State("checkins-table", "data"),
         State("event-dropdown", "value"),
+        State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def toggle_field(active_cell, table_data, selected_slug):
+    def toggle_field(active_cell, table_data, selected_slug, auth_state):
         """
         When TO clicks on a cell in toggleable columns (payment_valid, startgg, is_guest), toggle it.
         If all required fields are OK, set status to Ready.
@@ -775,7 +790,7 @@ def register_callbacks(app):
         col_id = active_cell.get("column_id")
 
         # Only trigger on toggleable columns (is_guest is set automatically by system)
-        # member added as workaround until eBas Register → Airtable update is implemented
+        # member is toggled manually or set by eBas Register flow
         toggleable_columns = ["payment_valid", "startgg", "member"]
         if col_id not in toggleable_columns:
             return no_update, no_update
@@ -802,8 +817,7 @@ def register_callbacks(app):
         update_data = {col_id: new_val}
 
         # Fetch configurable requirements from settings
-        # Airtable checkbox: checked = True, unchecked = field missing (None)
-        # Use "is True" so that unchecked (None) = requirement OFF
+        # Use "is True" so that missing/None = requirement OFF
         settings = get_active_settings() or {}
         require_payment = settings.get("require_payment") is True
         require_membership = settings.get("require_membership") is True
@@ -835,7 +849,7 @@ def register_callbacks(app):
         new_status = "Ready" if (payment_ok and member_ok and startgg_ok) else "Pending"
         update_data["status"] = new_status
 
-        # Update Airtable
+        # Update database
         result = update_checkin(record_id, update_data)
 
         if result:
@@ -868,6 +882,32 @@ def register_callbacks(app):
                 f"{status_emoji} {player_name}: {col_label} {'✓' if new_val else '✗'}, status={new_status}",
                 style={"color": "#10b981" if new_val else "#f59e0b"}
             )
+
+            # Audit log for manual admin toggle
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_toggle_field",
+                    "active_event_data",
+                    target_event=selected_slug or "",
+                    target_record=record_id,
+                    target_player=player_name,
+                    details=json.dumps(
+                        {
+                            "field": col_id,
+                            "old": bool(is_checked(current_val)),
+                            "new": bool(new_val),
+                            "status": new_status,
+                        }
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for toggle: {e}")
+
             return feedback, table_data
         else:
             logger.error(f"Failed to update {col_id} for {player_name}")
@@ -919,10 +959,12 @@ def register_callbacks(app):
         Input("confirm-delete-dialog", "submit_n_clicks"),
         State("checkins-table", "selected_rows"),
         State("checkins-table", "data"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def delete_selected_player(submit_n_clicks, selected_rows, table_data):
-        """Delete the selected player(s) from Airtable after confirmation."""
+    def delete_selected_player(submit_n_clicks, selected_rows, table_data, selected_slug, auth_state):
+        """Delete the selected player(s) after confirmation."""
         if not submit_n_clicks or not selected_rows or not table_data:
             return no_update, no_update
 
@@ -942,10 +984,27 @@ def register_callbacks(app):
                 failed_names.append(player_name)
                 continue
 
-            # Delete from Airtable
+            # Delete from database
             if delete_checkin(record_id):
                 deleted_names.append(player_name)
                 rows_to_remove.add(row_idx)
+
+                # Audit log for manual admin deletion
+                try:
+                    storage_api.log_action(
+                        {
+                            "user_id": (auth_state or {}).get("user_id", ""),
+                            "user_name": (auth_state or {}).get("user_name", "system"),
+                            "user_email": (auth_state or {}).get("user_email", ""),
+                        },
+                        "admin_delete_checkin",
+                        "active_event_data",
+                        target_event=selected_slug or "",
+                        target_record=record_id,
+                        target_player=player_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write audit log for delete: {e}")
             else:
                 logger.error(f"Failed to delete {player_name}")
                 failed_names.append(player_name)
@@ -1078,7 +1137,7 @@ def register_callbacks(app):
             "offer_membership": bool(offer_membership),
         }
 
-        # Update Airtable
+        # Update settings
         result = update_settings(record_id, update_data)
 
         if result:
@@ -1235,7 +1294,7 @@ def register_callbacks(app):
             "swish_number": swish_number or "",
         }
 
-        # Update Airtable
+        # Update settings
         result = update_settings(record_id, update_data)
 
         if result:
@@ -1251,14 +1310,15 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     @app.callback(
         Output("archive-feedback", "children"),
+        Input("btn-archive-event-quick", "n_clicks"),
         Input("btn-archive-event", "n_clicks"),
         State("event-dropdown", "value"),
         State("archive-clear-active-toggle", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def archive_current_event(n_clicks, selected_slug, clear_flags, auth_state):
-        if not n_clicks:
+    def archive_current_event(n_clicks_quick, n_clicks, selected_slug, clear_flags, auth_state):
+        if not n_clicks and not n_clicks_quick:
             return no_update
 
         if not selected_slug or selected_slug == "__ALL__":
@@ -1382,6 +1442,112 @@ def register_callbacks(app):
                     f"Restore active: {result.get('restore_active', restore_active)} | "
                     f"Restored rows: {result.get('restored_rows', 0)}"
                 ),
+            ],
+        )
+
+    # -------------------------------------------------------------------------
+    # Delete archived event from history - Step 1: confirmation prompt
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("confirm-delete-event-dialog", "displayed"),
+        Output("confirm-delete-event-dialog", "message"),
+        Output("delete-event-feedback", "children", allow_duplicate=True),
+        Input("btn-delete-event-history", "n_clicks"),
+        State("delete-archive-event-dropdown", "value"),
+        State("input-delete-event-reason", "value"),
+        prevent_initial_call=True,
+    )
+    def show_delete_event_confirmation(n_clicks, selected_slug, reason):
+        if not n_clicks:
+            return False, "", no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return (
+                False,
+                "",
+                html.Span("❌ Select a specific event before deleting archive.", style={"color": "#ef4444"}),
+            )
+
+        reason_text = (reason or "").strip()
+        if not reason_text:
+            return (
+                False,
+                "",
+                html.Span("❌ Deletion reason is required.", style={"color": "#ef4444"}),
+            )
+
+        msg = (
+            f"Delete archived history for '{selected_slug}'?\n\n"
+            f"Reason: {reason_text}\n\n"
+            "This deletes event_archive + event_stats rows and cannot be undone."
+        )
+        return True, msg, no_update
+
+    # -------------------------------------------------------------------------
+    # Delete archived event from history - Step 2: execute delete
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("delete-event-feedback", "children"),
+        Input("confirm-delete-event-dialog", "submit_n_clicks"),
+        State("delete-archive-event-dropdown", "value"),
+        State("input-delete-event-reason", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_archived_event(submit_n_clicks, selected_slug, reason, auth_state):
+        if not submit_n_clicks:
+            return no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return html.Span("❌ Select a specific event before deleting archive.", style={"color": "#ef4444"})
+
+        reason_text = (reason or "").strip()
+        if not reason_text:
+            return html.Span("❌ Deletion reason is required.", style={"color": "#ef4444"})
+
+        payload = {
+            "event_slug": selected_slug,
+            "reason": reason_text,
+            "user": {
+                "user_id": (auth_state or {}).get("user_id", ""),
+                "user_name": (auth_state or {}).get("user_name", "system"),
+                "user_email": (auth_state or {}).get("user_email", ""),
+            },
+        }
+
+        delete_fn = getattr(storage_api, "delete_archived_event", None)
+        if delete_fn:
+            try:
+                result = delete_fn(**payload)
+            except Exception as e:
+                logger.exception(f"Delete archive failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Delete archive failed: {e}", style={"color": "#ef4444"})
+        else:
+            try:
+                resp = requests.post(
+                    f"{BACKEND_INTERNAL_URL}/api/archive/delete",
+                    json=payload,
+                    timeout=30,
+                )
+                if not resp.ok:
+                    return html.Span(
+                        f"❌ Delete archive failed ({resp.status_code}): {resp.text}",
+                        style={"color": "#ef4444"},
+                    )
+                result = resp.json()
+            except Exception as e:
+                logger.exception(f"Delete archive API call failed for {selected_slug}: {e}")
+                return html.Span(f"❌ Delete archive API failed: {e}", style={"color": "#ef4444"})
+
+        return html.Div(
+            style={"color": "#10b981", "lineHeight": "1.5"},
+            children=[
+                html.Div(f"🗑️ Deleted archived event: {result.get('event_slug', selected_slug)}"),
+                html.Div(
+                    f"Archive rows removed: {result.get('deleted_archive_rows', 0)} | "
+                    f"Stats rows removed: {result.get('deleted_stats_rows', 0)}"
+                ),
+                html.Div(f"Reason: {reason_text}"),
             ],
         )
 

@@ -687,6 +687,8 @@ def apply_integration_result(
     src = source.lower().strip()
     if src == "startgg":
         update_fields["startgg"] = bool(ok and data.get("registered", True))
+        if isinstance(data.get("events"), list):
+            update_fields["tournament_games_registered"] = data.get("events")
         if data.get("startgg_event_id"):
             update_fields["startgg_event_id"] = str(data.get("startgg_event_id"))
     elif src == "ebas":
@@ -1515,6 +1517,71 @@ def reopen_event(
         "reopened": True,
         "restore_active": restore_active,
         "restored_rows": restored_rows,
+    }
+
+
+def delete_archived_event(
+    event_slug: str,
+    *,
+    reason: str = "",
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Permanently delete historical data for an archived event (event_archive + event_stats)."""
+    if not event_slug:
+        raise ValueError("event_slug is required")
+
+    deleted_archive_rows = 0
+    deleted_stats_rows = 0
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM event_archive WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                archive_count = cur.fetchone()[0] or 0
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM event_stats WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                stats_count = cur.fetchone()[0] or 0
+
+                if archive_count == 0 and stats_count == 0:
+                    raise ValueError(f"No archived data found for event_slug '{event_slug}'")
+
+                cur.execute("DELETE FROM event_archive WHERE event_slug = %s", (event_slug,))
+                deleted_archive_rows = cur.rowcount or 0
+
+                cur.execute("DELETE FROM event_stats WHERE event_slug = %s", (event_slug,))
+                deleted_stats_rows = cur.rowcount or 0
+
+    delete_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    log_action(
+        delete_user,
+        "event_deleted_from_history",
+        "event_archive",
+        target_event=event_slug,
+        reason=reason or "",
+        details=json.dumps(
+            {
+                "deleted_archive_rows": deleted_archive_rows,
+                "deleted_stats_rows": deleted_stats_rows,
+            }
+        ),
+    )
+
+    logger.info(
+        "🗑️ Deleted archived event '%s' (archive_rows=%s, stats_rows=%s)",
+        event_slug,
+        deleted_archive_rows,
+        deleted_stats_rows,
+    )
+    return {
+        "event_slug": event_slug,
+        "deleted_archive_rows": deleted_archive_rows,
+        "deleted_stats_rows": deleted_stats_rows,
     }
 
 

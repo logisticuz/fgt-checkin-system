@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # === Config ===
 DATA_BACKEND = os.getenv("DATA_BACKEND", "airtable").lower().strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-# Legacy table name kept for Airtable compatibility mode
+# Table name used for Airtable fallback mode
 AIRTABLE_TABLE = "active_event_data"
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
@@ -61,6 +61,7 @@ OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/d
 OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 INTEGRATION_ENGINE = os.getenv("INTEGRATION_ENGINE", "n8n").lower().strip()
+EBAS_REGISTER_TIMEOUT_SECONDS = float(os.getenv("EBAS_REGISTER_TIMEOUT_SECONDS", "75"))
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")  # optional shared secret for webhook calls
 SSE_TOKEN = os.getenv("SSE_TOKEN")  # token for SSE authentication (used instead of Basic Auth)
 ADMIN_AUTH_COOKIE_TOKEN = os.getenv("ADMIN_AUTH_COOKIE_TOKEN")
@@ -140,7 +141,7 @@ templates = Jinja2Templates(directory="templates")
 # httpx for proxy to n8n
 httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))  # Increased for duplicate check
 
-# requests Session for Airtable with retries
+# requests Session with retries (used for Start.gg GraphQL, OAuth, health checks)
 SESSION = requests.Session()
 RETRY = Retry(
     total=3,
@@ -341,7 +342,7 @@ def get_active_settings() -> dict:
     Fetch active event settings from the configured storage backend.
     Returns dict with swish_number, swish_expected_per_game, active_event_slug,
     and configurable check-in requirements.
-    Uses shared storage facade (airtable or postgres).
+    Uses shared storage facade (postgres or airtable fallback).
     """
     fields = storage_get_active_settings() or {}
     return {
@@ -868,6 +869,40 @@ async def reopen_event_endpoint(request: Request):
     return {"success": True, **result}
 
 
+@app.post("/api/archive/delete", tags=["Dashboard"])
+async def delete_archived_event_endpoint(request: Request):
+    """Delete archived historical data for an event (event_archive + event_stats)."""
+    delete_fn = getattr(storage_api, "delete_archived_event", None)
+    if not delete_fn:
+        raise HTTPException(status_code=501, detail="Delete archive is not available for current backend")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event_slug = (body.get("event_slug") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    if not event_slug:
+        raise HTTPException(status_code=400, detail="event_slug is required")
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason is required")
+
+    try:
+        result = delete_fn(
+            event_slug,
+            reason=reason,
+            user=body.get("user") or None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Delete archive failed for '{event_slug}': {e}")
+        raise HTTPException(status_code=500, detail=f"Delete archive failed: {e}")
+
+    return {"success": True, **result}
+
+
 @app.post("/api/checkin/begin", tags=["Integrations"])
 async def begin_checkin_endpoint(request: Request):
     """Start or upsert a check-in attempt and return checkin_id."""
@@ -1050,7 +1085,7 @@ async def orchestrate_checkin(request: Request):
             n8n_url,
             json=n8n_payload,
             headers=n8n_headers,
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
         )
 
         if n8n_resp.status_code < 400:

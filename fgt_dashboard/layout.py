@@ -10,6 +10,7 @@ from shared.storage import (
     get_active_slug,
     get_checkins,
     get_active_settings,
+    get_event_history,
     get_session,
 )
 import pandas as pd
@@ -262,6 +263,19 @@ def create_layout():
         logger.exception(f"Failed to fetch event slugs: {e}")
         event_slugs = []
 
+    try:
+        archived_events = get_event_history() or []
+    except Exception as e:
+        logger.exception(f"Failed to fetch archived events: {e}")
+        archived_events = []
+
+    archived_slugs = []
+    for ev in archived_events:
+        slug = ev.get("event_slug") if isinstance(ev, dict) else None
+        if slug:
+            archived_slugs.append(slug)
+    archived_slugs = sorted(set(archived_slugs))
+
     if active_slug and active_slug not in event_slugs:
         event_slugs = [active_slug] + event_slugs
 
@@ -302,8 +316,7 @@ def create_layout():
         dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
         dcc.Store(id="auth-store", data=auth_state),  # Current user auth state
         dcc.Store(id="requirements-store", data={
-            # Airtable checkbox: checked = True, unchecked = field missing (None)
-            # Use "is True" so that unchecked (None) = requirement OFF
+            # Requirements are enabled only when explicitly True
             "require_payment": settings.get("require_payment") is True,
             "require_membership": settings.get("require_membership") is True,
             "require_startgg": settings.get("require_startgg") is True,
@@ -390,6 +403,7 @@ def create_layout():
                             html.Label("Current Event", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
                             dcc.Dropdown(
                                 id="event-dropdown",
+                                className="fgc-dropdown",
                                 options=[
                                     {"label": "🔍 All Events (Debug)", "value": "__ALL__"},
                                 ] + [
@@ -403,6 +417,17 @@ def create_layout():
                             ),
                         ]),
                         html.Button("Refresh", id="btn-refresh", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
+                        html.Button(
+                            "Archive Event",
+                            id="btn-archive-event-quick",
+                            n_clicks=0,
+                            style={
+                                **STYLES["button_primary"],
+                                "height": "38px",
+                                "backgroundColor": COLORS["accent_yellow"],
+                                "color": "#111827",
+                            },
+                        ),
                     ]),
 
                     # Active requirements indicator
@@ -523,6 +548,7 @@ def create_layout():
                             html.Div(style={"minWidth": "140px"}, children=[
                                 dcc.Dropdown(
                                     id="game-filter",
+                                    className="fgc-dropdown",
                                     options=[],  # Populated dynamically
                                     value=None,
                                     placeholder="All games",
@@ -666,7 +692,12 @@ def create_layout():
                                 id="input-startgg-link",
                                 type="text",
                                 placeholder="https://www.start.gg/tournament/your-tournament",
-                                style=STYLES["input"],
+                                style={
+                                    **STYLES["input"],
+                                    "minHeight": "44px",
+                                    "lineHeight": "1.4",
+                                    "boxSizing": "border-box",
+                                },
                             ),
                         ]),
 
@@ -807,6 +838,10 @@ def create_layout():
                             inputStyle={"marginRight": "0.5rem"},
                         ),
                         html.Button("Archive Current Event", id="btn-archive-event", n_clicks=0, style=STYLES["button_primary"]),
+                        html.P(
+                            "Tip: quick archive button is available next to Refresh in Live Check-ins.",
+                            style={"marginTop": "0.75rem", "color": COLORS["text_muted"], "fontSize": "0.82rem"},
+                        ),
                         html.Div(id="archive-feedback", style={"marginTop": "1rem"}),
 
                         html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.25rem 0"}),
@@ -825,11 +860,12 @@ def create_layout():
                         ),
                         html.Button("Reopen Current Event", id="btn-reopen-event", n_clicks=0, style=STYLES["button_secondary"]),
                         html.Div(id="reopen-feedback", style={"marginTop": "1rem"}),
+
                     ]),
 
                     # Hidden elements to satisfy callback dependencies
                     html.Div(style={"display": "none"}, children=[
-                        dcc.Dropdown(id="game-dropdown", options=[], value=None),
+                        dcc.Dropdown(id="game-dropdown", className="fgc-dropdown", options=[], value=None),
                         html.Div(id="game-help"),
                     ]),
 
@@ -839,6 +875,7 @@ def create_layout():
                         html.P("Choose which columns to display in the check-ins table.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
                         dcc.Dropdown(
                             id="column-visibility-dropdown",
+                            className="fgc-dropdown",
                             options=[opt for opt in [
                                 {"label": "Name", "value": "name"},
                                 {"label": "Tag", "value": "tag"},
@@ -860,6 +897,76 @@ def create_layout():
                             clearable=False,
                             style={"backgroundColor": COLORS["bg_dark"]},
                         ),
+                    ]),
+
+                    # Advanced (collapsible)
+                    html.Div(style=STYLES["card"], children=[
+                        html.Details(open=False, children=[
+                            html.Summary(
+                                "Advanced",
+                                style={
+                                    "cursor": "pointer",
+                                    "fontWeight": "700",
+                                    "color": COLORS["text_primary"],
+                                    "fontSize": "1rem",
+                                },
+                            ),
+                            html.Div(style={"marginTop": "1rem"}, children=[
+                                html.H3("Delete Archived Event", style={**STYLES["section_title"], "color": COLORS["accent_red"]}),
+                                html.P(
+                                    "Permanently delete this event from history (event_archive + event_stats)."
+                                    " Active check-ins are not touched.",
+                                    style={"color": COLORS["text_secondary"], "marginBottom": "0.75rem"},
+                                ),
+                                dcc.Dropdown(
+                                    id="delete-archive-event-dropdown",
+                                    className="fgc-dropdown",
+                                    options=[
+                                        {"label": s.replace("-", " ").title(), "value": s}
+                                        for s in archived_slugs
+                                    ],
+                                    placeholder="Select archived event to delete",
+                                    value=(archived_slugs[0] if archived_slugs else None),
+                                    clearable=False,
+                                    style={"marginBottom": "0.75rem"},
+                                ),
+                                dcc.Textarea(
+                                    id="input-delete-event-reason",
+                                    placeholder="Reason for deletion (required, shown in audit log)",
+                                    style={
+                                        "width": "100%",
+                                        "minHeight": "72px",
+                                        "padding": "0.6rem",
+                                        "borderRadius": "8px",
+                                        "border": f"1px solid {COLORS['border']}",
+                                        "backgroundColor": COLORS["bg_dark"],
+                                        "color": COLORS["text_primary"],
+                                    },
+                                ),
+                                html.Div(style={"marginTop": "0.75rem"}, children=[
+                                    html.Button(
+                                        "Delete Archived Event",
+                                        id="btn-delete-event-history",
+                                        n_clicks=0,
+                                        style={
+                                            "backgroundColor": COLORS["accent_red"],
+                                            "color": "#fff",
+                                            "border": "none",
+                                            "borderRadius": "8px",
+                                            "padding": "0.6rem 1rem",
+                                            "fontSize": "0.875rem",
+                                            "fontWeight": "600",
+                                            "cursor": "pointer",
+                                        },
+                                    ),
+                                ]),
+                                html.Div(id="delete-event-feedback", style={"marginTop": "0.75rem"}),
+                                dcc.ConfirmDialog(
+                                    id="confirm-delete-event-dialog",
+                                    message="Are you sure you want to permanently delete this event from history?",
+                                ),
+                            ]),
+                        ]),
                     ]),
                 ]),
 
@@ -890,6 +997,7 @@ def create_layout():
                                 }),
                                 dcc.Dropdown(
                                     id="audit-filter-action",
+                                    className="fgc-dropdown",
                                     options=[],  # Populated dynamically from data
                                     value=None,
                                     placeholder="All actions",
@@ -907,6 +1015,7 @@ def create_layout():
                                 }),
                                 dcc.Dropdown(
                                     id="audit-filter-user",
+                                    className="fgc-dropdown",
                                     options=[],  # Populated dynamically from data
                                     value=None,
                                     placeholder="All users",

@@ -260,7 +260,7 @@
     <section id="section-ebas" class="section hidden">
       <h2>Become a Sverok Member</h2>
       <p style="margin-bottom: 1rem; color: #aaa;">
-        Membership is free and only takes a few seconds. We use SPAR to fetch your details automatically.
+        Membership is free. Registration can take up to 60 seconds while SPAR/Sverok confirms your details.
       </p>
 
       <label for="pnr-ebas">Personal ID (YYYYMMDDXXXX)</label>
@@ -275,6 +275,9 @@
       <button type="button" id="btn-register-ebas" class="btn btn-primary" disabled>
         Register as Member
       </button>
+      <p style="margin-top: 0.75rem; color: #8aa0b6; font-size: 0.9rem;">
+        Keep this page open until you get a success or error message.
+      </p>
     </section>
 
     <!-- Section: Payment (info only - actual payment on status page) -->
@@ -386,11 +389,11 @@
       }
     }
 
-    function setButtonLoading(btn, loading) {
+    function setButtonLoading(btn, loading, loadingText = "Loading...") {
       if (loading) {
         btn.disabled = true;
         btn.dataset.originalText = btn.textContent;
-        btn.innerHTML = '<span class="spinner"></span>Loading...';
+        btn.innerHTML = `<span class="spinner"></span>${loadingText}`;
       } else {
         btn.disabled = false;
         btn.textContent = btn.dataset.originalText || btn.textContent;
@@ -546,7 +549,7 @@
         }
       }
 
-      setButtonLoading(btn, true);
+      setButtonLoading(btn, true, "Creating membership...");
       clearMessages();
 
       try {
@@ -582,19 +585,21 @@
           updateFinalButton();
         } else {
           // Handle different response formats from n8n
-          let errorMsg = "Could not register membership";
+          let errorMsg = "Could not complete membership registration right now";
           if (typeof data.message === "string") {
             errorMsg = data.message;
           } else if (data.message?.error) {
             errorMsg = data.message.error;
           } else if (data.error && typeof data.error === "string") {
             errorMsg = data.error;
+          } else if (typeof data.detail === "string") {
+            errorMsg = data.detail;
           }
           showMessage(errorMsg, "error");
         }
       } catch (err) {
         console.error("eBas error:", err);
-        showMessage("Something went wrong. Please try again.", "error");
+        showMessage("Membership registration is taking longer than expected. Please try again in a moment.", "error");
       } finally {
         setButtonLoading(btn, false);
       }
