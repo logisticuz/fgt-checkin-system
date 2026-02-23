@@ -31,7 +31,7 @@ from shared.storage import (
     delete_checkin,
 )
 
-# Postgres-only functions (graceful import for airtable backend compatibility)
+# Backend-specific optional functions (available in Postgres mode)
 try:
     from shared.storage import (
         get_checkin_by_record_id,
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # === Config ===
 DATA_BACKEND = os.getenv("DATA_BACKEND", "airtable").lower().strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-# Updated to match your new table name in Airtable
+# Legacy table name kept for Airtable compatibility mode
 AIRTABLE_TABLE = "active_event_data"
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
@@ -208,10 +208,6 @@ def compute_requirements(settings: dict) -> dict:
     """
     Compute which requirements are active based on settings.
 
-    Airtable checkbox semantics:
-    - Checkbox checked = True (stored in Airtable)
-    - Checkbox unchecked = field missing/None (Airtable doesn't store False)
-
     We now require explicit True to enable a requirement.
     Missing/None = requirement is OFF (disabled).
 
@@ -342,7 +338,7 @@ async def proxy_n8n(path: str, request: Request):
 # === Domain logic ===
 def get_active_settings() -> dict:
     """
-    Fetch active event settings from Airtable settings table.
+    Fetch active event settings from the configured storage backend.
     Returns dict with swish_number, swish_expected_per_game, active_event_slug,
     and configurable check-in requirements.
     Uses shared storage facade (airtable or postgres).
@@ -561,7 +557,7 @@ def _data_backend_health() -> bool:
 async def health_check():
     """
     Lightweight health check for Docker/orchestration.
-    Does NOT call external APIs (Airtable) to avoid burning API quota.
+    Does NOT call external provider APIs to avoid unnecessary traffic.
     Use /health/deep for full diagnostics.
     """
     integration_ok = await _integration_engine_health()

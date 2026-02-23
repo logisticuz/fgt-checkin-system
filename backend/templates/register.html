@@ -407,7 +407,7 @@
 
         const data = await response.json();
 
-        // Update status icons based on real Airtable data
+        // Update status icons based on live backend status data
         if (REQUIRE_STARTGG) {
           setStatus("status-startgg", data.startgg === true);
         }
