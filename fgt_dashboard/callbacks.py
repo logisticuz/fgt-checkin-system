@@ -1,6 +1,6 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State
-from dash import no_update, html, ctx
+from dash import no_update, html, ctx, dcc
 from shared.storage import (
     get_checkins,
     get_active_settings,
@@ -19,7 +19,7 @@ import logging
 import json
 import re
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 
 logger = logging.getLogger(__name__)
 
@@ -797,24 +797,83 @@ def register_callbacks(app):
     # Insights - load archived event options + summary KPIs
     # -------------------------------------------------------------------------
     @app.callback(
+        Output("insights-series-dropdown", "options"),
+        Output("insights-series-dropdown", "value"),
         Output("insights-event-dropdown", "options"),
         Output("insights-event-dropdown", "value"),
         Output("insights-summary-title", "children"),
+        Output("insights-empty-hint", "children"),
         Output("insights-kpi-total", "children"),
         Output("insights-kpi-revenue", "children"),
         Output("insights-kpi-readyrate", "children"),
         Output("insights-kpi-memberrate", "children"),
+        Output("insights-kpi-guestrate", "children"),
         Output("insights-kpi-startggrate", "children"),
         Output("insights-kpi-retention", "children"),
+        Output("insights-kpi-total-delta", "children"),
+        Output("insights-kpi-revenue-delta", "children"),
+        Output("insights-kpi-readyrate-delta", "children"),
+        Output("insights-kpi-memberrate-delta", "children"),
+        Output("insights-kpi-guestrate-delta", "children"),
+        Output("insights-kpi-startggrate-delta", "children"),
+        Output("insights-kpi-retention-delta", "children"),
         Output("insights-top-game", "children"),
+        Output("insights-top-players-title", "children"),
+        Output("insights-top-players-table", "data"),
+        Output("insights-games-title", "children"),
+        Output("insights-games-table", "data"),
         Output("insights-events-table", "data"),
+        Output("insights-earnings-table", "data"),
         Input("tabs", "value"),
         Input("btn-insights-refresh", "n_clicks"),
         Input("insights-event-dropdown", "value"),
+        Input("insights-period-dropdown", "value"),
+        Input("insights-series-dropdown", "value"),
+        Input("insights-date-range", "start_date"),
+        Input("insights-date-range", "end_date"),
     )
-    def update_insights(selected_tab, _refresh_clicks, selected_event_slug):
+    def update_insights(
+        selected_tab,
+        _refresh_clicks,
+        selected_event_slugs,
+        selected_period,
+        selected_series,
+        custom_start_date,
+        custom_end_date,
+    ):
         if selected_tab != "tab-insights":
-            return (no_update,) * 11
+            return (no_update,) * 27
+
+        def _empty_response(hint: str = "", summary: str = "Insights overview"):
+            return (
+                [],
+                [],
+                [],
+                [],
+                summary,
+                hint,
+                "0",
+                "0 kr",
+                "0%",
+                "0%",
+                "0%",
+                "0%",
+                "0%",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "Most popular game: -",
+                "Top attendees",
+                [],
+                "Most played games",
+                [],
+                [],
+                [],
+            )
 
         try:
             history_fn = getattr(storage_api, "get_event_history_dashboard", None)
@@ -824,10 +883,14 @@ def register_callbacks(app):
                 events = storage_api.get_event_history() or []
         except Exception as e:
             logger.exception(f"Failed to load insights data: {e}")
-            return [], None, "❌ Could not load insights", "0", "0 kr", "0%", "0%", "0%", "0%", "", []
+            return _empty_response("Could not load insights. Try refreshing.", "Insights unavailable")
 
         if not events:
-            return [], None, "No archived events yet", "0", "0 kr", "0%", "0%", "0%", "0%", "", []
+            return _empty_response("No archived events yet. Archive your first event to unlock insights.")
+
+        all_events = list(events)
+
+        selected_period = selected_period or "month"
 
         def _as_float(v):
             try:
@@ -841,8 +904,101 @@ def register_callbacks(app):
             except Exception:
                 return 0
 
-        options = []
+        def _as_date(v):
+            if not v:
+                return None
+            if isinstance(v, datetime):
+                return v.date()
+            if isinstance(v, date):
+                return v
+            txt = str(v).strip()
+            if not txt:
+                return None
+            txt = txt.split("T")[0]
+            try:
+                return datetime.fromisoformat(txt).date()
+            except Exception:
+                return None
+
+        today = datetime.now(timezone.utc).date()
+        range_start = None
+        range_end = None
+
+        if selected_period == "day":
+            range_start = today - timedelta(days=1)
+            range_end = today
+        elif selected_period == "week":
+            range_start = today - timedelta(days=7)
+            range_end = today
+        elif selected_period == "month":
+            range_start = today - timedelta(days=30)
+            range_end = today
+        elif selected_period == "quarter":
+            range_start = today - timedelta(days=90)
+            range_end = today
+        elif selected_period == "year":
+            range_start = today - timedelta(days=365)
+            range_end = today
+        elif selected_period == "custom":
+            range_start = _as_date(custom_start_date)
+            range_end = _as_date(custom_end_date)
+
+        filtered_events = []
         for ev in events:
+            ev_date = _as_date(ev.get("event_date"))
+            if selected_period == "all":
+                filtered_events.append(ev)
+                continue
+
+            # For ranged filters, include only events with parseable date in range.
+            if not ev_date:
+                continue
+            if range_start and ev_date < range_start:
+                continue
+            if range_end and ev_date > range_end:
+                continue
+            filtered_events.append(ev)
+
+        events = filtered_events
+
+        if not events:
+            label_map = {
+                "day": "last 24h",
+                "week": "last 7 days",
+                "month": "last 30 days",
+                "quarter": "last 90 days",
+                "year": "last 365 days",
+                "custom": "selected range",
+                "all": "all time",
+            }
+            return _empty_response(
+                f"No archived events in {label_map.get(selected_period, 'selected period')}. Try widening date range or clearing filters.",
+            )
+
+        def _event_title(ev):
+            return (ev.get("event_display_name") or ev.get("event_slug") or "").strip()
+
+        def _series_key(ev):
+            title = _event_title(ev)
+            if not title:
+                return "Other"
+            # Remove trailing numbering patterns: "#12", "12", "- 12"
+            cleaned = re.sub(r"\s*[-#]?\s*\d+\s*$", "", title).strip(" -#")
+            return cleaned or title
+
+        selected_series = selected_series or []
+
+        # Build series options from events in current period.
+        series_values = sorted({_series_key(ev) for ev in events if _series_key(ev)})
+        series_options = [{"label": s, "value": s} for s in series_values]
+        selected_series = [s for s in selected_series if s in set(series_values)]
+
+        series_scoped_events = [
+            ev for ev in events if (not selected_series) or (_series_key(ev) in selected_series)
+        ]
+
+        options = []
+        for ev in series_scoped_events:
             slug = ev.get("event_slug")
             if not slug:
                 continue
@@ -852,66 +1008,334 @@ def register_callbacks(app):
             options.append({"label": label, "value": slug})
 
         if not options:
-            return [], None, "No archived events yet", "0", "0 kr", "0%", "0%", "0%", "0%", "", []
+            empty = _empty_response("No archived events yet")
+            return (series_options, selected_series) + empty[2:]
 
-        slugs = {o["value"] for o in options}
-        if not selected_event_slug or selected_event_slug not in slugs:
-            selected_event_slug = options[0]["value"]
+        available_slugs = {o["value"] for o in options}
+        selected_event_slugs = [s for s in (selected_event_slugs or []) if s in available_slugs]
 
-        selected = next((ev for ev in events if ev.get("event_slug") == selected_event_slug), events[0])
+        # Empty selection means "all events in selected period"
+        selected_events = [
+            ev for ev in series_scoped_events
+            if (not selected_event_slugs) or ev.get("event_slug") in selected_event_slugs
+        ]
 
-        total = _as_int(selected.get("total_participants") or selected.get("participants"))
-        total_revenue = _as_float(selected.get("total_revenue"))
-        member_count = _as_int(selected.get("member_count"))
-        startgg_count = _as_int(selected.get("startgg_count"))
-        retention = _as_float(selected.get("retention_rate"))
-        top_game = selected.get("most_popular_game") or "-"
+        def _aggregate_metrics(event_rows):
+            total = 0
+            total_revenue = 0.0
+            member_count = 0
+            guest_count = 0
+            startgg_count = 0
+            ready_count = 0
+            weighted_retention_sum = 0.0
+            weighted_retention_den = 0
+            top_game_counts = {}
 
-        ready_rate = 0.0
-        status_breakdown = selected.get("status_breakdown")
-        if isinstance(status_breakdown, dict) and total > 0:
-            ready_rate = (_as_int(status_breakdown.get("Ready")) / total) * 100
+            for ev in event_rows:
+                ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
+                total += ev_total
+                total_revenue += _as_float(ev.get("total_revenue"))
+                member_count += _as_int(ev.get("member_count"))
+                guest_count += _as_int(ev.get("guest_count"))
+                startgg_count += _as_int(ev.get("startgg_count"))
 
-        member_rate = (member_count / total * 100) if total > 0 else 0.0
-        startgg_rate = (startgg_count / total * 100) if total > 0 else 0.0
+                status_breakdown = ev.get("status_breakdown")
+                if isinstance(status_breakdown, dict):
+                    ready_count += _as_int(status_breakdown.get("Ready"))
 
-        summary_title = (
-            f"{selected.get('event_display_name') or selected_event_slug}"
-            f" • {selected.get('event_date') or 'No date'}"
-        )
-        top_game_text = f"Most popular game: {top_game}"
+                retention_val = _as_float(ev.get("retention_rate"))
+                if ev_total > 0:
+                    weighted_retention_sum += retention_val * ev_total
+                    weighted_retention_den += ev_total
+
+                top_game = ev.get("most_popular_game")
+                if top_game:
+                    top_game_counts[top_game] = top_game_counts.get(top_game, 0) + 1
+
+            return {
+                "total": total,
+                "revenue": total_revenue,
+                "member_count": member_count,
+                "guest_count": guest_count,
+                "startgg_count": startgg_count,
+                "ready_count": ready_count,
+                "retention": (weighted_retention_sum / weighted_retention_den) if weighted_retention_den > 0 else 0.0,
+                "top_game_counts": top_game_counts,
+            }
 
         table_rows = []
-        for ev in events:
+        earnings_rows = []
+        for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
             ev_member_rate = (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
             ev_startgg_rate = (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            ev_revenue = _as_float(ev.get("total_revenue"))
+            revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
             table_rows.append(
                 {
                     "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
                     "event_slug": ev.get("event_slug", ""),
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
-                    "total_revenue": f"{_as_float(ev.get('total_revenue')):.0f} kr",
+                    "total_revenue": f"{ev_revenue:.0f} kr",
                     "member_rate": f"{ev_member_rate:.0f}%",
                     "startgg_rate": f"{ev_startgg_rate:.0f}%",
                     "retention_rate": f"{_as_float(ev.get('retention_rate')):.0f}%",
                 }
             )
+            earnings_rows.append(
+                {
+                    "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
+                    "event_date": ev.get("event_date") or "",
+                    "total_participants": ev_total,
+                    "total_revenue": f"{ev_revenue:.0f} kr",
+                    "revenue_per_player": f"{revenue_per_player:.0f} kr",
+                }
+            )
+
+        if not selected_events:
+            empty = _empty_response("No events selected")
+            return (series_options, selected_series, options, []) + empty[4:]
+
+        metrics = _aggregate_metrics(selected_events)
+
+        ready_rate = (metrics["ready_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        member_rate = (metrics["member_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        guest_rate = (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        startgg_rate = (metrics["startgg_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        retention = metrics["retention"]
+
+        if metrics["top_game_counts"]:
+            top_game = max(metrics["top_game_counts"], key=metrics["top_game_counts"].get)
+            top_game_text = f"Most popular game: {top_game}"
+        else:
+            top_game_text = ""
+
+        def _fmt_delta(curr, prev, unit="count"):
+            if prev is None:
+                return "—"
+            diff = curr - prev
+            if diff > 0:
+                arrow = "↑"
+            elif diff < 0:
+                arrow = "↓"
+            else:
+                arrow = "→"
+
+            if unit == "kr":
+                return f"{arrow} {diff:+.0f} kr vs prev"
+            if unit == "pp":
+                return f"{arrow} {diff:+.1f} pp vs prev"
+            return f"{arrow} {int(diff):+d} vs prev"
+
+        # Delta against previous period (same length), disabled for all-time and specific-event selection.
+        prev_metrics = None
+        if selected_period != "all" and not selected_event_slugs and range_start and range_end:
+            period_days = (range_end - range_start).days + 1
+            prev_end = range_start - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=period_days - 1)
+
+            prev_events = []
+            for ev in all_events:
+                ev_date = _as_date(ev.get("event_date"))
+                if not ev_date:
+                    continue
+                if ev_date < prev_start or ev_date > prev_end:
+                    continue
+                if selected_series and (_series_key(ev) not in selected_series):
+                    continue
+                prev_events.append(ev)
+
+            if prev_events:
+                prev_metrics = _aggregate_metrics(prev_events)
+
+        total_delta = _fmt_delta(metrics["total"], prev_metrics["total"] if prev_metrics else None, "count")
+        revenue_delta = _fmt_delta(metrics["revenue"], prev_metrics["revenue"] if prev_metrics else None, "kr")
+        ready_delta = _fmt_delta(ready_rate, ((prev_metrics["ready_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        member_delta = _fmt_delta(member_rate, ((prev_metrics["member_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        guest_delta = _fmt_delta(guest_rate, ((prev_metrics["guest_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        startgg_delta = _fmt_delta(startgg_rate, ((prev_metrics["startgg_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        retention_delta = _fmt_delta(retention, prev_metrics["retention"] if prev_metrics else None, "pp")
+
+        period_label = {
+            "day": "Last 24h",
+            "week": "Last 7 days",
+            "month": "Last 30 days",
+            "quarter": "Last 90 days",
+            "year": "Last 365 days",
+            "custom": "Custom range",
+            "all": "All time",
+        }.get(selected_period, "Selected period")
+
+        if selected_event_slugs:
+            scope_label = f"{len(selected_events)} selected events"
+        elif selected_series:
+            scope_label = f"All events in {', '.join(selected_series)}"
+        else:
+            scope_label = "All events"
+        summary_title = f"{scope_label} • {period_label}"
+
+        # Top attendees leaderboard for selected scope
+        top_players_rows = []
+        top_players_title = "Top attendees"
+        try:
+            top_players_fn = getattr(storage_api, "get_top_players_history", None)
+            if top_players_fn:
+                selected_scope_slugs = [ev.get("event_slug") for ev in selected_events if ev.get("event_slug")]
+                top_players_rows = top_players_fn(
+                    event_slugs=selected_scope_slugs,
+                    start_date=range_start.isoformat() if range_start else None,
+                    end_date=range_end.isoformat() if range_end else None,
+                    limit=15,
+                ) or []
+                top_players_title = f"Top attendees ({len(top_players_rows)} shown)"
+        except Exception as e:
+            logger.warning(f"Failed to load top players leaderboard: {e}")
+
+        # Game popularity leaderboard for selected scope
+        game_counts = {}
+        total_entries = 0
+        for ev in selected_events:
+            breakdown = ev.get("games_breakdown")
+            if not isinstance(breakdown, dict):
+                continue
+            for game, count in breakdown.items():
+                cnt = _as_int(count)
+                if cnt <= 0:
+                    continue
+                game_counts[game] = game_counts.get(game, 0) + cnt
+                total_entries += cnt
+
+        sorted_games = sorted(game_counts.items(), key=lambda kv: (-kv[1], str(kv[0]).lower()))
+        games_rows = []
+        for idx, (game, cnt) in enumerate(sorted_games[:20], start=1):
+            share = (cnt / total_entries * 100) if total_entries > 0 else 0.0
+            games_rows.append(
+                {
+                    "rank": idx,
+                    "game": game,
+                    "entries": cnt,
+                    "share": f"{share:.0f}%",
+                }
+            )
+        games_title = f"Most played games ({len(games_rows)} shown)"
 
         return (
+            series_options,
+            selected_series,
             options,
-            selected_event_slug,
+            selected_event_slugs,
             summary_title,
-            str(total),
-            f"{total_revenue:.0f} kr",
+            "",
+            str(metrics["total"]),
+            f"{metrics['revenue']:.0f} kr",
             f"{ready_rate:.0f}%",
             f"{member_rate:.0f}%",
+            f"{guest_rate:.0f}%",
             f"{startgg_rate:.0f}%",
             f"{retention:.0f}%",
+            total_delta,
+            revenue_delta,
+            ready_delta,
+            member_delta,
+            guest_delta,
+            startgg_delta,
+            retention_delta,
             top_game_text,
+            top_players_title,
+            top_players_rows,
+            games_title,
+            games_rows,
             table_rows,
+            earnings_rows,
         )
+
+    @app.callback(
+        Output("insights-custom-range-wrap", "style"),
+        Input("insights-period-dropdown", "value"),
+    )
+    def toggle_insights_custom_range(selected_period):
+        if selected_period == "custom":
+            return {"display": "block", "minWidth": "320px"}
+        return {"display": "none"}
+
+    @app.callback(
+        Output("insights-view-players", "style"),
+        Output("insights-view-games", "style"),
+        Output("insights-view-events", "style"),
+        Output("insights-view-earnings", "style"),
+        Output("insights-top-game", "style"),
+        Input("insights-subtabs", "value"),
+    )
+    def toggle_insights_focus_view(view_mode):
+        base_visible = {"display": "block"}
+        hidden = {"display": "none"}
+        top_game_visible = {"color": "#94a3b8", "marginBottom": "1rem"}
+        mode = (view_mode or "").strip().lower()
+
+        if mode == "players":
+            return base_visible, hidden, hidden, hidden, hidden
+        if mode == "games":
+            return hidden, base_visible, hidden, hidden, top_game_visible
+        if mode == "events":
+            return hidden, hidden, base_visible, hidden, top_game_visible
+        if mode == "earnings":
+            return hidden, hidden, hidden, base_visible, hidden
+        return base_visible, hidden, hidden, hidden, hidden
+
+    @app.callback(
+        Output("insights-kpi-help", "children"),
+        Input("insights-card-total", "n_clicks"),
+        Input("insights-card-ready", "n_clicks"),
+        Input("insights-card-member", "n_clicks"),
+        Input("insights-card-guest", "n_clicks"),
+        Input("insights-card-startgg", "n_clicks"),
+        Input("insights-card-retention", "n_clicks"),
+        Input("insights-card-revenue", "n_clicks"),
+    )
+    def show_kpi_help(_total, _ready, _member, _guest, _startgg, _retention, _revenue):
+        help_map = {
+            "insights-card-total": "Participants: total participant entries in selected period/scope.",
+            "insights-card-ready": "Ready Rate: ready participants divided by total participants at archive time.",
+            "insights-card-member": "Member Rate: members divided by total participants.",
+            "insights-card-guest": "Guest Share: guests divided by total participants.",
+            "insights-card-startgg": "Start.gg Rate: Start.gg-verified participants divided by total participants.",
+            "insights-card-retention": "Retention: returning-player share, weighted by event size.",
+            "insights-card-revenue": "Total Revenue: summed event revenue in selected scope.",
+        }
+        triggered = ctx.triggered_id
+        if triggered in help_map:
+            return help_map[triggered]
+        return "Tip: click a KPI card to see how it is calculated."
+
+    @app.callback(
+        Output("insights-download", "data"),
+        Input("btn-insights-export-csv", "n_clicks"),
+        State("insights-subtabs", "value"),
+        State("insights-top-players-table", "data"),
+        State("insights-games-table", "data"),
+        State("insights-events-table", "data"),
+        State("insights-earnings-table", "data"),
+        prevent_initial_call=True,
+    )
+    def export_insights_csv(n_clicks, subtab, players_data, games_data, events_data, earnings_data):
+        if not n_clicks:
+            return no_update
+
+        mode = (subtab or "players").strip().lower()
+        data_map = {
+            "players": players_data or [],
+            "games": games_data or [],
+            "events": events_data or [],
+            "earnings": earnings_data or [],
+        }
+        rows = data_map.get(mode, [])
+        if not rows:
+            return no_update
+
+        df = pd.DataFrame(rows)
+        filename = f"insights_{mode}.csv"
+        return dcc.send_data_frame(df.to_csv, filename, index=False)
 
     # -------------------------------------------------------------------------
     # Reactive Stats - update stat cards when table data changes

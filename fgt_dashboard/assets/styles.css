@@ -449,3 +449,101 @@
         transition: none !important;
     }
 }
+
+/* Insights KPI compact grid */
+#insights-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    gap: 0.75rem;
+}
+
+/* Insights subtabs */
+#insights-subtabs {
+    border-bottom: 1px solid #1e293b;
+    background: #0d1020;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+#insights-subtabs .tab,
+#insights-subtabs .tab--selected {
+    border: none !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+.insights-subtab {
+    background: #12121a !important;
+    color: #94a3b8 !important;
+    border: none !important;
+    border-right: 1px solid #1e293b !important;
+    padding: 0.74rem 1rem !important;
+    font-size: 0.88rem !important;
+    line-height: 1.15;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.insights-subtab:last-child {
+    border-right: none !important;
+}
+
+.insights-subtab--selected {
+    background: #0a0a0f !important;
+    color: #00d4ff !important;
+    border-top: 2px solid #00d4ff !important;
+    border-right: 1px solid #1e293b !important;
+    padding: 0.74rem 1rem !important;
+    box-shadow: none;
+}
+
+.insights-subtab:focus,
+.insights-subtab--selected:focus,
+#insights-subtabs .tab:focus,
+#insights-subtabs .tab--selected:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+#insights-subtabs .tab:focus-visible,
+#insights-subtabs .tab--selected:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+@media (max-width: 1500px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(4, minmax(160px, 1fr));
+    }
+}
+
+@media (max-width: 1200px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(3, minmax(160px, 1fr));
+    }
+}
+
+@media (max-width: 900px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }
+}
+/* Global app canvas - remove browser white frame */
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: #0a0a0f;
+}
+
+#react-entry-point,
+#_dash-app-content,
+.dash-app {
+    background: #0a0a0f;
+    min-height: 100vh;
+}

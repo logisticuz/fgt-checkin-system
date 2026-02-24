@@ -684,6 +684,8 @@ def create_layout():
                 # ========== TAB 2: Insights ==========
                 html.Div(id="tab-insights-content", style={"display": "none"}, children=[
                     html.Div(style=STYLES["card"], children=[
+                        html.Div(id="insights-summary-title", style={"color": COLORS["text_primary"], "fontWeight": "600", "marginBottom": "0.45rem"}),
+
                         html.Div(
                             style={
                                 "display": "flex",
@@ -693,54 +695,212 @@ def create_layout():
                                 "marginBottom": "1rem",
                             },
                             children=[
-                                html.Div(style={"flex": "1", "minWidth": "260px"}, children=[
-                                    html.Label("Archived Event", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
+                                html.Div(style={"flex": "1", "minWidth": "300px"}, children=[
+                                    html.Label("Archived Events", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
                                     dcc.Dropdown(
                                         id="insights-event-dropdown",
                                         className="fgc-dropdown",
                                         options=[],
-                                        value=None,
+                                        value=[],
+                                        multi=True,
+                                        clearable=True,
+                                        placeholder="Select events (empty = all)",
+                                        style={"backgroundColor": COLORS["bg_dark"]},
+                                    ),
+                                ]),
+                                html.Div(style={"minWidth": "190px"}, children=[
+                                    html.Label("Period", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
+                                    dcc.Dropdown(
+                                        id="insights-period-dropdown",
+                                        className="fgc-dropdown",
                                         clearable=False,
-                                        placeholder="Select archived event",
+                                        value="month",
+                                        options=[
+                                            {"label": "Last 24h", "value": "day"},
+                                            {"label": "Last 7 days", "value": "week"},
+                                            {"label": "Last 30 days", "value": "month"},
+                                            {"label": "Last 90 days", "value": "quarter"},
+                                            {"label": "Last 365 days", "value": "year"},
+                                            {"label": "Custom range", "value": "custom"},
+                                            {"label": "All time", "value": "all"},
+                                        ],
+                                        style={"backgroundColor": COLORS["bg_dark"]},
+                                    ),
+                                ]),
+                                html.Div(style={"minWidth": "240px"}, children=[
+                                    html.Label("Series", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
+                                    dcc.Dropdown(
+                                        id="insights-series-dropdown",
+                                        className="fgc-dropdown",
+                                        options=[],
+                                        value=[],
+                                        multi=True,
+                                        clearable=True,
+                                        placeholder="Filter by series (optional)",
+                                        style={"backgroundColor": COLORS["bg_dark"]},
+                                    ),
+                                ]),
+                                html.Div(id="insights-custom-range-wrap", style={"display": "none", "minWidth": "320px"}, children=[
+                                    html.Label("Custom Date Range", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
+                                    dcc.DatePickerRange(
+                                        id="insights-date-range",
+                                        minimum_nights=0,
+                                        updatemode="bothdates",
+                                        display_format="YYYY-MM-DD",
                                         style={"backgroundColor": COLORS["bg_dark"]},
                                     ),
                                 ]),
                                 html.Button("Refresh", id="btn-insights-refresh", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
+                                html.Button("Export CSV", id="btn-insights-export-csv", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
+                                dcc.Download(id="insights-download"),
                             ],
                         ),
-                        html.Div(id="insights-summary-title", style={"color": COLORS["text_primary"], "fontWeight": "600", "marginBottom": "1rem"}),
+                        html.Div(id="insights-empty-hint", style={"color": COLORS["text_muted"], "fontSize": "0.82rem", "marginBottom": "0.75rem"}),
 
-                        html.Div(style={"display": "flex", "gap": "0.9rem", "flexWrap": "wrap", "marginBottom": "1rem"}, children=[
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_blue']}"}, children=[
-                                html.P("0", id="insights-kpi-total", style={**STYLES["stat_value"], "fontSize": "2rem", "color": COLORS["accent_blue"]}),
+                        dcc.Tabs(
+                            id="insights-subtabs",
+                            value="players",
+                            style={"marginBottom": "0.9rem"},
+                            children=[
+                                dcc.Tab(label="Players", value="players", className="insights-subtab", selected_className="insights-subtab--selected"),
+                                dcc.Tab(label="Games", value="games", className="insights-subtab", selected_className="insights-subtab--selected"),
+                                dcc.Tab(label="Events", value="events", className="insights-subtab", selected_className="insights-subtab--selected"),
+                                dcc.Tab(label="Earnings", value="earnings", className="insights-subtab", selected_className="insights-subtab--selected"),
+                            ],
+                        ),
+
+                        html.Div(id="insights-kpi-grid", style={"gap": "0.75rem", "marginBottom": "0.65rem"}, children=[
+                            html.Div(id="insights-card-total", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid #22d3ee", "cursor": "pointer"}, children=[
+                                html.P("0", id="insights-kpi-total", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": "#22d3ee"}),
                                 html.P("Participants", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-total-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_green']}"}, children=[
-                                html.P("0%", id="insights-kpi-readyrate", style={**STYLES["stat_value"], "fontSize": "2rem", "color": COLORS["accent_green"]}),
+                            html.Div(id="insights-card-ready", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_green']}", "cursor": "pointer"}, children=[
+                                html.P("0%", id="insights-kpi-readyrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_green"]}),
                                 html.P("Ready Rate", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-readyrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_purple']}"}, children=[
-                                html.P("0%", id="insights-kpi-memberrate", style={**STYLES["stat_value"], "fontSize": "2rem", "color": COLORS["accent_purple"]}),
+                            html.Div(id="insights-card-member", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_purple']}", "cursor": "pointer"}, children=[
+                                html.P("0%", id="insights-kpi-memberrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_purple"]}),
                                 html.P("Member Rate", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-memberrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_yellow']}"}, children=[
-                                html.P("0%", id="insights-kpi-startggrate", style={**STYLES["stat_value"], "fontSize": "2rem", "color": COLORS["accent_yellow"]}),
+                            html.Div(id="insights-card-guest", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": "3px solid #2dd4bf", "cursor": "pointer"}, children=[
+                                html.P("0%", id="insights-kpi-guestrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": "#2dd4bf"}),
+                                html.P("Guest Share", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-guestrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
+                            ]),
+                            html.Div(id="insights-card-startgg", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_yellow']}", "cursor": "pointer"}, children=[
+                                html.P("0%", id="insights-kpi-startggrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_yellow"]}),
                                 html.P("Start.gg Rate", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-startggrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_red']}"}, children=[
-                                html.P("0%", id="insights-kpi-retention", style={**STYLES["stat_value"], "fontSize": "2rem", "color": COLORS["accent_red"]}),
+                            html.Div(id="insights-card-retention", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_red']}", "cursor": "pointer"}, children=[
+                                html.P("0%", id="insights-kpi-retention", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_red"]}),
                                 html.P("Retention", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-retention-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
-                            html.Div(className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "160px", "borderTop": f"3px solid {COLORS['accent_blue']}"}, children=[
-                                html.P("0 kr", id="insights-kpi-revenue", style={**STYLES["stat_value"], "fontSize": "1.7rem", "color": COLORS["accent_blue"]}),
+                            html.Div(id="insights-card-revenue", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": "3px solid #818cf8", "cursor": "pointer"}, children=[
+                                html.P("0 kr", id="insights-kpi-revenue", style={**STYLES["stat_value"], "fontSize": "1.6rem", "color": "#818cf8"}),
                                 html.P("Total Revenue", style=STYLES["stat_label"]),
+                                html.P("", id="insights-kpi-revenue-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
                             ]),
                         ]),
+                        html.Div(id="insights-kpi-help", style={"color": COLORS["text_muted"], "fontSize": "0.78rem", "marginBottom": "0.9rem"}),
 
-                        html.Div(id="insights-top-game", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
+                        html.Div(id="insights-view-players", children=[
+                            html.Div(id="insights-top-players-title", style={"color": COLORS["text_primary"], "fontWeight": "600", "marginBottom": "0.6rem"}),
 
-                        dash_table.DataTable(
-                            id="insights-events-table",
+                            dash_table.DataTable(
+                                id="insights-top-players-table",
+                                columns=[
+                                    {"name": "#", "id": "rank"},
+                                    {"name": "Name", "id": "name"},
+                                    {"name": "Tag", "id": "tag"},
+                                    {"name": "Events", "id": "events_attended"},
+                                ],
+                                data=[],
+                                page_size=8,
+                                sort_action="native",
+                                style_table={"overflowX": "auto", "marginBottom": "1rem"},
+                                style_header={
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                    "fontWeight": "600",
+                                    "fontSize": "0.72rem",
+                                    "textTransform": "uppercase",
+                                    "letterSpacing": "0.05em",
+                                    "padding": "0.7rem",
+                                    "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                },
+                                style_cell={
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "color": COLORS["text_primary"],
+                                    "border": "none",
+                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                    "padding": "0.62rem 0.8rem",
+                                    "fontSize": "0.78rem",
+                                    "textAlign": "left",
+                                },
+                                style_data_conditional=[
+                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
+                                ],
+                            ),
+                        ]),
+
+                        html.Div(id="insights-view-games", children=[
+                            html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "0.75rem", "marginBottom": "0.6rem"}, children=[
+                                html.Div(id="insights-games-title", style={"color": COLORS["text_primary"], "fontWeight": "600"}),
+                                html.Div(id="insights-top-game", style={
+                                    "color": COLORS["text_secondary"],
+                                    "fontSize": "0.78rem",
+                                    "padding": "0.25rem 0.55rem",
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "borderRadius": "999px",
+                                    "whiteSpace": "nowrap",
+                                }),
+                            ]),
+
+                            dash_table.DataTable(
+                                id="insights-games-table",
+                                columns=[
+                                    {"name": "#", "id": "rank"},
+                                    {"name": "Game", "id": "game"},
+                                    {"name": "Entries", "id": "entries"},
+                                    {"name": "Share", "id": "share"},
+                                ],
+                                data=[],
+                                page_size=8,
+                                sort_action="native",
+                                style_table={"overflowX": "auto", "marginBottom": "1rem"},
+                                style_header={
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                    "fontWeight": "600",
+                                    "fontSize": "0.72rem",
+                                    "textTransform": "uppercase",
+                                    "letterSpacing": "0.05em",
+                                    "padding": "0.7rem",
+                                    "borderBottom": f"2px solid {COLORS['accent_yellow']}",
+                                },
+                                style_cell={
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "color": COLORS["text_primary"],
+                                    "border": "none",
+                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                    "padding": "0.62rem 0.8rem",
+                                    "fontSize": "0.78rem",
+                                    "textAlign": "left",
+                                },
+                                style_data_conditional=[
+                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
+                                ],
+                            ),
+                        ]),
+
+                        html.Div(id="insights-view-events", children=[
+                            dash_table.DataTable(
+                                id="insights-events-table",
                             columns=[
                                 {"name": "Event", "id": "event_display_name"},
                                 {"name": "Slug", "id": "event_slug"},
@@ -781,6 +941,46 @@ def create_layout():
                                 {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
                             ],
                         ),
+                        ]),
+
+                        html.Div(id="insights-view-earnings", children=[
+                            dash_table.DataTable(
+                                id="insights-earnings-table",
+                                columns=[
+                                    {"name": "Event", "id": "event_display_name"},
+                                    {"name": "Date", "id": "event_date"},
+                                    {"name": "Participants", "id": "total_participants"},
+                                    {"name": "Revenue", "id": "total_revenue"},
+                                    {"name": "SEK / Player", "id": "revenue_per_player"},
+                                ],
+                                data=[],
+                                page_size=10,
+                                sort_action="native",
+                                style_table={"overflowX": "auto"},
+                                style_header={
+                                    "backgroundColor": COLORS["bg_dark"],
+                                    "color": COLORS["text_primary"],
+                                    "fontWeight": "600",
+                                    "fontSize": "0.75rem",
+                                    "textTransform": "uppercase",
+                                    "letterSpacing": "0.05em",
+                                    "padding": "0.75rem",
+                                    "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                },
+                                style_cell={
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "color": COLORS["text_primary"],
+                                    "border": "none",
+                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                    "padding": "0.55rem 0.75rem",
+                                    "fontSize": "0.8rem",
+                                    "textAlign": "left",
+                                },
+                                style_data_conditional=[
+                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
+                                ],
+                            ),
+                        ]),
                     ]),
                 ]),
 
@@ -1284,6 +1484,9 @@ def create_layout():
             "borderTop": f"1px solid {COLORS['border']}",
             "marginTop": "2rem",
         }, children=[
-            html.P("FGC Trollhättan Check-in System", style={"margin": "0"}),
+            html.P([
+                "Powered by ",
+                html.Strong("IMLO"),
+            ], style={"margin": "0"}),
         ]),
     ])
