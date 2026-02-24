@@ -1,0 +1,118 @@
+{
+  "name": "FGC THN - Start.gg Event Stats",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "startgg/event-stats",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.start.gg/gql/alpha",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.STARTGG_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: 'query T($slug: String!) { tournament(slug: $slug) { id name numEntrants events { id name numEntrants } } }', variables: { slug: $json.slug } }) }}",
+        "options": {}
+      },
+      "id": "startgg-query",
+      "name": "Start.gg GraphQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [480, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst tournament = input?.data?.tournament;\nconst slug = $('Webhook').first().json.slug || '';\n\nif (!tournament) {\n  return [{ json: { error: 'Tournament not found', slug } }];\n}\n\nreturn [{\n  json: {\n    event_slug: slug,\n    startgg_registered_count: tournament.numEntrants || 0,\n    tournament_name: tournament.name || '',\n    events: (tournament.events || []).map(e => ({\n      id: e.id,\n      name: e.name,\n      numEntrants: e.numEntrants || 0\n    }))\n  }\n}];"
+      },
+      "id": "transform",
+      "name": "Transform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/startgg/registered-count",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_slug: $json.event_slug, startgg_registered_count: $json.startgg_registered_count }) }}",
+        "options": {}
+      },
+      "id": "report-to-backend",
+      "name": "Report to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [920, 300],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Start.gg GraphQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start.gg GraphQL": {
+      "main": [
+        [
+          {
+            "node": "Transform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform": {
+      "main": [
+        [
+          {
+            "node": "Report to Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "FGC THN"
+    }
+  ],
+  "pinData": {}
+}

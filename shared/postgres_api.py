@@ -44,7 +44,28 @@ def _get_pool():
             kwargs={"autocommit": True},
         )
         logger.info("✅ Postgres connection pool initialized")
+        _run_migrations(_pool)
     return _pool
+
+
+def _run_migrations(pool):
+    """Idempotent schema migrations - safe to run on every startup."""
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                # No-show tracking columns (added 2026-02-24)
+                for col, typ in [
+                    ("startgg_registered_count", "INTEGER DEFAULT 0"),
+                    ("checked_in_count", "INTEGER DEFAULT 0"),
+                    ("no_show_count", "INTEGER DEFAULT 0"),
+                    ("no_show_rate", "NUMERIC(5,2) DEFAULT 0"),
+                ]:
+                    cur.execute(
+                        f"ALTER TABLE event_stats ADD COLUMN IF NOT EXISTS {col} {typ}"
+                    )
+        logger.info("✅ Schema migrations checked (no-show columns)")
+    except Exception as e:
+        logger.warning(f"⚠️ Migration check failed (non-fatal): {e}")
 
 
 def _coerce_jsonb(value: Any) -> Any:
@@ -832,7 +853,9 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                        total_participants, total_revenue, avg_payment,
                        member_count, guest_count, startgg_count,
                        new_players, returning_players, retention_rate,
-                       games_breakdown, most_popular_game, status_breakdown
+                       games_breakdown, most_popular_game, status_breakdown,
+                       startgg_registered_count, checked_in_count,
+                       no_show_count, no_show_rate
                 FROM event_stats
                 ORDER BY archived_at DESC NULLS LAST
                 """
@@ -858,6 +881,10 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             games_breakdown,
             most_popular_game,
             status_breakdown,
+            startgg_registered_count,
+            checked_in_count,
+            no_show_count,
+            no_show_rate,
         ) = row
 
         result.append(
@@ -878,6 +905,10 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                 "games_breakdown": games_breakdown,
                 "most_popular_game": most_popular_game,
                 "status_breakdown": status_breakdown,
+                "startgg_registered_count": startgg_registered_count or 0,
+                "checked_in_count": checked_in_count or 0,
+                "no_show_count": no_show_count or 0,
+                "no_show_rate": float(no_show_rate or 0),
             }
         )
 
@@ -1332,7 +1363,29 @@ def archive_event(
                     else Decimal("0")
                 )
 
-                # 5. Upsert event_stats (including startgg_snapshot)
+                # 4b. No-show computation
+                checked_in_count = total
+                startgg_registered_count = 0
+                if startgg_snapshot:
+                    if isinstance(startgg_snapshot, dict) and "tournament_entrants" in startgg_snapshot:
+                        startgg_registered_count = int(startgg_snapshot.get("tournament_entrants") or 0)
+                    elif isinstance(startgg_snapshot, list):
+                        # Legacy format: sum per-event numEntrants
+                        startgg_registered_count = sum(
+                            int(e.get("numEntrants") or 0)
+                            for e in startgg_snapshot
+                            if isinstance(e, dict)
+                        )
+                no_show_count = max(startgg_registered_count - checked_in_count, 0)
+                no_show_rate = (
+                    (Decimal(no_show_count) / Decimal(startgg_registered_count) * 100).quantize(
+                        Decimal("0.01")
+                    )
+                    if startgg_registered_count > 0
+                    else Decimal("0")
+                )
+
+                # 5. Upsert event_stats (including startgg_snapshot + no-show)
                 cur.execute(
                     """
                     INSERT INTO event_stats (
@@ -1341,14 +1394,18 @@ def archive_event(
                         member_count, member_percentage, guest_count, startgg_count,
                         new_players, returning_players, retention_rate,
                         games_breakdown, most_popular_game, status_breakdown,
-                        startgg_snapshot
+                        startgg_snapshot,
+                        startgg_registered_count, checked_in_count,
+                        no_show_count, no_show_rate
                     ) VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s,
                         %s, %s, %s,
-                        %s
+                        %s,
+                        %s, %s,
+                        %s, %s
                     )
                     ON CONFLICT (event_slug) DO UPDATE SET
                         event_date = EXCLUDED.event_date,
@@ -1367,7 +1424,11 @@ def archive_event(
                         games_breakdown = EXCLUDED.games_breakdown,
                         most_popular_game = EXCLUDED.most_popular_game,
                         status_breakdown = EXCLUDED.status_breakdown,
-                        startgg_snapshot = EXCLUDED.startgg_snapshot
+                        startgg_snapshot = EXCLUDED.startgg_snapshot,
+                        startgg_registered_count = EXCLUDED.startgg_registered_count,
+                        checked_in_count = EXCLUDED.checked_in_count,
+                        no_show_count = EXCLUDED.no_show_count,
+                        no_show_rate = EXCLUDED.no_show_rate
                     """,
                     (
                         event_slug, event_date, event_display_name, now,
@@ -1385,6 +1446,10 @@ def archive_event(
                         stats["most_popular_game"],
                         Json(stats["status_breakdown"]),
                         Json(startgg_snapshot) if startgg_snapshot else None,
+                        startgg_registered_count,
+                        checked_in_count,
+                        no_show_count,
+                        no_show_rate,
                     ),
                 )
 
@@ -1435,6 +1500,10 @@ def archive_event(
         "games_breakdown": stats["games_breakdown"],
         "most_popular_game": stats["most_popular_game"],
         "status_breakdown": stats["status_breakdown"],
+        "startgg_registered_count": startgg_registered_count,
+        "checked_in_count": checked_in_count,
+        "no_show_count": no_show_count,
+        "no_show_rate": float(no_show_rate),
         "replaced_rows": replaced_rows,
         "cleared_active": deleted_count if clear_active else 0,
     }

@@ -530,6 +530,37 @@ def create_layout():
                             html.Span(id="player-count", children=f"{len(data)} players", style={"color": COLORS["text_muted"], "fontSize": "0.875rem"}),
                         ]),
 
+                        html.Div(
+                            id="duplicate-warning",
+                            style={"marginBottom": "0.75rem", "display": "none"},
+                            children=[
+                                html.Div(
+                                    style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "0.6rem"},
+                                    children=[
+                                        html.Span(id="duplicate-warning-text", style={"fontWeight": "600", "color": "#f59e0b"}),
+                                        html.Button(
+                                            "Dismiss",
+                                            id="duplicate-warning-dismiss",
+                                            n_clicks=0,
+                                            style={
+                                                "backgroundColor": "transparent",
+                                                "border": "1px solid rgba(245, 158, 11, 0.45)",
+                                                "color": "#fbbf24",
+                                                "borderRadius": "6px",
+                                                "padding": "0.2rem 0.55rem",
+                                                "fontSize": "0.75rem",
+                                                "cursor": "pointer",
+                                            },
+                                        ),
+                                    ],
+                                ),
+                                html.Ul(
+                                    id="duplicate-warning-list",
+                                    style={"margin": "0.35rem 0 0 1rem", "color": "#fbbf24", "fontSize": "0.82rem"},
+                                ),
+                            ],
+                        ),
+
                         # Search and game filter row
                         html.Div(style={"display": "flex", "gap": "1rem", "marginBottom": "1rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
                             # Search field
@@ -910,6 +941,8 @@ def create_layout():
                                 {"name": "Member %", "id": "member_rate"},
                                 {"name": "Start.gg %", "id": "startgg_rate"},
                                 {"name": "Retention %", "id": "retention_rate"},
+                                {"name": "No-shows", "id": "no_show_count"},
+                                {"name": "No-show %", "id": "no_show_rate"},
                             ],
                             data=[],
                             page_size=10,

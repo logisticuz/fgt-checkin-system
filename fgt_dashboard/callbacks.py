@@ -96,6 +96,9 @@ def register_callbacks(app):
         Output("checkins-table", "columns"),
         Output("player-count", "children"),
         Output("game-filter", "options"),
+        Output("duplicate-warning", "style"),
+        Output("duplicate-warning-text", "children"),
+        Output("duplicate-warning-list", "children"),
         Input("event-dropdown", "value"),
         Input("interval-refresh", "n_intervals"),
         Input("btn-refresh", "n_clicks"),
@@ -116,7 +119,7 @@ def register_callbacks(app):
         """
         if not selected_slug:
             logger.warning("No event slug selected – skipping table update.")
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         # Default columns if none specified
         if not visible_columns:
@@ -140,10 +143,72 @@ def register_callbacks(app):
                 data = get_checkins(selected_slug) or []
             if not isinstance(data, list) or not data:
                 logger.info(f"No check-ins found for slug: {selected_slug}")
-                return [], [{"name": "No participants", "id": "info"}], "0 players", []
+                return [], [{"name": "No participants", "id": "info"}], "0 players", [], {"display": "none"}, "", []
 
             df = pd.DataFrame(data)
             total_count = len(df)
+
+            def _normalize_text(v):
+                if v is None:
+                    return ""
+                txt = str(v).strip().lower()
+                txt = re.sub(r"\s+", " ", txt)
+                return txt
+
+            def _normalize_phone(v):
+                if v is None:
+                    return ""
+                return re.sub(r"\D+", "", str(v))
+
+            # Duplicate warning: flag likely duplicates when at least 2 of 3 identity fields match.
+            duplicate_warning_style = {"display": "none"}
+            duplicate_warning_text = ""
+            duplicate_warning_list = []
+            identity_pairs = [
+                ("name", "tag", "name + tag"),
+                ("name", "telephone", "name + phone"),
+                ("tag", "telephone", "tag + phone"),
+            ]
+            duplicate_hits = {}
+
+            for col_a, col_b, reason in identity_pairs:
+                if col_a not in df.columns or col_b not in df.columns:
+                    continue
+
+                buckets = {}
+                for idx, row in df[[col_a, col_b]].iterrows():
+                    a_raw = row.get(col_a)
+                    b_raw = row.get(col_b)
+                    a = _normalize_phone(a_raw) if col_a == "telephone" else _normalize_text(a_raw)
+                    b = _normalize_phone(b_raw) if col_b == "telephone" else _normalize_text(b_raw)
+                    if not a or not b:
+                        continue
+                    buckets.setdefault((a, b), []).append(idx)
+
+                for idxs in buckets.values():
+                    if len(idxs) < 2:
+                        continue
+                    for idx in idxs:
+                        duplicate_hits.setdefault(idx, set()).add(reason)
+
+            if duplicate_hits:
+                flagged = df.loc[list(duplicate_hits.keys())]
+                preview_rows = []
+                for idx, row in flagged.head(4).iterrows():
+                    display_name = str(row.get("name") or "Unknown")
+                    display_tag = str(row.get("tag") or "-")
+                    reasons = ", ".join(sorted(duplicate_hits.get(idx, [])))
+                    preview_rows.append(html.Li(f"{display_name} ({display_tag}) – {reasons}"))
+                duplicate_warning_style = {
+                    "marginBottom": "0.75rem",
+                    "display": "block",
+                    "border": "1px solid rgba(245, 158, 11, 0.45)",
+                    "backgroundColor": "rgba(245, 158, 11, 0.08)",
+                    "borderRadius": "8px",
+                    "padding": "0.55rem 0.75rem",
+                }
+                duplicate_warning_text = f"⚠ Possible duplicate participants detected ({len(flagged)})."
+                duplicate_warning_list = preview_rows
 
             # Game name shortening map
             GAME_SHORT_NAMES = {
@@ -272,11 +337,29 @@ def register_callbacks(app):
             else:
                 count_text = f"{filtered_count} of {total_count} players"
 
-            return df_filtered.to_dict("records"), cols, count_text, game_options
+            return (
+                df_filtered.to_dict("records"),
+                cols,
+                count_text,
+                game_options,
+                duplicate_warning_style,
+                duplicate_warning_text,
+                duplicate_warning_list,
+            )
 
         except Exception as e:
             logger.exception(f"Error fetching check-ins for slug '{selected_slug}': {e}")
-            return [], [{"name": "Error fetching data", "id": "error"}], "Error", []
+            return [], [{"name": "Error fetching data", "id": "error"}], "Error", [], {"display": "none"}, "", []
+
+    @app.callback(
+        Output("duplicate-warning", "style", allow_duplicate=True),
+        Input("duplicate-warning-dismiss", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def dismiss_duplicate_warning(n_clicks):
+        if n_clicks:
+            return {"display": "none"}
+        return no_update
 
     # ---------------------------------------------------------------------
     # Sync column visibility dropdown to store
@@ -434,7 +517,8 @@ def register_callbacks(app):
                 name
                 startAt
                 timezone
-                events { id name slug startAt }
+                numEntrants
+                events { id name slug startAt numEntrants }
               }
             }
             """,
@@ -476,7 +560,13 @@ def register_callbacks(app):
         # Build compact events array
         events = tournament.get("events") or []
         events_compact = [
-            {"id": e.get("id"), "name": e.get("name"), "slug": e.get("slug"), "startAt": e.get("startAt")}
+            {
+                "id": e.get("id"),
+                "name": e.get("name"),
+                "slug": e.get("slug"),
+                "startAt": e.get("startAt"),
+                "numEntrants": e.get("numEntrants"),
+            }
             for e in events if isinstance(e, dict)
         ]
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
@@ -516,10 +606,22 @@ def register_callbacks(app):
             new_selected = keep + [n for n in new_candidates if n not in seen]
 
         # 5) Update settings using storage backend
+        # Wrap events_json as {tournament_entrants, events} for no-show tracking.
+        # Readers already handle both list and dict formats (backward compatible).
+        events_json_value = {
+            "tournament_entrants": tournament.get("numEntrants"),
+            "events": events_compact,
+        }
         patch_fields = {
             "active_event_slug": slug,
-            "event_display_name": tournament.get("name", ""),  # Store proper tournament name with åäö
+            "event_display_name": tournament.get("name", ""),
             "is_active": True,
+            "events_json": events_json_value,
+            "event_date": start_iso,
+            "default_game": new_selected,
+            "startgg_event_url": link.strip(),
+            "tournament_name": tournament.get("name", ""),
+            "timezone": tournament.get("timezone", ""),
         }
         result = update_settings(settings_id, patch_fields)
         if not result:
@@ -1030,6 +1132,9 @@ def register_callbacks(app):
             weighted_retention_sum = 0.0
             weighted_retention_den = 0
             top_game_counts = {}
+            startgg_registered_total = 0
+            checked_in_total = 0
+            no_show_total = 0
 
             for ev in event_rows:
                 ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
@@ -1052,6 +1157,17 @@ def register_callbacks(app):
                 if top_game:
                     top_game_counts[top_game] = top_game_counts.get(top_game, 0) + 1
 
+                # No-show aggregation
+                startgg_registered_total += _as_int(ev.get("startgg_registered_count"))
+                checked_in_total += _as_int(ev.get("checked_in_count"))
+                no_show_total += _as_int(ev.get("no_show_count"))
+
+            no_show_rate_agg = (
+                (no_show_total / startgg_registered_total * 100)
+                if startgg_registered_total > 0
+                else 0.0
+            )
+
             return {
                 "total": total,
                 "revenue": total_revenue,
@@ -1061,6 +1177,10 @@ def register_callbacks(app):
                 "ready_count": ready_count,
                 "retention": (weighted_retention_sum / weighted_retention_den) if weighted_retention_den > 0 else 0.0,
                 "top_game_counts": top_game_counts,
+                "startgg_registered_total": startgg_registered_total,
+                "checked_in_total": checked_in_total,
+                "no_show_total": no_show_total,
+                "no_show_rate": no_show_rate_agg,
             }
 
         table_rows = []
@@ -1071,6 +1191,8 @@ def register_callbacks(app):
             ev_startgg_rate = (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
             ev_revenue = _as_float(ev.get("total_revenue"))
             revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
+            ev_no_show = _as_int(ev.get("no_show_count"))
+            ev_no_show_rate = _as_float(ev.get("no_show_rate"))
             table_rows.append(
                 {
                     "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
@@ -1081,6 +1203,8 @@ def register_callbacks(app):
                     "member_rate": f"{ev_member_rate:.0f}%",
                     "startgg_rate": f"{ev_startgg_rate:.0f}%",
                     "retention_rate": f"{_as_float(ev.get('retention_rate')):.0f}%",
+                    "no_show_count": ev_no_show,
+                    "no_show_rate": f"{ev_no_show_rate:.0f}%" if ev_no_show_rate > 0 else "-",
                 }
             )
             earnings_rows.append(
