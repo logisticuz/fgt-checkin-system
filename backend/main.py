@@ -203,6 +203,20 @@ def slug_to_display_name(slug: str) -> str:
     return name
 
 
+def expand_game_display_name(name: str) -> str:
+    """Expand common short game names to participant-friendly full names."""
+    if not name:
+        return ""
+
+    normalized = str(name).strip().upper()
+    expansions = {
+        "SSBU": "SUPER SMASH BROS ULTIMATE - SINGLES",
+        "T8": "TEKKEN 8 TOURNAMENT",
+        "SF6": "STREET FIGHTER 6 TOURNAMENT",
+    }
+    return expansions.get(normalized, name)
+
+
 # === Helpers: requirement logic (Task 1.1) ===
 # See: docs/9_Systemkontrakt_och_Invarianter.md
 def compute_requirements(settings: dict) -> dict:
@@ -489,14 +503,16 @@ def check_participant_status(name: str) -> dict:
         # Check membership status
         status["member"] = bool(f.get("member"))
 
-        # Check Start.gg registration
+        # Check Start.gg registration.
+        # Keep this aligned with dashboard/backend status logic: explicit Start.gg
+        # verification only (not merely having selected games / event ID).
         startgg_ok = False
-        for key in ("startgg", "startgg_registered", "startgg_event_id"):
+        for key in ("startgg", "startgg_registered"):
             val = f.get(key)
             if isinstance(val, bool) and val:
                 startgg_ok = True
                 break
-            if isinstance(val, (int, str)) and str(val).strip():
+            if isinstance(val, (int, str)) and str(val).strip().lower() in {"1", "true", "yes"}:
                 startgg_ok = True
                 break
         status["startgg"] = startgg_ok
@@ -621,6 +637,7 @@ def get_participant_details(namn: str) -> dict:
             games = f.get("tournament_games_registered", [])
             if isinstance(games, str):
                 games = [g.strip() for g in games.split(",") if g.strip()]
+            games = [expand_game_display_name(g) for g in games]
             event_slug = f.get("event_slug", "FGC Weekly")
             return {
                 "tag": f.get("tag", ""),
@@ -661,6 +678,7 @@ async def status_view(request: Request, name: str, kiosk: bool = False):
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123-456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+            "sse_token": SSE_TOKEN or "",
             # Optional membership offer (shown on Ready page when membership not required AND not already a member)
             "offer_membership": settings.get("offer_membership") is True,
             "is_member": status.get("member", False),

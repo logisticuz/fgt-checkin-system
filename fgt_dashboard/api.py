@@ -12,6 +12,7 @@ since the mount at "/" catches all remaining requests.
 
 import os
 import logging
+import json
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
@@ -29,9 +30,18 @@ from shared.storage import (
     get_all_event_slugs,
     get_active_settings_with_id,
     update_settings,
+    log_action,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_safe(user: dict, action: str, target_table: str, **kwargs) -> None:
+    """Best-effort audit logging; never break auth flow on audit failure."""
+    try:
+        log_action(user or {}, action, target_table, **kwargs)
+    except Exception as e:
+        logger.warning(f"Audit write failed for {action}: {e}")
 
 # --- Config ---
 IS_PROD = os.getenv("ENV", "dev") == "prod"
@@ -327,6 +337,17 @@ async def auth_callback(code: str = ""):
         active_slug = get_active_slug()
         if active_slug:
             if not is_event_admin(access_token, active_slug):
+                _audit_safe(
+                    {
+                        "user_id": user_info.get("id", ""),
+                        "user_name": user_info.get("name", "unknown"),
+                        "user_email": user_info.get("email", ""),
+                    },
+                    "auth_login_denied",
+                    "dashboard_auth",
+                    target_event=active_slug,
+                    reason="not_event_admin",
+                )
                 logger.warning(
                     "Denied dashboard login for user '%s' (not TO for active event %s)",
                     user_info.get("name", "unknown"),
@@ -340,6 +361,17 @@ async def auth_callback(code: str = ""):
             candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
             allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
             if not allowed:
+                _audit_safe(
+                    {
+                        "user_id": user_info.get("id", ""),
+                        "user_name": user_info.get("name", "unknown"),
+                        "user_email": user_info.get("email", ""),
+                    },
+                    "auth_login_denied",
+                    "dashboard_auth",
+                    reason="no_admin_access_for_known_events",
+                    details=json.dumps({"candidate_slugs": candidate_slugs}),
+                )
                 return HTMLResponse(
                     """
                     <h2>No TO Access Yet</h2>
@@ -354,6 +386,17 @@ async def auth_callback(code: str = ""):
         session_id = create_session(user_info, access_token)
         if not session_id:
             return JSONResponse({"error": "Session creation failed"}, status_code=500)
+
+        _audit_safe(
+            {
+                "user_id": user_info.get("id", ""),
+                "user_name": user_info.get("name", "unknown"),
+                "user_email": user_info.get("email", ""),
+            },
+            "auth_login_success",
+            "dashboard_auth",
+            target_event=active_slug or "",
+        )
 
         # Step 4: Set cookie and redirect to dashboard
         # Dev: /admin/ (nginx prefix), Prod: / (own domain)
@@ -394,8 +437,21 @@ async def auth_callback(code: str = ""):
 async def auth_logout(request: Request):
     """Delete session and clear cookie."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    session_data = get_session(session_id) if session_id else None
     if session_id:
         delete_session(session_id)
+
+    if session_data:
+        _audit_safe(
+            {
+                "user_id": session_data.get("user_id", ""),
+                "user_name": session_data.get("user_name", "unknown"),
+                "user_email": session_data.get("user_email", ""),
+            },
+            "auth_logout",
+            "dashboard_auth",
+            target_event=get_active_slug() or "",
+        )
 
     redirect_path = "/" if IS_PROD else "/admin/"
     response = RedirectResponse(url=redirect_path, status_code=302)
@@ -497,6 +553,23 @@ async def auth_select_event_save(request: Request):
     ok = update_settings(record_id, {"active_event_slug": event_slug})
     if not ok:
         return HTMLResponse("<h3>Failed to set active event.</h3>", status_code=500)
+
+    _audit_safe(
+        {
+            "user_id": session_data.get("user_id", ""),
+            "user_name": session_data.get("user_name", "unknown"),
+            "user_email": session_data.get("user_email", ""),
+        },
+        "auth_select_active_event",
+        "settings",
+        target_event=event_slug,
+        details=json.dumps(
+            {
+                "old_active_event_slug": (settings_with_id.get("fields") or {}).get("active_event_slug", ""),
+                "new_active_event_slug": event_slug,
+            }
+        ),
+    )
 
     return RedirectResponse(url=("/" if IS_PROD else "/admin/"), status_code=302)
 
