@@ -249,7 +249,7 @@
     <div class="player-tag">{{ tag | default(name) }}</div>
 
     <div class="glance-strip">
-      {% if require_startgg %}<span class="glance-pill">Start.gg OK</span>{% endif %}
+      {% if status and status.get('startgg') %}<span class="glance-pill">Start.gg OK</span>{% endif %}
       <span class="glance-pill">{{ games | length }} game{{ '' if games|length == 1 else 's' }}</span>
     </div>
 

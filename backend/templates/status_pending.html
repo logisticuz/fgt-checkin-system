@@ -36,12 +36,26 @@
 
     .status-icon {
       font-size: 2rem;
-      animation: pulse 2s ease-in-out infinite;
+      line-height: 1;
+      min-width: 32px;
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(1.05); }
+    .status-icon.spinner {
+      width: 30px;
+      height: 30px;
+      border: 3px solid rgba(88, 170, 255, 0.25);
+      border-top-color: #58aaff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
     }
 
     h1 {
@@ -55,7 +69,50 @@
     .status-text {
       color: #666;
       font-size: 0.9rem;
-      margin-bottom: 1rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .status-help {
+      color: #7f8ea3;
+      font-size: 0.8rem;
+      line-height: 1.35;
+      margin-bottom: 0.65rem;
+      min-height: 1.1rem;
+    }
+
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      border-radius: 999px;
+      border: 1px solid rgba(88, 170, 255, 0.35);
+      background: rgba(88, 170, 255, 0.12);
+      color: #8ac6ff;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.26rem 0.6rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #58aaff;
+      box-shadow: 0 0 8px rgba(88, 170, 255, 0.6);
+    }
+
+    .live-pill.connected {
+      border-color: rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.14);
+      color: #6ee7b7;
+    }
+
+    .live-pill.connected .live-dot {
+      background: #10b981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
     }
 
     /* Status wrapper */
@@ -198,10 +255,10 @@
       align-items: center;
       gap: 0.5rem;
       padding: 0.75rem 1.5rem;
-      background: #58aaff;
-      border: none;
+      background: rgba(88, 170, 255, 0.2);
+      border: 1px solid rgba(88, 170, 255, 0.5);
       border-radius: 8px;
-      color: #000;
+      color: #8ac6ff;
       font-size: 0.9rem;
       font-weight: 600;
       cursor: pointer;
@@ -209,7 +266,7 @@
     }
 
     .btn-refresh:hover {
-      background: #6bb5ff;
+      background: rgba(88, 170, 255, 0.3);
     }
 
     .btn-refresh:disabled {
@@ -374,16 +431,18 @@
       <h1 id="playerName">...</h1>
     </div>
     <p class="status-text" id="statusText">Checking status...</p>
+    <p class="status-help" id="statusHelp"></p>
+    <div class="live-pill" id="live-pill"><span class="live-dot"></span><span id="live-label">Connecting live updates...</span></div>
 
     <!-- Status table -->
     <div class="status-wrapper">
       <h2 class="status-header">Status</h2>
       <div class="status-table">
-        <div class="status-col ready-col">
+        <div class="status-col ready-col" id="ready-col">
           <h3>✓ Ready</h3>
           <ul id="ready-list"></ul>
         </div>
-        <div class="status-col missing-col">
+        <div class="status-col missing-col" id="missing-col">
           <h3>✗ Missing</h3>
           <ul id="missing-list"></ul>
         </div>
@@ -465,6 +524,7 @@
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
+    const SSE_TOKEN = {{ sse_token | default("") | tojson }};
     if (KIOSK_MODE) {
       document.getElementById("kiosk-back").classList.remove("hidden");
 
@@ -543,6 +603,34 @@
     let inFlight = false;
     let pollCount = 0;
     const MAX_POLLS = 30; // 30 * 10s = 5 minutes max
+    const POLL_INTERVAL_MS = 10000;
+
+    let intervalId = null;
+    let sseConnected = false;
+
+    function updateLiveIndicator() {
+      const pill = document.getElementById("live-pill");
+      const label = document.getElementById("live-label");
+      if (!pill || !label) return;
+      if (sseConnected) {
+        pill.classList.add("connected");
+        label.textContent = "Live updates active";
+      } else {
+        pill.classList.remove("connected");
+        label.textContent = "Connecting live updates...";
+      }
+    }
+
+    function startPolling() {
+      if (intervalId) clearInterval(intervalId);
+      intervalId = setInterval(() => {
+        // Prefer SSE push updates when available.
+        // Polling stays as fallback if SSE is unavailable.
+        if (!sseConnected) {
+          updateStatus();
+        }
+      }, POLL_INTERVAL_MS);
+    }
 
     // Helpers
     const setText = (id, text) => {
@@ -550,11 +638,34 @@
       if (el) el.textContent = text;
     };
 
+    function setStatusIcon(mode) {
+      const emojiEl = document.getElementById("statusEmoji");
+      if (!emojiEl) return;
+
+      if (mode === "pending") {
+        emojiEl.classList.add("spinner");
+        emojiEl.textContent = "";
+        emojiEl.style.color = "#58aaff";
+        return;
+      }
+
+      emojiEl.classList.remove("spinner");
+      if (mode === "ready") {
+        emojiEl.textContent = "✓";
+        emojiEl.style.color = "#4caf50";
+      } else {
+        emojiEl.textContent = "✗";
+        emojiEl.style.color = "#f44336";
+      }
+    }
+
     // Update status table with ready/missing items
     // Only shows items that are REQUIRED based on settings
     function updateStatusTable(data) {
       const readyList = document.getElementById("ready-list");
       const missingList = document.getElementById("missing-list");
+      const readyCol = document.getElementById("ready-col");
+      const missingCol = document.getElementById("missing-col");
 
       // Build items list - only include items that are REQUIRED
       const items = [];
@@ -578,22 +689,34 @@
       missingList.innerHTML = missing.length > 0
         ? missing.map(i => `<li>${i.name}</li>`).join("")
         : '<li class="empty">—</li>';
+
+      // UX: hide the Ready column entirely until something is actually ready.
+      if (readyCol && missingCol) {
+        if (ready.length === 0) {
+          readyCol.classList.add("hidden");
+          missingCol.style.flex = "1";
+        } else {
+          readyCol.classList.remove("hidden");
+          missingCol.style.flex = "1";
+        }
+      }
     }
 
     // Flag to stop polling (e.g., already checked in - status won't change from polling)
     let stopPolling = false;
-    let intervalId = null;
 
     async function updateStatus() {
       if (inFlight || stopPolling) return;
 
-      // Check polling timeout
-      pollCount++;
-      if (pollCount > MAX_POLLS) {
-        setText("statusText", "Timeout - please refresh manually");
-        stopPolling = true;
-        if (intervalId) clearInterval(intervalId);
-        return;
+      // Check polling timeout only when we're in polling fallback mode.
+      if (!sseConnected) {
+        pollCount++;
+        if (pollCount > MAX_POLLS) {
+          setText("statusText", "Timeout - please refresh manually");
+          stopPolling = true;
+          if (intervalId) clearInterval(intervalId);
+          return;
+        }
       }
 
       inFlight = true;
@@ -609,6 +732,12 @@
 
         const data = await res.json();
 
+        const normalizedMissing = Array.isArray(data?.missing)
+          ? data.missing.map(m => String(m || "").toLowerCase().replace(/[^a-z]/g, ""))
+          : [];
+        const missingStartgg = normalizedMissing.includes("startgg");
+        const statusHelpEl = document.getElementById("statusHelp");
+
         // If ready -> redirect to success page
         if (data?.ready) {
           // Cleanup sensitive data on success
@@ -622,23 +751,37 @@
         // Render current state
         setText("playerName", data?.name ?? name ?? "Unknown");
 
-        // Check if already checked in - show friendly message and stop polling
-        // (Status won't change from polling - only TO can approve payment)
-        if (data?.already_checked_in || pollCount > 1) {
-          setText("statusText", "Checked in - awaiting TO approval");
+        // Check if backend explicitly says this entry is already checked in.
+        // Keep polling otherwise so participant page updates even if SSE fails.
+        if (data?.already_checked_in) {
+          if (missingStartgg) {
+            setText("statusText", "A TO is adding you manually in Start.gg");
+            if (statusHelpEl) {
+              statusHelpEl.textContent = "If you are not marked ready before the tournament starts, contact a TO.";
+            }
+          } else {
+            setText("statusText", "Checked in - awaiting TO approval");
+            if (statusHelpEl) statusHelpEl.textContent = "";
+          }
           stopPolling = true;
           if (intervalId) clearInterval(intervalId);
           // Update the auto-refresh message
           const refreshNote = document.querySelector(".auto-refresh-note");
           if (refreshNote) refreshNote.textContent = "Use the refresh button to check for updates.";
         } else {
-          setText("statusText", data?.status ?? "Pending...");
+          if (missingStartgg) {
+            setText("statusText", "A TO is adding you manually in Start.gg");
+            if (statusHelpEl) {
+              statusHelpEl.textContent = "If you are not marked ready before the tournament starts, contact a TO.";
+            }
+          } else {
+            setText("statusText", data?.status ?? "Pending...");
+            if (statusHelpEl) statusHelpEl.textContent = "";
+          }
         }
 
         const isReady = data?.status === "Ready";
-        const emojiEl = document.getElementById("statusEmoji");
-        emojiEl.textContent = isReady ? "✓" : "⏳";
-        emojiEl.style.color = isReady ? "#4caf50" : "#ff9800";
+        setStatusIcon(isReady ? "ready" : "pending");
 
         // Update status table
         updateStatusTable(data);
@@ -661,9 +804,7 @@
 
       } catch (err) {
         setText("statusText", "Could not connect to server");
-        const emojiEl = document.getElementById("statusEmoji");
-        emojiEl.textContent = "✗";
-        emojiEl.style.color = "#f44336";
+        setStatusIcon("error");
         console.error("updateStatus failed:", err);
       } finally {
         inFlight = false;
@@ -678,15 +819,16 @@
       updateStatus();
     }
 
-    // Start with one immediate check, then poll every 10s (but stop after first successful response)
+    // Start with one immediate check, then keep fallback polling if SSE is unavailable.
     updateStatus();
-    intervalId = setInterval(updateStatus, 10000);
+    startPolling();
+    updateLiveIndicator();
 
     // === SSE for real-time updates from TO ===
     let eventSource = null;
 
     function connectSSE() {
-      const sseUrl = '/api/events/stream';
+      const sseUrl = SSE_TOKEN ? `/api/events/stream?token=${encodeURIComponent(SSE_TOKEN)}` : '/api/events/stream';
       console.log('Connecting to SSE for real-time updates...');
 
       try {
@@ -694,26 +836,26 @@
 
         eventSource.onopen = function() {
           console.log('SSE connected - will auto-refresh on TO updates');
+          sseConnected = true;
+          updateLiveIndicator();
         };
 
         eventSource.addEventListener('update', function(e) {
           console.log('SSE update received:', e.data);
-          // TO made a change - refresh status
-          stopPolling = false; // Re-enable to fetch new data
+          // TO made a change - refresh immediately
           updateStatus();
-          stopPolling = true; // Stop again after update
         });
 
         eventSource.addEventListener('checkin', function(e) {
           console.log('SSE checkin event:', e.data);
-          // Something changed - refresh
-          stopPolling = false;
+          // Something changed - refresh immediately
           updateStatus();
-          stopPolling = true;
         });
 
         eventSource.onerror = function(e) {
           console.log('SSE error, will retry...');
+          sseConnected = false;
+          updateLiveIndicator();
           if (eventSource.readyState === EventSource.CLOSED) {
             setTimeout(connectSSE, 5000);
           }

@@ -686,7 +686,12 @@ def apply_integration_result(
 
     src = source.lower().strip()
     if src == "startgg":
-        update_fields["startgg"] = bool(ok and data.get("registered", True))
+        registered = bool(ok and data.get("registered", True))
+        update_fields["startgg"] = registered
+        # Keep guest flag aligned with Start.gg match result:
+        # - matched on Start.gg => not guest
+        # - not matched (manual add/guest flow) => guest
+        update_fields["is_guest"] = not registered
         if isinstance(data.get("events"), list):
             update_fields["tournament_games_registered"] = data.get("events")
         if data.get("startgg_event_id"):
@@ -877,6 +882,63 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         )
 
     logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
+    return result
+
+
+def get_top_players_history(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 15,
+) -> List[Dict[str, Any]]:
+    """Return top participants by archived event attendance count."""
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT
+            COALESCE(NULLIF(tag, ''), NULLIF(name, ''), 'Unknown') AS display_tag,
+            COALESCE(NULLIF(name, ''), NULLIF(tag, ''), 'Unknown') AS display_name,
+            COUNT(DISTINCT event_slug) AS events_attended
+        FROM event_archive
+        {where_sql}
+        GROUP BY 1, 2
+        ORDER BY events_attended DESC, display_name ASC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    result = []
+    for idx, row in enumerate(rows, start=1):
+        display_tag, display_name, events_attended = row
+        result.append(
+            {
+                "rank": idx,
+                "name": display_name,
+                "tag": display_tag,
+                "events_attended": int(events_attended or 0),
+            }
+        )
+
     return result
 
 

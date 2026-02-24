@@ -1,9 +1,10 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State
-from dash import no_update, html, ctx
+from dash import no_update, html, ctx, dcc
 from shared.storage import (
     get_checkins,
     get_active_settings,
+    get_active_slug,
     get_active_settings_with_id,
     update_settings,
     update_checkin,
@@ -18,13 +19,66 @@ import logging
 import json
 import re
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 
 logger = logging.getLogger(__name__)
 
 # Storage backend + Start.gg API config
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
+
+ACTION_META = {
+    "auth_login_success": ("Auth", "Login Success"),
+    "auth_login_denied": ("Auth", "Login Denied"),
+    "auth_logout": ("Auth", "Logout"),
+    "auth_select_active_event": ("Auth", "Select Active Event"),
+    "admin_fetch_event_data": ("Settings", "Fetch Event Data"),
+    "admin_update_requirements": ("Settings", "Update Requirements"),
+    "admin_update_payment_settings": ("Settings", "Update Payment Settings"),
+    "admin_toggle_field": ("Check-ins", "Toggle Field"),
+    "admin_delete_checkin": ("Check-ins", "Delete Player"),
+    "integration_result": ("Integrations", "Result"),
+    "event_archived": ("Archive", "Event Archived"),
+    "event_rearchived": ("Archive", "Event Re-Archived"),
+    "event_reopened": ("Archive", "Event Reopened"),
+    "event_deleted_from_history": ("Archive", "Deleted From History"),
+}
+
+ACTION_GROUP_ORDER = ["Auth", "Settings", "Check-ins", "Archive", "Integrations", "Other"]
+
+
+def format_action_label(action: str) -> str:
+    """Render friendly action names for the audit table."""
+    if not action:
+        return ""
+    group, label = ACTION_META.get(action, ("Other", action.replace("_", " ").title()))
+    return f"{group}: {label}"
+
+
+def get_action_group(action: str) -> str:
+    """Get audit action group for table category column."""
+    if not action:
+        return "Other"
+    group, _ = ACTION_META.get(action, ("Other", action.replace("_", " ").title()))
+    return group
+
+
+def format_action_filter_label(action: str) -> str:
+    """Render grouped labels for action dropdown options."""
+    if not action:
+        return ""
+    group, label = ACTION_META.get(action, ("Other", action.replace("_", " ").title()))
+    return f"[{group}] {label}"
+
+
+def action_sort_key(action: str) -> tuple:
+    """Sort actions by group, then by human-readable label."""
+    group, label = ACTION_META.get(action, ("Other", action.replace("_", " ").title()))
+    try:
+        group_rank = ACTION_GROUP_ORDER.index(group)
+    except ValueError:
+        group_rank = len(ACTION_GROUP_ORDER)
+    return (group_rank, label.lower())
 
 def register_callbacks(app):
     """
@@ -99,11 +153,27 @@ def register_callbacks(app):
                 "TEKKEN 8": "T8",
                 "SMASH SINGLES": "SSBU",
                 "SUPER SMASH BROS": "SSBU",
+                "SUPER SMASH BROS ULTIMATE": "SSBU",
             }
+
+            GAME_SHORT_PATTERNS = [
+                ("SUPER SMASH BROS", "SSBU"),
+                ("SMASH", "SSBU"),
+                ("TEKKEN 8", "T8"),
+                ("STREET FIGHTER 6", "SF6"),
+            ]
 
             def shorten_game(name):
                 """Shorten game name using mapping, case-insensitive."""
-                return GAME_SHORT_NAMES.get(name.upper().strip(), name) if name else ""
+                if not name:
+                    return ""
+                normalized = str(name).upper().strip()
+                if normalized in GAME_SHORT_NAMES:
+                    return GAME_SHORT_NAMES[normalized]
+                for pattern, short in GAME_SHORT_PATTERNS:
+                    if pattern in normalized:
+                        return short
+                return name
 
             # Extract unique games for filter dropdown (before shortening)
             all_games = set()
@@ -259,7 +329,7 @@ def register_callbacks(app):
         Input("requirements-store", "data"),
     )
     def update_stat_card_styles(active_filter, requirements):
-        """Highlight the active stat card filter with subtle indicator."""
+        """Highlight active stat card filter with stronger visual state."""
         base_style = {
             "backgroundColor": "#12121a",
             "borderRadius": "12px",
@@ -270,6 +340,7 @@ def register_callbacks(app):
             "minWidth": "150px",
             "cursor": "pointer",
             "transition": "all 0.2s",
+            "position": "relative",
         }
 
         # Define colors for each card
@@ -284,18 +355,21 @@ def register_callbacks(app):
         for key in ["all", "ready", "pending", "no-payment"]:
             color = colors[key]
             if active_filter == key:
-                # Active: scale up + soft glow
+                # Active: stronger glow + lift + tinted surface
                 styles[key] = {
                     **base_style,
                     "borderTop": f"3px solid {color}",
-                    "transform": "scale(1.05)",
-                    "boxShadow": f"0 4px 20px {color}50",
+                    "border": "1px solid #1e293b",
+                    "transform": "translateY(-3px) scale(1.03)",
+                    "boxShadow": f"0 10px 26px {color}4d, 0 0 0 1px {color}4d",
+                    "background": f"linear-gradient(180deg, {color}24 0%, #12121a 55%)",
                 }
             else:
                 # Inactive: original style, full brightness
                 styles[key] = {
                     **base_style,
                     "borderTop": f"3px solid {color}",
+                    "opacity": "0.95",
                 }
 
         if (requirements or {}).get("require_payment") is not True:
@@ -315,8 +389,9 @@ def register_callbacks(app):
         Output("event-dropdown", "value"),
         Input("btn-fetch-event", "n_clicks"),
         State("input-startgg-link", "value"),
+        State("auth-store", "data"),
     )
-    def fetch_event_data(n_clicks, link):
+    def fetch_event_data(n_clicks, link, auth_state):
         """
         Admin action:
         1) Extract tournament slug from Start.gg URL
@@ -449,6 +524,26 @@ def register_callbacks(app):
         result = update_settings(settings_id, patch_fields)
         if not result:
             return "❌ Settings update failed", no_update, no_update
+
+        try:
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "admin_fetch_event_data",
+                "settings",
+                target_event=slug,
+                details=json.dumps(
+                    {
+                        "tournament_name": tournament.get("name", ""),
+                        "events_found": len(events),
+                    }
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for fetch event: {e}")
 
         logger.info(f"Updated settings for slug: {slug}")
 
@@ -681,8 +776,8 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     @app.callback(
         Output("tab-checkins-content", "style"),
+        Output("tab-insights-content", "style"),
         Output("tab-settings-content", "style"),
-        Output("tab-audit-content", "style"),
         Input("tabs", "value"),
     )
     def switch_tabs(selected_tab):
@@ -691,12 +786,556 @@ def register_callbacks(app):
         """
         hidden = {"display": "none"}
         visible = {"display": "block"}
-        if selected_tab == "tab-settings":
+        if selected_tab == "tab-insights":
             return hidden, visible, hidden
-        elif selected_tab == "tab-audit":
+        if selected_tab == "tab-settings":
             return hidden, hidden, visible
         else:
             return visible, hidden, hidden
+
+    # -------------------------------------------------------------------------
+    # Insights - load archived event options + summary KPIs
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("insights-series-dropdown", "options"),
+        Output("insights-series-dropdown", "value"),
+        Output("insights-event-dropdown", "options"),
+        Output("insights-event-dropdown", "value"),
+        Output("insights-summary-title", "children"),
+        Output("insights-empty-hint", "children"),
+        Output("insights-kpi-total", "children"),
+        Output("insights-kpi-revenue", "children"),
+        Output("insights-kpi-readyrate", "children"),
+        Output("insights-kpi-memberrate", "children"),
+        Output("insights-kpi-guestrate", "children"),
+        Output("insights-kpi-startggrate", "children"),
+        Output("insights-kpi-retention", "children"),
+        Output("insights-kpi-total-delta", "children"),
+        Output("insights-kpi-revenue-delta", "children"),
+        Output("insights-kpi-readyrate-delta", "children"),
+        Output("insights-kpi-memberrate-delta", "children"),
+        Output("insights-kpi-guestrate-delta", "children"),
+        Output("insights-kpi-startggrate-delta", "children"),
+        Output("insights-kpi-retention-delta", "children"),
+        Output("insights-top-game", "children"),
+        Output("insights-top-players-title", "children"),
+        Output("insights-top-players-table", "data"),
+        Output("insights-games-title", "children"),
+        Output("insights-games-table", "data"),
+        Output("insights-events-table", "data"),
+        Output("insights-earnings-table", "data"),
+        Input("tabs", "value"),
+        Input("btn-insights-refresh", "n_clicks"),
+        Input("insights-event-dropdown", "value"),
+        Input("insights-period-dropdown", "value"),
+        Input("insights-series-dropdown", "value"),
+        Input("insights-date-range", "start_date"),
+        Input("insights-date-range", "end_date"),
+    )
+    def update_insights(
+        selected_tab,
+        _refresh_clicks,
+        selected_event_slugs,
+        selected_period,
+        selected_series,
+        custom_start_date,
+        custom_end_date,
+    ):
+        if selected_tab != "tab-insights":
+            return (no_update,) * 27
+
+        def _empty_response(hint: str = "", summary: str = "Insights overview"):
+            return (
+                [],
+                [],
+                [],
+                [],
+                summary,
+                hint,
+                "0",
+                "0 kr",
+                "0%",
+                "0%",
+                "0%",
+                "0%",
+                "0%",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "Most popular game: -",
+                "Top attendees",
+                [],
+                "Most played games",
+                [],
+                [],
+                [],
+            )
+
+        try:
+            history_fn = getattr(storage_api, "get_event_history_dashboard", None)
+            if history_fn:
+                events = history_fn() or []
+            else:
+                events = storage_api.get_event_history() or []
+        except Exception as e:
+            logger.exception(f"Failed to load insights data: {e}")
+            return _empty_response("Could not load insights. Try refreshing.", "Insights unavailable")
+
+        if not events:
+            return _empty_response("No archived events yet. Archive your first event to unlock insights.")
+
+        all_events = list(events)
+
+        selected_period = selected_period or "month"
+
+        def _as_float(v):
+            try:
+                return float(v or 0)
+            except Exception:
+                return 0.0
+
+        def _as_int(v):
+            try:
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        def _as_date(v):
+            if not v:
+                return None
+            if isinstance(v, datetime):
+                return v.date()
+            if isinstance(v, date):
+                return v
+            txt = str(v).strip()
+            if not txt:
+                return None
+            txt = txt.split("T")[0]
+            try:
+                return datetime.fromisoformat(txt).date()
+            except Exception:
+                return None
+
+        today = datetime.now(timezone.utc).date()
+        range_start = None
+        range_end = None
+
+        if selected_period == "day":
+            range_start = today - timedelta(days=1)
+            range_end = today
+        elif selected_period == "week":
+            range_start = today - timedelta(days=7)
+            range_end = today
+        elif selected_period == "month":
+            range_start = today - timedelta(days=30)
+            range_end = today
+        elif selected_period == "quarter":
+            range_start = today - timedelta(days=90)
+            range_end = today
+        elif selected_period == "year":
+            range_start = today - timedelta(days=365)
+            range_end = today
+        elif selected_period == "custom":
+            range_start = _as_date(custom_start_date)
+            range_end = _as_date(custom_end_date)
+
+        filtered_events = []
+        for ev in events:
+            ev_date = _as_date(ev.get("event_date"))
+            if selected_period == "all":
+                filtered_events.append(ev)
+                continue
+
+            # For ranged filters, include only events with parseable date in range.
+            if not ev_date:
+                continue
+            if range_start and ev_date < range_start:
+                continue
+            if range_end and ev_date > range_end:
+                continue
+            filtered_events.append(ev)
+
+        events = filtered_events
+
+        if not events:
+            label_map = {
+                "day": "last 24h",
+                "week": "last 7 days",
+                "month": "last 30 days",
+                "quarter": "last 90 days",
+                "year": "last 365 days",
+                "custom": "selected range",
+                "all": "all time",
+            }
+            return _empty_response(
+                f"No archived events in {label_map.get(selected_period, 'selected period')}. Try widening date range or clearing filters.",
+            )
+
+        def _event_title(ev):
+            return (ev.get("event_display_name") or ev.get("event_slug") or "").strip()
+
+        def _series_key(ev):
+            title = _event_title(ev)
+            if not title:
+                return "Other"
+            # Remove trailing numbering patterns: "#12", "12", "- 12"
+            cleaned = re.sub(r"\s*[-#]?\s*\d+\s*$", "", title).strip(" -#")
+            return cleaned or title
+
+        selected_series = selected_series or []
+
+        # Build series options from events in current period.
+        series_values = sorted({_series_key(ev) for ev in events if _series_key(ev)})
+        series_options = [{"label": s, "value": s} for s in series_values]
+        selected_series = [s for s in selected_series if s in set(series_values)]
+
+        series_scoped_events = [
+            ev for ev in events if (not selected_series) or (_series_key(ev) in selected_series)
+        ]
+
+        options = []
+        for ev in series_scoped_events:
+            slug = ev.get("event_slug")
+            if not slug:
+                continue
+            name = ev.get("event_display_name") or slug.replace("-", " ").title()
+            date = ev.get("event_date") or ""
+            label = f"{name} ({date})" if date else name
+            options.append({"label": label, "value": slug})
+
+        if not options:
+            empty = _empty_response("No archived events yet")
+            return (series_options, selected_series) + empty[2:]
+
+        available_slugs = {o["value"] for o in options}
+        selected_event_slugs = [s for s in (selected_event_slugs or []) if s in available_slugs]
+
+        # Empty selection means "all events in selected period"
+        selected_events = [
+            ev for ev in series_scoped_events
+            if (not selected_event_slugs) or ev.get("event_slug") in selected_event_slugs
+        ]
+
+        def _aggregate_metrics(event_rows):
+            total = 0
+            total_revenue = 0.0
+            member_count = 0
+            guest_count = 0
+            startgg_count = 0
+            ready_count = 0
+            weighted_retention_sum = 0.0
+            weighted_retention_den = 0
+            top_game_counts = {}
+
+            for ev in event_rows:
+                ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
+                total += ev_total
+                total_revenue += _as_float(ev.get("total_revenue"))
+                member_count += _as_int(ev.get("member_count"))
+                guest_count += _as_int(ev.get("guest_count"))
+                startgg_count += _as_int(ev.get("startgg_count"))
+
+                status_breakdown = ev.get("status_breakdown")
+                if isinstance(status_breakdown, dict):
+                    ready_count += _as_int(status_breakdown.get("Ready"))
+
+                retention_val = _as_float(ev.get("retention_rate"))
+                if ev_total > 0:
+                    weighted_retention_sum += retention_val * ev_total
+                    weighted_retention_den += ev_total
+
+                top_game = ev.get("most_popular_game")
+                if top_game:
+                    top_game_counts[top_game] = top_game_counts.get(top_game, 0) + 1
+
+            return {
+                "total": total,
+                "revenue": total_revenue,
+                "member_count": member_count,
+                "guest_count": guest_count,
+                "startgg_count": startgg_count,
+                "ready_count": ready_count,
+                "retention": (weighted_retention_sum / weighted_retention_den) if weighted_retention_den > 0 else 0.0,
+                "top_game_counts": top_game_counts,
+            }
+
+        table_rows = []
+        earnings_rows = []
+        for ev in selected_events:
+            ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
+            ev_member_rate = (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            ev_startgg_rate = (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            ev_revenue = _as_float(ev.get("total_revenue"))
+            revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
+            table_rows.append(
+                {
+                    "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
+                    "event_slug": ev.get("event_slug", ""),
+                    "event_date": ev.get("event_date") or "",
+                    "total_participants": ev_total,
+                    "total_revenue": f"{ev_revenue:.0f} kr",
+                    "member_rate": f"{ev_member_rate:.0f}%",
+                    "startgg_rate": f"{ev_startgg_rate:.0f}%",
+                    "retention_rate": f"{_as_float(ev.get('retention_rate')):.0f}%",
+                }
+            )
+            earnings_rows.append(
+                {
+                    "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
+                    "event_date": ev.get("event_date") or "",
+                    "total_participants": ev_total,
+                    "total_revenue": f"{ev_revenue:.0f} kr",
+                    "revenue_per_player": f"{revenue_per_player:.0f} kr",
+                }
+            )
+
+        if not selected_events:
+            empty = _empty_response("No events selected")
+            return (series_options, selected_series, options, []) + empty[4:]
+
+        metrics = _aggregate_metrics(selected_events)
+
+        ready_rate = (metrics["ready_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        member_rate = (metrics["member_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        guest_rate = (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        startgg_rate = (metrics["startgg_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        retention = metrics["retention"]
+
+        if metrics["top_game_counts"]:
+            top_game = max(metrics["top_game_counts"], key=metrics["top_game_counts"].get)
+            top_game_text = f"Most popular game: {top_game}"
+        else:
+            top_game_text = ""
+
+        def _fmt_delta(curr, prev, unit="count"):
+            if prev is None:
+                return "—"
+            diff = curr - prev
+            if diff > 0:
+                arrow = "↑"
+            elif diff < 0:
+                arrow = "↓"
+            else:
+                arrow = "→"
+
+            if unit == "kr":
+                return f"{arrow} {diff:+.0f} kr vs prev"
+            if unit == "pp":
+                return f"{arrow} {diff:+.1f} pp vs prev"
+            return f"{arrow} {int(diff):+d} vs prev"
+
+        # Delta against previous period (same length), disabled for all-time and specific-event selection.
+        prev_metrics = None
+        if selected_period != "all" and not selected_event_slugs and range_start and range_end:
+            period_days = (range_end - range_start).days + 1
+            prev_end = range_start - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=period_days - 1)
+
+            prev_events = []
+            for ev in all_events:
+                ev_date = _as_date(ev.get("event_date"))
+                if not ev_date:
+                    continue
+                if ev_date < prev_start or ev_date > prev_end:
+                    continue
+                if selected_series and (_series_key(ev) not in selected_series):
+                    continue
+                prev_events.append(ev)
+
+            if prev_events:
+                prev_metrics = _aggregate_metrics(prev_events)
+
+        total_delta = _fmt_delta(metrics["total"], prev_metrics["total"] if prev_metrics else None, "count")
+        revenue_delta = _fmt_delta(metrics["revenue"], prev_metrics["revenue"] if prev_metrics else None, "kr")
+        ready_delta = _fmt_delta(ready_rate, ((prev_metrics["ready_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        member_delta = _fmt_delta(member_rate, ((prev_metrics["member_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        guest_delta = _fmt_delta(guest_rate, ((prev_metrics["guest_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        startgg_delta = _fmt_delta(startgg_rate, ((prev_metrics["startgg_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
+        retention_delta = _fmt_delta(retention, prev_metrics["retention"] if prev_metrics else None, "pp")
+
+        period_label = {
+            "day": "Last 24h",
+            "week": "Last 7 days",
+            "month": "Last 30 days",
+            "quarter": "Last 90 days",
+            "year": "Last 365 days",
+            "custom": "Custom range",
+            "all": "All time",
+        }.get(selected_period, "Selected period")
+
+        if selected_event_slugs:
+            scope_label = f"{len(selected_events)} selected events"
+        elif selected_series:
+            scope_label = f"All events in {', '.join(selected_series)}"
+        else:
+            scope_label = "All events"
+        summary_title = f"{scope_label} • {period_label}"
+
+        # Top attendees leaderboard for selected scope
+        top_players_rows = []
+        top_players_title = "Top attendees"
+        try:
+            top_players_fn = getattr(storage_api, "get_top_players_history", None)
+            if top_players_fn:
+                selected_scope_slugs = [ev.get("event_slug") for ev in selected_events if ev.get("event_slug")]
+                top_players_rows = top_players_fn(
+                    event_slugs=selected_scope_slugs,
+                    start_date=range_start.isoformat() if range_start else None,
+                    end_date=range_end.isoformat() if range_end else None,
+                    limit=15,
+                ) or []
+                top_players_title = f"Top attendees ({len(top_players_rows)} shown)"
+        except Exception as e:
+            logger.warning(f"Failed to load top players leaderboard: {e}")
+
+        # Game popularity leaderboard for selected scope
+        game_counts = {}
+        total_entries = 0
+        for ev in selected_events:
+            breakdown = ev.get("games_breakdown")
+            if not isinstance(breakdown, dict):
+                continue
+            for game, count in breakdown.items():
+                cnt = _as_int(count)
+                if cnt <= 0:
+                    continue
+                game_counts[game] = game_counts.get(game, 0) + cnt
+                total_entries += cnt
+
+        sorted_games = sorted(game_counts.items(), key=lambda kv: (-kv[1], str(kv[0]).lower()))
+        games_rows = []
+        for idx, (game, cnt) in enumerate(sorted_games[:20], start=1):
+            share = (cnt / total_entries * 100) if total_entries > 0 else 0.0
+            games_rows.append(
+                {
+                    "rank": idx,
+                    "game": game,
+                    "entries": cnt,
+                    "share": f"{share:.0f}%",
+                }
+            )
+        games_title = f"Most played games ({len(games_rows)} shown)"
+
+        return (
+            series_options,
+            selected_series,
+            options,
+            selected_event_slugs,
+            summary_title,
+            "",
+            str(metrics["total"]),
+            f"{metrics['revenue']:.0f} kr",
+            f"{ready_rate:.0f}%",
+            f"{member_rate:.0f}%",
+            f"{guest_rate:.0f}%",
+            f"{startgg_rate:.0f}%",
+            f"{retention:.0f}%",
+            total_delta,
+            revenue_delta,
+            ready_delta,
+            member_delta,
+            guest_delta,
+            startgg_delta,
+            retention_delta,
+            top_game_text,
+            top_players_title,
+            top_players_rows,
+            games_title,
+            games_rows,
+            table_rows,
+            earnings_rows,
+        )
+
+    @app.callback(
+        Output("insights-custom-range-wrap", "style"),
+        Input("insights-period-dropdown", "value"),
+    )
+    def toggle_insights_custom_range(selected_period):
+        if selected_period == "custom":
+            return {"display": "block", "minWidth": "320px"}
+        return {"display": "none"}
+
+    @app.callback(
+        Output("insights-view-players", "style"),
+        Output("insights-view-games", "style"),
+        Output("insights-view-events", "style"),
+        Output("insights-view-earnings", "style"),
+        Output("insights-top-game", "style"),
+        Input("insights-subtabs", "value"),
+    )
+    def toggle_insights_focus_view(view_mode):
+        base_visible = {"display": "block"}
+        hidden = {"display": "none"}
+        top_game_visible = {"color": "#94a3b8", "marginBottom": "1rem"}
+        mode = (view_mode or "").strip().lower()
+
+        if mode == "players":
+            return base_visible, hidden, hidden, hidden, hidden
+        if mode == "games":
+            return hidden, base_visible, hidden, hidden, top_game_visible
+        if mode == "events":
+            return hidden, hidden, base_visible, hidden, top_game_visible
+        if mode == "earnings":
+            return hidden, hidden, hidden, base_visible, hidden
+        return base_visible, hidden, hidden, hidden, hidden
+
+    @app.callback(
+        Output("insights-kpi-help", "children"),
+        Input("insights-card-total", "n_clicks"),
+        Input("insights-card-ready", "n_clicks"),
+        Input("insights-card-member", "n_clicks"),
+        Input("insights-card-guest", "n_clicks"),
+        Input("insights-card-startgg", "n_clicks"),
+        Input("insights-card-retention", "n_clicks"),
+        Input("insights-card-revenue", "n_clicks"),
+    )
+    def show_kpi_help(_total, _ready, _member, _guest, _startgg, _retention, _revenue):
+        help_map = {
+            "insights-card-total": "Participants: total participant entries in selected period/scope.",
+            "insights-card-ready": "Ready Rate: ready participants divided by total participants at archive time.",
+            "insights-card-member": "Member Rate: members divided by total participants.",
+            "insights-card-guest": "Guest Share: guests divided by total participants.",
+            "insights-card-startgg": "Start.gg Rate: Start.gg-verified participants divided by total participants.",
+            "insights-card-retention": "Retention: returning-player share, weighted by event size.",
+            "insights-card-revenue": "Total Revenue: summed event revenue in selected scope.",
+        }
+        triggered = ctx.triggered_id
+        if triggered in help_map:
+            return help_map[triggered]
+        return "Tip: click a KPI card to see how it is calculated."
+
+    @app.callback(
+        Output("insights-download", "data"),
+        Input("btn-insights-export-csv", "n_clicks"),
+        State("insights-subtabs", "value"),
+        State("insights-top-players-table", "data"),
+        State("insights-games-table", "data"),
+        State("insights-events-table", "data"),
+        State("insights-earnings-table", "data"),
+        prevent_initial_call=True,
+    )
+    def export_insights_csv(n_clicks, subtab, players_data, games_data, events_data, earnings_data):
+        if not n_clicks:
+            return no_update
+
+        mode = (subtab or "players").strip().lower()
+        data_map = {
+            "players": players_data or [],
+            "games": games_data or [],
+            "events": events_data or [],
+            "earnings": earnings_data or [],
+        }
+        rows = data_map.get(mode, [])
+        if not rows:
+            return no_update
+
+        df = pd.DataFrame(rows)
+        filename = f"insights_{mode}.csv"
+        return dcc.send_data_frame(df.to_csv, filename, index=False)
 
     # -------------------------------------------------------------------------
     # Reactive Stats - update stat cards when table data changes
@@ -816,6 +1455,11 @@ def register_callbacks(app):
         # Build update dict
         update_data = {col_id: new_val}
 
+        # If TO manually marks Start.gg as approved, classify as guest flow.
+        # (Matched Start.gg players are handled by integration_result logic.)
+        if col_id == "startgg" and new_val:
+            update_data["is_guest"] = True
+
         # Fetch configurable requirements from settings
         # Use "is True" so that missing/None = requirement OFF
         settings = get_active_settings() or {}
@@ -855,6 +1499,8 @@ def register_callbacks(app):
         if result:
             # Update local table data for immediate feedback
             table_data[row_idx][col_id] = "✓" if new_val else "✗"
+            if "is_guest" in update_data:
+                table_data[row_idx]["is_guest"] = "✓" if bool(update_data["is_guest"]) else "✗"
             table_data[row_idx]["status"] = new_status
 
             # Broadcast SSE to notify status pages
@@ -1113,9 +1759,18 @@ def register_callbacks(app):
         State("require-startgg-toggle", "value"),
         State("offer-membership-toggle", "value"),
         State("requirements-store", "data"),
+        State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def save_requirements(n_clicks, req_payment, req_membership, req_startgg, offer_membership, current_store):
+    def save_requirements(
+        n_clicks,
+        req_payment,
+        req_membership,
+        req_startgg,
+        offer_membership,
+        current_store,
+        auth_state,
+    ):
         """Save check-in requirement settings to storage backend."""
         if not n_clicks:
             return no_update, no_update
@@ -1161,6 +1816,41 @@ def register_callbacks(app):
                 "require_membership": bool(req_membership),
                 "require_startgg": bool(req_startgg),
             }
+
+            try:
+                previous = current_store or {}
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_update_requirements",
+                    "settings",
+                    target_event=get_active_slug() or "",
+                    details=json.dumps(
+                        {
+                            "require_payment": {
+                                "old": bool(previous.get("require_payment")),
+                                "new": bool(req_payment),
+                            },
+                            "require_membership": {
+                                "old": bool(previous.get("require_membership")),
+                                "new": bool(req_membership),
+                            },
+                            "require_startgg": {
+                                "old": bool(previous.get("require_startgg")),
+                                "new": bool(req_startgg),
+                            },
+                            "offer_membership": {
+                                "old": bool((settings_data.get("fields") or {}).get("offer_membership")),
+                                "new": bool(offer_membership),
+                            },
+                        }
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for requirements save: {e}")
 
             return html.Span(f"✅ Saved! {summary}", style={"color": "#10b981"}), new_store
         else:
@@ -1264,9 +1954,10 @@ def register_callbacks(app):
         Input("btn-save-payment-settings", "n_clicks"),
         State("input-price-per-game", "value"),
         State("input-swish-number", "value"),
+        State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def save_payment_settings(n_clicks, price_per_game, swish_number):
+    def save_payment_settings(n_clicks, price_per_game, swish_number, auth_state):
         """Save payment settings (price per game, swish number) to storage backend."""
         if not n_clicks:
             return no_update
@@ -1298,6 +1989,33 @@ def register_callbacks(app):
         result = update_settings(record_id, update_data)
 
         if result:
+            try:
+                prev_fields = settings_data.get("fields", {}) or {}
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_update_payment_settings",
+                    "settings",
+                    target_event=get_active_slug() or "",
+                    details=json.dumps(
+                        {
+                            "swish_expected_per_game": {
+                                "old": prev_fields.get("swish_expected_per_game", 0),
+                                "new": price,
+                            },
+                            "swish_number": {
+                                "old": prev_fields.get("swish_number", ""),
+                                "new": swish_number or "",
+                            },
+                        }
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for payment settings save: {e}")
+
             return html.Span(
                 f"✅ Saved! Price: {price} kr/game, Swish: {swish_number}",
                 style={"color": "#10b981"}
@@ -1571,7 +2289,7 @@ def register_callbacks(app):
         Applies optional action and user filters.
         Only fetches data when the audit tab is active (avoids unnecessary API calls).
         """
-        if selected_tab != "tab-audit":
+        if selected_tab != "tab-settings":
             return no_update, no_update, no_update, no_update, no_update
 
         try:
@@ -1590,6 +2308,11 @@ def register_callbacks(app):
 
         # Format timestamps for display (keep full ISO in tooltip)
         for entry in entries:
+            raw_action = entry.get("action") or ""
+            entry["_action_raw"] = raw_action
+            entry["action_category"] = get_action_group(raw_action)
+            entry["action"] = format_action_label(raw_action)
+
             raw_ts = entry.get("timestamp", "")
             if raw_ts:
                 try:
@@ -1605,13 +2328,16 @@ def register_callbacks(app):
         except Exception:
             all_entries = entries
 
-        action_values = sorted({e.get("action") for e in all_entries if e.get("action")})
+        action_values = sorted(
+            {e.get("action") for e in all_entries if e.get("action")},
+            key=action_sort_key,
+        )
         user_values = sorted(
             {e.get("user_name") for e in all_entries if e.get("user_name")},
             key=str.lower,
         )
 
-        action_options = [{"label": a, "value": a} for a in action_values]
+        action_options = [{"label": format_action_filter_label(a), "value": a} for a in action_values]
         # User filter uses user_id for filtering but shows user_name
         user_id_map = {}
         for e in all_entries:
@@ -1630,8 +2356,12 @@ def register_callbacks(app):
             row_tips = {}
             details = entry.get("details", "")
             reason = entry.get("reason", "")
+            raw_action = entry.get("_action_raw", "")
+            action_tip = f"Raw action: {raw_action}" if raw_action else ""
             if details:
-                row_tips["action"] = {"value": details, "type": "text"}
+                action_tip = f"{action_tip}\n\nDetails: {details}" if action_tip else details
+            if action_tip:
+                row_tips["action"] = {"value": action_tip, "type": "text"}
             if reason:
                 row_tips["reason"] = {"value": reason, "type": "text"}
             tooltip_data.append(row_tips)

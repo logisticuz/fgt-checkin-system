@@ -274,3 +274,276 @@
     background-color: #1e293b !important;
     color: #ffffff !important;
 }
+
+/* === Livelier Interactions === */
+
+/* Tab micro-interactions */
+.tab,
+[class*="tab"] {
+    transition: transform 0.18s ease, color 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.tab:hover,
+[class*="tab"]:hover {
+    transform: translateY(-1px);
+}
+
+/* Button hover lift + glow */
+#btn-refresh,
+#btn-archive-event-quick,
+#btn-delete-selected,
+#btn-export-guests,
+#btn-insights-refresh,
+#btn-fetch-event,
+#btn-save-requirements,
+#btn-save-payment-settings,
+#btn-archive-event,
+#btn-reopen-event,
+#btn-delete-event-history,
+#btn-audit-refresh {
+    transition: transform 0.16s ease, box-shadow 0.2s ease, filter 0.2s ease !important;
+}
+
+#btn-refresh:hover,
+#btn-archive-event-quick:hover,
+#btn-delete-selected:hover,
+#btn-export-guests:hover,
+#btn-insights-refresh:hover,
+#btn-fetch-event:hover,
+#btn-save-requirements:hover,
+#btn-save-payment-settings:hover,
+#btn-archive-event:hover,
+#btn-reopen-event:hover,
+#btn-delete-event-history:hover,
+#btn-audit-refresh:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.05);
+    box-shadow: 0 8px 20px rgba(0, 212, 255, 0.16);
+}
+
+#btn-delete-selected:hover {
+    box-shadow: 0 8px 20px rgba(239, 68, 68, 0.22);
+}
+
+#btn-archive-event-quick:hover,
+#btn-archive-event:hover,
+#btn-delete-event-history:hover {
+    box-shadow: 0 8px 20px rgba(245, 158, 11, 0.22);
+}
+
+/* Stat card hover glow */
+.stat-card-live {
+    position: relative;
+    transition: transform 0.2s ease, box-shadow 0.22s ease, border-color 0.22s ease !important;
+}
+
+.stat-card-live:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 24px rgba(0, 212, 255, 0.15);
+}
+
+/* Dropdown interaction polish */
+.fgc-dropdown [class*="control"] {
+    transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+}
+
+.fgc-dropdown [class*="control"]:hover {
+    border-color: #00d4ff !important;
+    box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.2) !important;
+}
+
+/* Softer row hover movement for readability */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner tr td {
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+/* === Pass 2: Subtle Motion + Depth === */
+
+@keyframes cardRiseIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes softGlow {
+    0%, 100% {
+        box-shadow: 0 0 0 rgba(0, 212, 255, 0);
+    }
+    50% {
+        box-shadow: 0 0 18px rgba(0, 212, 255, 0.12);
+    }
+}
+
+/* Staggered entry for dashboard KPI cards */
+#stats-cards .stat-card-live {
+    animation: cardRiseIn 320ms ease both;
+}
+
+#stats-cards .stat-card-live:nth-child(1) { animation-delay: 20ms; }
+#stats-cards .stat-card-live:nth-child(2) { animation-delay: 70ms; }
+#stats-cards .stat-card-live:nth-child(3) { animation-delay: 120ms; }
+#stats-cards .stat-card-live:nth-child(4) { animation-delay: 170ms; }
+
+/* Insights KPI cards get same entrance rhythm */
+#tab-insights-content .stat-card-live {
+    animation: cardRiseIn 360ms ease both;
+}
+
+#tab-insights-content .stat-card-live:nth-child(1) { animation-delay: 20ms; }
+#tab-insights-content .stat-card-live:nth-child(2) { animation-delay: 60ms; }
+#tab-insights-content .stat-card-live:nth-child(3) { animation-delay: 100ms; }
+#tab-insights-content .stat-card-live:nth-child(4) { animation-delay: 140ms; }
+#tab-insights-content .stat-card-live:nth-child(5) { animation-delay: 180ms; }
+#tab-insights-content .stat-card-live:nth-child(6) { animation-delay: 220ms; }
+
+/* Give active stats row a subtle ambient glow */
+#stats-cards {
+    position: relative;
+}
+
+#stats-cards::before {
+    content: "";
+    position: absolute;
+    inset: -6px 0 auto 0;
+    height: 8px;
+    filter: blur(10px);
+    background: linear-gradient(90deg, rgba(0, 212, 255, 0.14), rgba(16, 185, 129, 0.12), rgba(245, 158, 11, 0.1));
+    pointer-events: none;
+}
+
+/* Make important cards feel alive on idle */
+#filter-ready,
+#filter-pending,
+#filter-no-payment {
+    animation: softGlow 4.2s ease-in-out infinite;
+}
+
+/* Respect reduced-motion users */
+@media (prefers-reduced-motion: reduce) {
+    .tab,
+    [class*="tab"],
+    .stat-card-live,
+    #stats-cards .stat-card-live,
+    #tab-insights-content .stat-card-live,
+    #filter-ready,
+    #filter-pending,
+    #filter-no-payment,
+    #btn-refresh,
+    #btn-archive-event-quick,
+    #btn-delete-selected,
+    #btn-export-guests,
+    #btn-insights-refresh,
+    #btn-fetch-event,
+    #btn-save-requirements,
+    #btn-save-payment-settings,
+    #btn-archive-event,
+    #btn-reopen-event,
+    #btn-delete-event-history,
+    #btn-audit-refresh {
+        animation: none !important;
+        transition: none !important;
+    }
+}
+
+/* Insights KPI compact grid */
+#insights-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    gap: 0.75rem;
+}
+
+/* Insights subtabs */
+#insights-subtabs {
+    border-bottom: 1px solid #1e293b;
+    background: #0d1020;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+#insights-subtabs .tab,
+#insights-subtabs .tab--selected {
+    border: none !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+.insights-subtab {
+    background: #12121a !important;
+    color: #94a3b8 !important;
+    border: none !important;
+    border-right: 1px solid #1e293b !important;
+    padding: 0.74rem 1rem !important;
+    font-size: 0.88rem !important;
+    line-height: 1.15;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.insights-subtab:last-child {
+    border-right: none !important;
+}
+
+.insights-subtab--selected {
+    background: #0a0a0f !important;
+    color: #00d4ff !important;
+    border-top: 2px solid #00d4ff !important;
+    border-right: 1px solid #1e293b !important;
+    padding: 0.74rem 1rem !important;
+    box-shadow: none;
+}
+
+.insights-subtab:focus,
+.insights-subtab--selected:focus,
+#insights-subtabs .tab:focus,
+#insights-subtabs .tab--selected:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+#insights-subtabs .tab:focus-visible,
+#insights-subtabs .tab--selected:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+@media (max-width: 1500px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(4, minmax(160px, 1fr));
+    }
+}
+
+@media (max-width: 1200px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(3, minmax(160px, 1fr));
+    }
+}
+
+@media (max-width: 900px) {
+    #insights-kpi-grid {
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }
+}
+/* Global app canvas - remove browser white frame */
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: #0a0a0f;
+}
+
+#react-entry-point,
+#_dash-app-content,
+.dash-app {
+    background: #0a0a0f;
+    min-height: 100vh;
+}
