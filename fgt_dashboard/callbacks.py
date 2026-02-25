@@ -1299,6 +1299,23 @@ def register_callbacks(app):
             scope_label = "All events"
         summary_title = f"{scope_label} • {period_label}"
 
+        # Community-friendly heads-up text for no-show trend (non-alarm tone).
+        heads_up_text = ""
+        reg_total = metrics.get("startgg_registered_total", 0)
+        no_show_total = metrics.get("no_show_total", 0)
+        no_show_rate = metrics.get("no_show_rate", 0.0)
+        if reg_total >= 10:
+            if no_show_rate >= 30:
+                heads_up_text = (
+                    f"Heads-up: no-show is {no_show_rate:.0f}% "
+                    f"({no_show_total} of {reg_total} Start.gg registrations) in this scope."
+                )
+            elif no_show_rate >= 15:
+                heads_up_text = (
+                    f"Heads-up: no-show is {no_show_rate:.0f}% "
+                    f"({no_show_total} of {reg_total}) in this scope."
+                )
+
         # Top attendees leaderboard for selected scope
         top_players_rows = []
         top_players_title = "Top attendees"
@@ -1350,7 +1367,7 @@ def register_callbacks(app):
             options,
             selected_event_slugs,
             summary_title,
-            "",
+            heads_up_text,
             str(metrics["total"]),
             f"{metrics['revenue']:.0f} kr",
             f"{ready_rate:.0f}%",
