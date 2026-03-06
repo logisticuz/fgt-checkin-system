@@ -36,6 +36,11 @@ from shared.storage import (
 logger = logging.getLogger(__name__)
 
 
+def _display_name(name: str = "", email: str = "", user_id: str = "") -> str:
+    """Normalize display name for UI/audit; never return blank."""
+    return (name or email or (f"user-{user_id}" if user_id else "unknown")).strip()
+
+
 def _audit_safe(user: dict, action: str, target_table: str, **kwargs) -> None:
     """Best-effort audit logging; never break auth flow on audit failure."""
     try:
@@ -340,7 +345,11 @@ async def auth_callback(code: str = ""):
                 _audit_safe(
                     {
                         "user_id": user_info.get("id", ""),
-                        "user_name": user_info.get("name", "unknown"),
+                        "user_name": _display_name(
+                            user_info.get("name", ""),
+                            user_info.get("email", ""),
+                            str(user_info.get("id", "")),
+                        ),
                         "user_email": user_info.get("email", ""),
                     },
                     "auth_login_denied",
@@ -350,7 +359,11 @@ async def auth_callback(code: str = ""):
                 )
                 logger.warning(
                     "Denied dashboard login for user '%s' (not TO for active event %s)",
-                    user_info.get("name", "unknown"),
+                    _display_name(
+                        user_info.get("name", ""),
+                        user_info.get("email", ""),
+                        str(user_info.get("id", "")),
+                    ),
                     active_slug,
                 )
                 return JSONResponse(
@@ -364,7 +377,11 @@ async def auth_callback(code: str = ""):
                 _audit_safe(
                     {
                         "user_id": user_info.get("id", ""),
-                        "user_name": user_info.get("name", "unknown"),
+                        "user_name": _display_name(
+                            user_info.get("name", ""),
+                            user_info.get("email", ""),
+                            str(user_info.get("id", "")),
+                        ),
                         "user_email": user_info.get("email", ""),
                     },
                     "auth_login_denied",
@@ -390,7 +407,11 @@ async def auth_callback(code: str = ""):
         _audit_safe(
             {
                 "user_id": user_info.get("id", ""),
-                "user_name": user_info.get("name", "unknown"),
+                "user_name": _display_name(
+                    user_info.get("name", ""),
+                    user_info.get("email", ""),
+                    str(user_info.get("id", "")),
+                ),
                 "user_email": user_info.get("email", ""),
             },
             "auth_login_success",
@@ -422,7 +443,14 @@ async def auth_callback(code: str = ""):
             max_age=8 * 60 * 60,  # 8 hours
             path=cookie_path,
         )
-        logger.info(f"✅ User '{user_info.get('name')}' logged in successfully")
+        logger.info(
+            "✅ User '%s' logged in successfully",
+            _display_name(
+                user_info.get("name", ""),
+                user_info.get("email", ""),
+                str(user_info.get("id", "")),
+            ),
+        )
         return response
 
     except Exception as e:
@@ -445,7 +473,11 @@ async def auth_logout(request: Request):
         _audit_safe(
             {
                 "user_id": session_data.get("user_id", ""),
-                "user_name": session_data.get("user_name", "unknown"),
+                "user_name": _display_name(
+                    session_data.get("user_name", ""),
+                    session_data.get("user_email", ""),
+                    str(session_data.get("user_id", "")),
+                ),
                 "user_email": session_data.get("user_email", ""),
             },
             "auth_logout",
@@ -479,7 +511,11 @@ async def auth_me(request: Request):
 
     return {
         "user_id": session_data.get("user_id"),
-        "user_name": session_data.get("user_name"),
+        "user_name": _display_name(
+            session_data.get("user_name", ""),
+            session_data.get("user_email", ""),
+            str(session_data.get("user_id", "")),
+        ),
         "user_email": session_data.get("user_email"),
     }
 
@@ -557,7 +593,11 @@ async def auth_select_event_save(request: Request):
     _audit_safe(
         {
             "user_id": session_data.get("user_id", ""),
-            "user_name": session_data.get("user_name", "unknown"),
+            "user_name": _display_name(
+                session_data.get("user_name", ""),
+                session_data.get("user_email", ""),
+                str(session_data.get("user_id", "")),
+            ),
             "user_email": session_data.get("user_email", ""),
         },
         "auth_select_active_event",

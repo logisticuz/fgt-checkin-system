@@ -173,7 +173,11 @@ def _get_auth_state() -> dict:
 
         return {
             "logged_in": True,
-            "user_name": session_data.get("user_name", ""),
+            "user_name": (
+                session_data.get("user_name")
+                or session_data.get("user_email")
+                or (f"user-{session_data.get('user_id')}" if session_data.get("user_id") else "")
+            ),
             "user_id": session_data.get("user_id", ""),
             "user_email": session_data.get("user_email", ""),
         }
