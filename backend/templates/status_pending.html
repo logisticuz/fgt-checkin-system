@@ -705,8 +705,9 @@
     // Flag to stop polling (e.g., already checked in - status won't change from polling)
     let stopPolling = false;
 
-    async function updateStatus() {
-      if (inFlight || stopPolling) return;
+    async function updateStatus(force = false) {
+      if (inFlight) return;
+      if (stopPolling && !force) return;
 
       // Check polling timeout only when we're in polling fallback mode.
       if (!sseConnected) {
@@ -816,7 +817,7 @@
     function manualRefresh() {
       stopPolling = false;
       pollCount = 0;  // Reset poll count too
-      updateStatus();
+      updateStatus(true);
     }
 
     // Start with one immediate check, then keep fallback polling if SSE is unavailable.
@@ -843,13 +844,13 @@
         eventSource.addEventListener('update', function(e) {
           console.log('SSE update received:', e.data);
           // TO made a change - refresh immediately
-          updateStatus();
+          updateStatus(true);
         });
 
         eventSource.addEventListener('checkin', function(e) {
           console.log('SSE checkin event:', e.data);
           // Something changed - refresh immediately
-          updateStatus();
+          updateStatus(true);
         });
 
         eventSource.onerror = function(e) {
