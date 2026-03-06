@@ -126,7 +126,12 @@ CREATE TABLE event_stats (
     most_popular_game   TEXT,
     status_breakdown    JSONB,
     -- Snapshot
-    startgg_snapshot    JSONB
+    startgg_snapshot    JSONB,
+    -- No-show tracking
+    startgg_registered_count  INTEGER DEFAULT 0,
+    checked_in_count          INTEGER DEFAULT 0,
+    no_show_count             INTEGER DEFAULT 0,
+    no_show_rate              NUMERIC(5,2) DEFAULT 0
 );
 
 -- =============================================

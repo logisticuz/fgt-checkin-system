@@ -143,11 +143,17 @@ def get_startgg_user(access_token: str) -> dict:
         user = data.get("data", {}).get("currentUser") or {}
         images = user.get("images") or []
         avatar_url = images[0].get("url") if images else None
+        display_name = (
+            user.get("name")
+            or user.get("slug")
+            or user.get("email")
+            or (f"user-{user.get('id')}" if user.get("id") else "unknown")
+        )
 
         return {
             "id": str(user.get("id", "")),
             "slug": user.get("slug", ""),
-            "name": user.get("name", ""),
+            "name": display_name,
             "email": user.get("email", ""),
             "avatar_url": avatar_url,
         }

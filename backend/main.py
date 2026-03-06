@@ -821,6 +821,63 @@ async def get_event_history():
     return storage_get_event_history()
 
 
+@app.post("/api/startgg/registered-count", tags=["Integrations"])
+async def update_startgg_registered_count(request: Request):
+    """
+    Receive Start.gg registered entrant count for current event.
+
+    Callable by n8n workflow or dashboard to refresh tournament_entrants
+    in settings.events_json before archiving.
+
+    Body: { "event_slug": "...", "startgg_registered_count": 42 }
+    Idempotent: replaces existing tournament_entrants value.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    count = body.get("startgg_registered_count")
+    if count is None:
+        raise HTTPException(status_code=400, detail="startgg_registered_count is required")
+
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="startgg_registered_count must be an integer")
+
+    # Update events_json.tournament_entrants in active settings
+    settings = storage_get_active_settings() or {}
+    events_json = settings.get("events_json")
+
+    if isinstance(events_json, dict):
+        events_json["tournament_entrants"] = count
+    elif isinstance(events_json, list):
+        events_json = {"tournament_entrants": count, "events": events_json}
+    else:
+        events_json = {"tournament_entrants": count, "events": []}
+
+    # Find active settings record to update
+    get_settings_fn = getattr(storage_api, "get_active_settings_with_id", None)
+    if not get_settings_fn:
+        raise HTTPException(status_code=501, detail="Not available for current backend")
+
+    settings_data = get_settings_fn()
+    if not settings_data:
+        raise HTTPException(status_code=404, detail="No active settings found")
+
+    update_fn = getattr(storage_api, "update_settings", None)
+    if not update_fn:
+        raise HTTPException(status_code=501, detail="Not available for current backend")
+
+    result = update_fn(settings_data["record_id"], {"events_json": events_json})
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to update settings")
+
+    logger.info(f"Updated startgg_registered_count to {count}")
+    return {"success": True, "startgg_registered_count": count}
+
+
 @app.post("/api/archive/event", tags=["Dashboard"])
 async def archive_event_endpoint(request: Request):
     """Archive current event into event_archive/event_stats using storage backend."""
