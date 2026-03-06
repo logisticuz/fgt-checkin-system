@@ -150,6 +150,11 @@
                 console.error('SSE error:', e);
                 console.log('EventSource readyState:', eventSource.readyState);
 
+                // Keep dashboard live even when SSE handshake/reconnect fails.
+                if (eventSource.readyState !== EventSource.OPEN) {
+                    startFallbackPolling();
+                }
+
                 // Only handle if connection is closed
                 if (eventSource.readyState === EventSource.CLOSED) {
                     eventSource.close();
