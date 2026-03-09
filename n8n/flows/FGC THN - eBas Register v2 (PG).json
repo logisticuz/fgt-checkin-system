@@ -1,7 +1,7 @@
 {
   "name": "FGC THN - eBas Register v2 (PG)",
   "description": "Postgres-backed eBas registration. No Airtable nodes. Reports member status to backend via /api/checkin/{id}/member-status.",
-  "active": false,
+  "active": true,
   "nodes": [
     {
       "parameters": {

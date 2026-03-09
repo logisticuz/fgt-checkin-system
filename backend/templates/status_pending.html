@@ -545,7 +545,7 @@
       }, 1000);
     }
 
-    // Swish config (from Airtable settings)
+    // Swish config (from settings)
     const SWISH_NUMBER = "{{ swish_number | default('1234567890') | replace('-', '') | replace(' ', '') }}";
     const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
 
@@ -724,7 +724,7 @@
       document.getElementById("refreshBtn").disabled = true;
 
       try {
-        // Poll backend API endpoint (checks Airtable for member/payment/startgg)
+        // Poll backend API endpoint for current status
         const res = await fetch(`/api/participant/${encodeURIComponent(name)}/status`, {
           method: "GET",
           cache: "no-store",

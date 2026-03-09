@@ -1,7 +1,7 @@
 {
   "name": "FGC THN - Checkin Orchestrator v5 (PG)",
   "description": "Postgres-backed orchestrator. No Airtable nodes. Receives checkin_id from backend, runs Start.gg + eBas checks, reports results back to backend via /api/integration/result.",
-  "active": false,
+  "active": true,
   "nodes": [
     {
       "parameters": {

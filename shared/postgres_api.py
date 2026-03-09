@@ -1,8 +1,8 @@
 """
 Postgres storage backend for FGC Check-in System.
 
-Drop-in replacement for airtable_api.py - same public function signatures.
-Activated when DATA_BACKEND=postgres in .env.
+Primary storage backend for FGC Check-in System (default).
+Shares public function signatures with airtable_api.py (legacy fallback).
 
 Connection uses DATABASE_URL from environment, with a connection pool
 managed by psycopg3.

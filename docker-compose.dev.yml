@@ -10,6 +10,7 @@ services:
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
       - N8N_LOG_LEVEL=debug
+      - WEBHOOK_URL=http://localhost:5679/ 
     volumes:
       - n8n_data:/home/node/.n8n
       - ./backend/data:/app/data

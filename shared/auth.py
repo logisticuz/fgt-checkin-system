@@ -117,6 +117,9 @@ def get_startgg_user(access_token: str) -> dict:
                     slug
                     name
                     email
+                    player {
+                        gamerTag
+                    }
                     images(type: "profile") {
                         url
                     }
@@ -143,10 +146,12 @@ def get_startgg_user(access_token: str) -> dict:
         user = data.get("data", {}).get("currentUser") or {}
         images = user.get("images") or []
         avatar_url = images[0].get("url") if images else None
+        gamer_tag = (user.get("player") or {}).get("gamerTag", "")
         display_name = (
             user.get("name")
-            or user.get("slug")
+            or gamer_tag
             or user.get("email")
+            or user.get("slug")
             or (f"user-{user.get('id')}" if user.get("id") else "unknown")
         )
 
@@ -154,6 +159,7 @@ def get_startgg_user(access_token: str) -> dict:
             "id": str(user.get("id", "")),
             "slug": user.get("slug", ""),
             "name": display_name,
+            "gamer_tag": gamer_tag,
             "email": user.get("email", ""),
             "avatar_url": avatar_url,
         }
