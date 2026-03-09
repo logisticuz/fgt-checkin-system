@@ -294,1328 +294,2733 @@ def create_layout():
         columns = [{"name": "No participants yet", "id": "info"}]
         data = []
     else:
-        columns = [{"name": str(col).replace("_", " ").title(), "id": str(col)} for col in df.columns]
+        columns = [
+            {"name": str(col).replace("_", " ").title(), "id": str(col)} for col in df.columns
+        ]
         data = df.to_dict("records")
 
     # Format event name for display - use event_display_name if available (has proper åäö)
     event_display_name = settings.get("event_display_name", "")
-    event_display = event_display_name if event_display_name else (
-        active_slug.replace("-", " ").title() if active_slug else "No Event Selected"
+    event_display = (
+        event_display_name
+        if event_display_name
+        else (active_slug.replace("-", " ").title() if active_slug else "No Event Selected")
     )
 
     # Build visible columns based on active requirements
-    default_columns = ["name", "tag", "status", "telephone", "startgg", "is_guest", "tournament_games_registered"]
+    default_columns = [
+        "name",
+        "tag",
+        "status",
+        "telephone",
+        "startgg",
+        "is_guest",
+        "tournament_games_registered",
+    ]
     if settings.get("require_payment") is True:
         default_columns.insert(3, "payment_valid")
     if settings.get("require_membership") is True:
         default_columns.insert(4 if "payment_valid" in default_columns else 3, "member")
 
-    return html.Div(style=STYLES["page"], children=[
-        # Data stores
-        dcc.Store(id="sse-token-store", data=SSE_TOKEN),  # Token for SSE auth
-        dcc.Store(id="events-map-store", data=[]),
-        dcc.Store(id="visible-columns-store", data=default_columns),
-        dcc.Store(id="active-filter", data="all"),  # Current filter: all, pending, ready, no-payment
-        dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
-        dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
-        dcc.Store(id="auth-store", data=auth_state),  # Current user auth state
-        dcc.Store(id="requirements-store", data={
-            # Requirements are enabled only when explicitly True
-            "require_payment": settings.get("require_payment") is True,
-            "require_membership": settings.get("require_membership") is True,
-            "require_startgg": settings.get("require_startgg") is True,
-        }),
-        dcc.Interval(id="interval-refresh", interval=300 * 1000, n_intervals=0, disabled=True),  # Fallback: 5 min, disabled by default
-
-        # Header
-        html.Header(style={**STYLES["header"], "position": "relative"}, children=[
-            # Auth UI (top left)
-            html.Div(
-                style={"position": "absolute", "top": "1.5rem", "left": "2rem"},
-                children=[_build_auth_ui(auth_state)],
-            ),
-            # Centered logo
-            html.Div(style={"display": "flex", "justifyContent": "center"}, children=[
-                html.Img(src="/assets/logo.png", style={"height": "60px", "width": "auto"}),
-            ]),
-            # Connection status indicator (top right)
-            html.Div(id="connection-indicator", style={"position": "absolute", "top": "1.5rem", "right": "2rem", "display": "flex", "alignItems": "center", "gap": "0.5rem"}, children=[
-                html.Div(id="connection-dot", style={
-                    "width": "10px",
-                    "height": "10px",
-                    "backgroundColor": COLORS["accent_yellow"],  # Yellow = connecting
-                    "borderRadius": "50%",
-                    "boxShadow": f"0 0 10px {COLORS['accent_yellow']}",
-                    "transition": "all 0.3s ease",
-                }),
-                html.Span("Connecting...", id="connection-text", style={
-                    "color": COLORS["accent_yellow"],
-                    "fontSize": "0.75rem",
-                    "fontWeight": "600",
-                    "letterSpacing": "0.1em",
-                    "transition": "all 0.3s ease",
-                }),
-            ]),
-        ]),
-
-        # SSE JavaScript loaded from assets/sse-client.js automatically by Dash
-
-        # Main content
-        html.Div(style=STYLES["container"], children=[
-
-            # Tabs
-            dcc.Tabs(
-                id="tabs",
-                value="tab-checkins",
-                style={"marginBottom": "1.5rem"},
-                colors={
-                    "border": COLORS["border"],
-                    "primary": COLORS["accent_blue"],
-                    "background": COLORS["bg_card"],
+    return html.Div(
+        style=STYLES["page"],
+        children=[
+            # Data stores
+            dcc.Store(id="sse-token-store", data=SSE_TOKEN),  # Token for SSE auth
+            dcc.Store(id="events-map-store", data=[]),
+            dcc.Store(id="visible-columns-store", data=default_columns),
+            dcc.Store(
+                id="active-filter", data="all"
+            ),  # Current filter: all, pending, ready, no-payment
+            dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
+            dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
+            dcc.Store(id="auth-store", data=auth_state),  # Current user auth state
+            dcc.Store(
+                id="requirements-store",
+                data={
+                    # Requirements are enabled only when explicitly True
+                    "require_payment": settings.get("require_payment") is True,
+                    "require_membership": settings.get("require_membership") is True,
+                    "require_startgg": settings.get("require_startgg") is True,
                 },
+            ),
+            dcc.Interval(
+                id="interval-refresh", interval=300 * 1000, n_intervals=0, disabled=True
+            ),  # Fallback: 5 min, disabled by default
+            # Header
+            html.Header(
+                style={**STYLES["header"], "position": "relative"},
                 children=[
-                    dcc.Tab(
-                        label="⚡ Live Check-ins",
-                        value="tab-checkins",
-                        style={"backgroundColor": COLORS["bg_card"], "color": COLORS["text_secondary"], "border": "none", "padding": "1rem 1.5rem"},
-                        selected_style={"backgroundColor": COLORS["bg_dark"], "color": COLORS["accent_blue"], "borderTop": f"2px solid {COLORS['accent_blue']}", "padding": "1rem 1.5rem"},
+                    # Auth UI (top left)
+                    html.Div(
+                        style={"position": "absolute", "top": "1.5rem", "left": "2rem"},
+                        children=[_build_auth_ui(auth_state)],
                     ),
-                    dcc.Tab(
-                        label="📈 Insights",
-                        value="tab-insights",
-                        style={"backgroundColor": COLORS["bg_card"], "color": COLORS["text_secondary"], "border": "none", "padding": "1rem 1.5rem"},
-                        selected_style={"backgroundColor": COLORS["bg_dark"], "color": COLORS["accent_blue"], "borderTop": f"2px solid {COLORS['accent_blue']}", "padding": "1rem 1.5rem"},
+                    # Centered logo
+                    html.Div(
+                        style={"display": "flex", "justifyContent": "center"},
+                        children=[
+                            html.Img(
+                                src="/assets/logo.png", style={"height": "60px", "width": "auto"}
+                            ),
+                        ],
                     ),
-                    dcc.Tab(
-                        label="⚙️ Settings",
-                        value="tab-settings",
-                        style={"backgroundColor": COLORS["bg_card"], "color": COLORS["text_secondary"], "border": "none", "padding": "1rem 1.5rem"},
-                        selected_style={"backgroundColor": COLORS["bg_dark"], "color": COLORS["accent_blue"], "borderTop": f"2px solid {COLORS['accent_blue']}", "padding": "1rem 1.5rem"},
+                    # Connection status indicator (top right)
+                    html.Div(
+                        id="connection-indicator",
+                        style={
+                            "position": "absolute",
+                            "top": "1.5rem",
+                            "right": "2rem",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "gap": "0.5rem",
+                        },
+                        children=[
+                            html.Div(
+                                id="connection-dot",
+                                style={
+                                    "width": "10px",
+                                    "height": "10px",
+                                    "backgroundColor": COLORS[
+                                        "accent_yellow"
+                                    ],  # Yellow = connecting
+                                    "borderRadius": "50%",
+                                    "boxShadow": f"0 0 10px {COLORS['accent_yellow']}",
+                                    "transition": "all 0.3s ease",
+                                },
+                            ),
+                            html.Span(
+                                "Connecting...",
+                                id="connection-text",
+                                style={
+                                    "color": COLORS["accent_yellow"],
+                                    "fontSize": "0.75rem",
+                                    "fontWeight": "600",
+                                    "letterSpacing": "0.1em",
+                                    "transition": "all 0.3s ease",
+                                },
+                            ),
+                        ],
                     ),
                 ],
             ),
-
-            # Tab content container
-            html.Div(id="tabs-content", children=[
-
-                # ========== TAB 1: Live Check-ins ==========
-                html.Div(id="tab-checkins-content", children=[
-
-                    # Event selector row
-                    html.Div(style={"display": "flex", "gap": "1rem", "marginBottom": "1.5rem", "flexWrap": "wrap", "alignItems": "flex-end"}, children=[
-                        html.Div(style={"flex": "1", "minWidth": "250px"}, children=[
-                            html.Label("Current Event", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                            dcc.Dropdown(
-                                id="event-dropdown",
-                                className="fgc-dropdown",
-                                options=[
-                                    {"label": "🔍 All Events (Debug)", "value": "__ALL__"},
-                                ] + [
-                                    # Use event_display_name for active slug (has proper åäö), fallback to slug title
-                                    {"label": event_display_name if s == active_slug and event_display_name else s.replace("-", " ").title(), "value": s}
-                                    for s in event_slugs
-                                ],
-                                value=active_slug if active_slug in event_slugs else (event_slugs[0] if event_slugs else None),
-                                clearable=False,
-                                style={"backgroundColor": COLORS["bg_dark"]},
-                            ),
-                        ]),
-                        html.Button("Refresh", id="btn-refresh", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
-                        html.Button(
-                            "Archive Event",
-                            id="btn-archive-event-quick",
-                            n_clicks=0,
-                            style={
-                                **STYLES["button_primary"],
-                                "height": "38px",
-                                "backgroundColor": COLORS["accent_yellow"],
-                                "color": "#111827",
-                            },
-                        ),
-                    ]),
-
-                    # Active requirements indicator
-                    html.Div(id="requirements-indicator", style={
-                        "display": "flex",
-                        "alignItems": "center",
-                        "gap": "0.75rem",
-                        "marginBottom": "1rem",
-                        "padding": "0.5rem 0.75rem",
-                        "backgroundColor": COLORS["bg_card"],
-                        "borderRadius": "8px",
-                        "border": f"1px solid {COLORS['border']}",
-                        "fontSize": "0.75rem",
-                    }, children=[
-                        html.Span("Active Requirements:", style={"color": COLORS["text_muted"], "fontWeight": "500"}),
-                        html.Div(id="requirement-badges", style={"display": "flex", "gap": "0.5rem", "flexWrap": "wrap"}),
-                    ]),
-
-                    # Stats cards (clickable as filters)
-                    html.Div(id="stats-cards", style={"display": "flex", "gap": "1rem", "marginBottom": "1.5rem", "flexWrap": "wrap"}, children=[
-                        html.Div(id="filter-all", n_clicks=0, className="stat-card-live", style={
-                            **STYLES["stat_card"],
-                            "borderTop": f"3px solid {COLORS['accent_blue']}",
-                            "cursor": "pointer",
-                            "transition": "all 0.2s",
-                        }, children=[
-                            html.P(str(len(data)), id="stat-total", style={**STYLES["stat_value"], "color": COLORS["accent_blue"]}),
-                            html.P("Total", style=STYLES["stat_label"]),
-                        ]),
-                        html.Div(id="filter-ready", n_clicks=0, className="stat-card-live", style={
-                            **STYLES["stat_card"],
-                            "borderTop": f"3px solid {COLORS['accent_green']}",
-                            "cursor": "pointer",
-                            "transition": "all 0.2s",
-                        }, children=[
-                            html.P(str(len([d for d in data if d.get("status") == "Ready"])), id="stat-ready", style={**STYLES["stat_value"], "color": COLORS["accent_green"]}),
-                            html.P("Ready", style=STYLES["stat_label"]),
-                        ]),
-                        html.Div(id="filter-pending", n_clicks=0, className="stat-card-live", style={
-                            **STYLES["stat_card"],
-                            "borderTop": f"3px solid {COLORS['accent_yellow']}",
-                            "cursor": "pointer",
-                            "transition": "all 0.2s",
-                        }, children=[
-                            html.P(str(len([d for d in data if d.get("status") == "Pending"])), id="stat-pending", style={**STYLES["stat_value"], "color": COLORS["accent_yellow"]}),
-                            html.P("Pending", style=STYLES["stat_label"]),
-                        ]),
-                        html.Div(id="filter-no-payment", n_clicks=0, className="stat-card-live", style={
-                            **STYLES["stat_card"],
-                            "borderTop": f"3px solid {COLORS['accent_red']}",
-                            "cursor": "pointer",
-                            "transition": "all 0.2s",
-                        }, children=[
-                            html.P("0", id="stat-attention", style={**STYLES["stat_value"], "color": COLORS["accent_red"]}),
-                            html.P("No Payment", style=STYLES["stat_label"]),
-                        ]),
-                    ]),
-
-                    # Needs attention section (collapsible)
-                    html.Div(id="needs-attention-section", style={
-                        **STYLES["card"],
-                        "borderLeft": f"4px solid {COLORS['accent_red']}",
-                        "display": "none",  # Hidden by default, shown by callback when needed
-                    }, children=[
-                        # Header with toggle
-                        html.Div(style={
-                            "display": "flex",
-                            "justifyContent": "space-between",
-                            "alignItems": "center",
-                            "cursor": "pointer",
-                        }, id="needs-attention-header", n_clicks=0, children=[
-                            html.H3("🚨 Needs Attention", style={**STYLES["section_title"], "color": COLORS["accent_red"], "margin": "0"}),
-                            html.Div(style={"display": "flex", "alignItems": "center", "gap": "0.5rem"}, children=[
-                                html.Span(id="needs-attention-count", style={
-                                    "backgroundColor": COLORS["accent_red"],
-                                    "color": "#fff",
-                                    "padding": "0.25rem 0.6rem",
-                                    "borderRadius": "12px",
-                                    "fontSize": "0.8rem",
-                                    "fontWeight": "600",
-                                }),
-                                html.Span("▼", id="needs-attention-chevron", style={
-                                    "color": COLORS["text_muted"],
-                                    "fontSize": "0.8rem",
-                                    "transition": "transform 0.2s",
-                                }),
-                            ]),
-                        ]),
-                        # Collapsible content
-                        html.Div(id="needs-attention-list", children=[
-                            html.P("No issues", style={"color": COLORS["text_muted"], "margin": "0"})
-                        ], style={"marginTop": "1rem"})
-                    ]),
-
-                    # Main checkins table
-                    html.Div(style=STYLES["card"], children=[
-                        # Header row with title and player count
-                        html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "1rem"}, children=[
-                            html.H3("Player List", style={**STYLES["section_title"], "margin": "0"}),
-                            html.Span(id="player-count", children=f"{len(data)} players", style={"color": COLORS["text_muted"], "fontSize": "0.875rem"}),
-                        ]),
-
-                        html.Div(
-                            id="duplicate-warning",
-                            style={"marginBottom": "0.75rem", "display": "none"},
-                            children=[
-                                html.Div(
-                                    style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "0.6rem"},
-                                    children=[
-                                        html.Span(id="duplicate-warning-text", style={"fontWeight": "600", "color": "#f59e0b"}),
-                                        html.Button(
-                                            "Dismiss",
-                                            id="duplicate-warning-dismiss",
-                                            n_clicks=0,
-                                            style={
-                                                "backgroundColor": "transparent",
-                                                "border": "1px solid rgba(245, 158, 11, 0.45)",
-                                                "color": "#fbbf24",
-                                                "borderRadius": "6px",
-                                                "padding": "0.2rem 0.55rem",
-                                                "fontSize": "0.75rem",
-                                                "cursor": "pointer",
-                                            },
-                                        ),
-                                    ],
-                                ),
-                                html.Ul(
-                                    id="duplicate-warning-list",
-                                    style={"margin": "0.35rem 0 0 1rem", "color": "#fbbf24", "fontSize": "0.82rem"},
-                                ),
-                            ],
-                        ),
-
-                        # Search and game filter row
-                        html.Div(style={"display": "flex", "gap": "1rem", "marginBottom": "1rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
-                            # Search field
-                            dcc.Input(
-                                id="search-input",
-                                type="text",
-                                placeholder="Search name or tag...",
+            # SSE JavaScript loaded from assets/sse-client.js automatically by Dash
+            # Main content
+            html.Div(
+                style=STYLES["container"],
+                children=[
+                    # Tabs
+                    dcc.Tabs(
+                        id="tabs",
+                        value="tab-checkins",
+                        style={"marginBottom": "1.5rem"},
+                        colors={
+                            "border": COLORS["border"],
+                            "primary": COLORS["accent_blue"],
+                            "background": COLORS["bg_card"],
+                        },
+                        children=[
+                            dcc.Tab(
+                                label="⚡ Live Check-ins",
+                                value="tab-checkins",
                                 style={
-                                    **STYLES["input"],
-                                    "maxWidth": "250px",
-                                    "flex": "1",
-                                },
-                                debounce=True,
-                            ),
-                            # Game filter dropdown
-                            html.Div(style={"minWidth": "140px"}, children=[
-                                dcc.Dropdown(
-                                    id="game-filter",
-                                    className="fgc-dropdown",
-                                    options=[],  # Populated dynamically
-                                    value=None,
-                                    placeholder="All games",
-                                    clearable=True,
-                                    style={"backgroundColor": COLORS["bg_dark"], "minWidth": "140px"},
-                                ),
-                            ]),
-                        ]),
-                        dcc.Loading(
-                            type="circle",
-                            color=COLORS["accent_blue"],
-                            children=dash_table.DataTable(
-                                id="checkins-table",
-                                columns=columns,
-                                data=data,
-                                editable=False,
-                                page_size=20,
-                                sort_action="native",
-                                row_selectable="multi",
-                                style_table={"overflowX": "auto"},
-                                style_header={
-                                    "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
-                                    "fontWeight": "600",
-                                    "fontSize": "0.75rem",
-                                    "textTransform": "uppercase",
-                                    "letterSpacing": "0.05em",
-                                    "padding": "1rem",
-                                    "borderBottom": f"2px solid {COLORS['accent_blue']}",
-                                },
-                                style_cell={
                                     "backgroundColor": COLORS["bg_card"],
-                                    "color": COLORS["text_primary"],
-                                    "border": "none",
-                                    "borderBottom": f"1px solid {COLORS['border']}",
-                                    "padding": "1rem",
-                                    "fontSize": "0.875rem",
-                                    "textAlign": "left",
-                                },
-                                style_data_conditional=[
-                                    # Ready status - green row highlight
-                                    {
-                                        "if": {"filter_query": "{status} = 'Ready'"},
-                                        "backgroundColor": "rgba(16, 185, 129, 0.1)",
-                                        "borderLeft": f"3px solid {COLORS['accent_green']}",
-                                    },
-                                    # Pending status - yellow row highlight
-                                    {
-                                        "if": {"filter_query": "{status} = 'Pending'"},
-                                        "backgroundColor": "rgba(245, 158, 11, 0.1)",
-                                        "borderLeft": f"3px solid {COLORS['accent_yellow']}",
-                                    },
-                                    # Icon cells: ✓ = green (clickable columns have cursor pointer)
-                                    {"if": {"filter_query": '{member} = "✓"', "column_id": "member"}, "color": COLORS["accent_green"], "fontWeight": "600"},
-                                    {"if": {"filter_query": '{startgg} = "✓"', "column_id": "startgg"}, "color": COLORS["accent_green"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    {"if": {"filter_query": '{is_guest} = "✓"', "column_id": "is_guest"}, "color": COLORS["accent_blue"], "fontWeight": "600"},
-                                    {"if": {"filter_query": '{payment_valid} = "✓"', "column_id": "payment_valid"}, "color": COLORS["accent_green"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    # Icon cells: ✗ = red (clickable columns have cursor pointer)
-                                    {"if": {"filter_query": '{member} = "✗"', "column_id": "member"}, "color": COLORS["accent_red"], "fontWeight": "600"},
-                                    {"if": {"filter_query": '{startgg} = "✗"', "column_id": "startgg"}, "color": COLORS["accent_red"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    {"if": {"filter_query": '{is_guest} = "✗"', "column_id": "is_guest"}, "color": COLORS["text_muted"], "fontWeight": "600"},
-                                    {"if": {"filter_query": '{payment_valid} = "✗"', "column_id": "payment_valid"}, "color": COLORS["accent_red"], "fontWeight": "600", "cursor": "pointer", "textDecoration": "underline"},
-                                    # Hover/active effect - keep text readable
-                                    {
-                                        "if": {"state": "active"},
-                                        "backgroundColor": "#1e293b",
-                                        "color": "#ffffff",
-                                    },
-                                    {
-                                        "if": {"state": "selected"},
-                                        "backgroundColor": "#1e293b",
-                                        "color": "#ffffff",
-                                    },
-                                    # Row striping
-                                    {
-                                        "if": {"row_index": "odd"},
-                                        "backgroundColor": COLORS["bg_dark"],
-                                    },
-                                ],
-                            ),
-                        ),
-                    ]),
-
-                    # Action buttons row
-                    html.Div(style={"display": "flex", "gap": "1rem", "marginTop": "1rem", "alignItems": "center", "flexWrap": "wrap"}, children=[
-                        html.Button(
-                            "Delete Selected",
-                            id="btn-delete-selected",
-                            n_clicks=0,
-                            style={
-                                "backgroundColor": COLORS["accent_red"],
-                                "color": "#fff",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "padding": "0.5rem 1rem",
-                                "fontSize": "0.875rem",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                            }
-                        ),
-                        html.Button(
-                            "Export Guests (CSV)",
-                            id="btn-export-guests",
-                            n_clicks=0,
-                            style={
-                                "backgroundColor": COLORS["accent_blue"],
-                                "color": "#fff",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "padding": "0.5rem 1rem",
-                                "fontSize": "0.875rem",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                            }
-                        ),
-                        html.Span("Click row to select • Click Payment/Start.gg/Member to toggle • Edit Tag inline", style={"color": COLORS["text_muted"], "fontSize": "0.75rem"}),
-                    ]),
-
-                    html.Div(style={"marginTop": "0.75rem"}, children=[
-                        html.Button(
-                            "Manual Tools ▾",
-                            id="btn-toggle-manual-checkin",
-                            n_clicks=0,
-                            style={
-                                "backgroundColor": "transparent",
-                                "color": COLORS["text_secondary"],
-                                "border": f"1px solid {COLORS['border']}",
-                                "borderRadius": "8px",
-                                "padding": "0.4rem 0.75rem",
-                                "fontSize": "0.78rem",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                            },
-                        ),
-                        html.Div(
-                            id="manual-checkin-panel",
-                            style={"display": "none", "marginTop": "0.6rem"},
-                            children=[
-                                html.Div(style={"display": "flex", "gap": "0.6rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
-                                    dcc.Input(
-                                        id="input-manual-name",
-                                        type="text",
-                                        placeholder="Manual check-in: Name",
-                                        style={
-                                            **STYLES["input"],
-                                            "maxWidth": "230px",
-                                            "height": "40px",
-                                            "fontSize": "0.82rem",
-                                            "lineHeight": "1.2",
-                                        },
-                                    ),
-                                    dcc.Input(
-                                        id="input-manual-tag",
-                                        type="text",
-                                        placeholder="Tag (optional)",
-                                        style={
-                                            **STYLES["input"],
-                                            "maxWidth": "180px",
-                                            "height": "40px",
-                                            "fontSize": "0.82rem",
-                                            "lineHeight": "1.2",
-                                        },
-                                    ),
-                                    html.Button(
-                                        "Add Manual Check-in",
-                                        id="btn-manual-checkin",
-                                        n_clicks=0,
-                                        style={
-                                            "backgroundColor": COLORS["accent_green"],
-                                            "color": "#fff",
-                                            "border": "none",
-                                            "borderRadius": "8px",
-                                            "padding": "0.5rem 0.9rem",
-                                            "fontSize": "0.8rem",
-                                            "fontWeight": "600",
-                                            "cursor": "pointer",
-                                        },
-                                    ),
-                                    html.Span(
-                                        "Use for Start.gg players who missed the kiosk check-in.",
-                                        style={"color": COLORS["text_muted"], "fontSize": "0.75rem"},
-                                    ),
-                                ]),
-                            ],
-                        ),
-                    ]),
-
-                    html.Div(style={"display": "flex", "gap": "0.6rem", "flexWrap": "wrap", "marginTop": "0.75rem", "alignItems": "center"}, children=[
-                        html.Button(
-                            "Re-check Start.gg",
-                            id="btn-recheck-startgg",
-                            n_clicks=0,
-                            style={
-                                "backgroundColor": "#a78bfa",
-                                "color": "#fff",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "padding": "0.5rem 0.9rem",
-                                "fontSize": "0.8rem",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                            }
-                        ),
-                        html.Span("Select a player row first. Re-validates Start.gg registration and syncs games.", style={"color": COLORS["text_muted"], "fontSize": "0.75rem"}),
-                    ]),
-                    html.Div(id="recheck-startgg-feedback", style={"marginTop": "0.5rem"}),
-
-                    # Feedback messages
-                    html.Div(id="payment-update-feedback", style={"marginTop": "0.5rem"}),
-                    html.Div(id="manual-checkin-feedback", style={"marginTop": "0.5rem"}),
-                    html.Div(id="delete-feedback", style={"marginTop": "0.5rem"}),
-                    html.Div(id="export-feedback", style={"marginTop": "0.5rem"}),
-
-                    # Download component for CSV export
-                    dcc.Download(id="download-guests-csv"),
-
-                    # Confirmation dialog for delete
-                    dcc.ConfirmDialog(
-                        id="confirm-delete-dialog",
-                        message="Are you sure you want to delete this player?",
-                    ),
-                ]),
-
-                # ========== TAB 2: Insights ==========
-                html.Div(id="tab-insights-content", style={"display": "none"}, children=[
-                    html.Div(style=STYLES["card"], children=[
-                        html.Div(id="insights-summary-title", style={"color": COLORS["text_primary"], "fontWeight": "600", "marginBottom": "0.45rem"}),
-
-                        html.Div(
-                            style={
-                                "display": "flex",
-                                "gap": "1rem",
-                                "flexWrap": "wrap",
-                                "alignItems": "flex-end",
-                                "marginBottom": "1rem",
-                            },
-                            children=[
-                                html.Div(style={"flex": "1", "minWidth": "300px"}, children=[
-                                    html.Label("Archived Events", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                                    dcc.Dropdown(
-                                        id="insights-event-dropdown",
-                                        className="fgc-dropdown",
-                                        options=[],
-                                        value=[],
-                                        multi=True,
-                                        clearable=True,
-                                        placeholder="Select events (empty = all)",
-                                        style={"backgroundColor": COLORS["bg_dark"]},
-                                    ),
-                                ]),
-                                html.Div(style={"minWidth": "190px"}, children=[
-                                    html.Label("Period", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                                    dcc.Dropdown(
-                                        id="insights-period-dropdown",
-                                        className="fgc-dropdown",
-                                        clearable=False,
-                                        value="month",
-                                        options=[
-                                            {"label": "Last 24h", "value": "day"},
-                                            {"label": "Last 7 days", "value": "week"},
-                                            {"label": "Last 30 days", "value": "month"},
-                                            {"label": "Last 90 days", "value": "quarter"},
-                                            {"label": "Last 365 days", "value": "year"},
-                                            {"label": "Custom range", "value": "custom"},
-                                            {"label": "All time", "value": "all"},
-                                        ],
-                                        style={"backgroundColor": COLORS["bg_dark"]},
-                                    ),
-                                ]),
-                                html.Div(style={"minWidth": "240px"}, children=[
-                                    html.Label("Series", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                                    dcc.Dropdown(
-                                        id="insights-series-dropdown",
-                                        className="fgc-dropdown",
-                                        options=[],
-                                        value=[],
-                                        multi=True,
-                                        clearable=True,
-                                        placeholder="Filter by series (optional)",
-                                        style={"backgroundColor": COLORS["bg_dark"]},
-                                    ),
-                                ]),
-                                html.Div(id="insights-custom-range-wrap", style={"display": "none", "minWidth": "320px"}, children=[
-                                    html.Label("Custom Date Range", style={"fontSize": "0.75rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                                    dcc.DatePickerRange(
-                                        id="insights-date-range",
-                                        minimum_nights=0,
-                                        updatemode="bothdates",
-                                        display_format="YYYY-MM-DD",
-                                        style={"backgroundColor": COLORS["bg_dark"]},
-                                    ),
-                                ]),
-                                html.Button("Refresh", id="btn-insights-refresh", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
-                                html.Button("Export CSV", id="btn-insights-export-csv", n_clicks=0, style={**STYLES["button_secondary"], "height": "38px"}),
-                                dcc.Download(id="insights-download"),
-                            ],
-                        ),
-                        html.Div(id="insights-empty-hint", style={"color": COLORS["text_muted"], "fontSize": "0.82rem", "marginBottom": "0.75rem"}),
-
-                        dcc.Tabs(
-                            id="insights-subtabs",
-                            value="players",
-                            style={"marginBottom": "0.9rem"},
-                            children=[
-                                dcc.Tab(label="Players", value="players", className="insights-subtab", selected_className="insights-subtab--selected"),
-                                dcc.Tab(label="Games", value="games", className="insights-subtab", selected_className="insights-subtab--selected"),
-                                dcc.Tab(label="Events", value="events", className="insights-subtab", selected_className="insights-subtab--selected"),
-                                dcc.Tab(label="Earnings", value="earnings", className="insights-subtab", selected_className="insights-subtab--selected"),
-                            ],
-                        ),
-
-                        html.Div(id="insights-kpi-grid", style={"gap": "0.75rem", "marginBottom": "0.65rem"}, children=[
-                            html.Div(id="insights-card-total", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid #22d3ee", "cursor": "pointer"}, children=[
-                                html.P("0", id="insights-kpi-total", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": "#22d3ee"}),
-                                html.P("Participants", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-total-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-ready", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_green']}", "cursor": "pointer"}, children=[
-                                html.P("0%", id="insights-kpi-readyrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_green"]}),
-                                html.P("Ready Rate", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-readyrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-member", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_purple']}", "cursor": "pointer"}, children=[
-                                html.P("0%", id="insights-kpi-memberrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_purple"]}),
-                                html.P("Member Rate", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-memberrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-guest", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": "3px solid #2dd4bf", "cursor": "pointer"}, children=[
-                                html.P("0%", id="insights-kpi-guestrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": "#2dd4bf"}),
-                                html.P("Guest Share", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-guestrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-startgg", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_yellow']}", "cursor": "pointer"}, children=[
-                                html.P("0%", id="insights-kpi-startggrate", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_yellow"]}),
-                                html.P("Start.gg Rate", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-startggrate-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-retention", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": f"3px solid {COLORS['accent_red']}", "cursor": "pointer"}, children=[
-                                html.P("0%", id="insights-kpi-retention", style={**STYLES["stat_value"], "fontSize": "1.85rem", "color": COLORS["accent_red"]}),
-                                html.P("Retention", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-retention-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                            html.Div(id="insights-card-revenue", n_clicks=0, className="stat-card-live", style={**STYLES["stat_card"], "minWidth": "0", "padding": "0.8rem 0.65rem", "borderTop": "3px solid #818cf8", "cursor": "pointer"}, children=[
-                                html.P("0 kr", id="insights-kpi-revenue", style={**STYLES["stat_value"], "fontSize": "1.6rem", "color": "#818cf8"}),
-                                html.P("Total Revenue", style=STYLES["stat_label"]),
-                                html.P("", id="insights-kpi-revenue-delta", style={"color": COLORS["text_muted"], "fontSize": "0.72rem", "marginTop": "0.35rem"}),
-                            ]),
-                        ]),
-                        html.Div(id="insights-kpi-help", style={"color": COLORS["text_muted"], "fontSize": "0.78rem", "marginBottom": "0.9rem"}),
-
-                        html.Div(id="insights-view-players", children=[
-                            html.Div(id="insights-top-players-title", style={"color": COLORS["text_primary"], "fontWeight": "600", "marginBottom": "0.6rem"}),
-
-                            dash_table.DataTable(
-                                id="insights-top-players-table",
-                                columns=[
-                                    {"name": "#", "id": "rank"},
-                                    {"name": "Name", "id": "name"},
-                                    {"name": "Tag", "id": "tag"},
-                                    {"name": "Events", "id": "events_attended"},
-                                ],
-                                data=[],
-                                page_size=8,
-                                sort_action="native",
-                                style_table={"overflowX": "auto", "marginBottom": "1rem"},
-                                style_header={
-                                    "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
-                                    "fontWeight": "600",
-                                    "fontSize": "0.72rem",
-                                    "textTransform": "uppercase",
-                                    "letterSpacing": "0.05em",
-                                    "padding": "0.7rem",
-                                    "borderBottom": f"2px solid {COLORS['accent_green']}",
-                                },
-                                style_cell={
-                                    "backgroundColor": COLORS["bg_card"],
-                                    "color": COLORS["text_primary"],
-                                    "border": "none",
-                                    "borderBottom": f"1px solid {COLORS['border']}",
-                                    "padding": "0.62rem 0.8rem",
-                                    "fontSize": "0.78rem",
-                                    "textAlign": "left",
-                                },
-                                style_data_conditional=[
-                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
-                                ],
-                            ),
-                        ]),
-
-                        html.Div(id="insights-view-games", children=[
-                            html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "0.75rem", "marginBottom": "0.6rem"}, children=[
-                                html.Div(id="insights-games-title", style={"color": COLORS["text_primary"], "fontWeight": "600"}),
-                                html.Div(id="insights-top-game", style={
                                     "color": COLORS["text_secondary"],
-                                    "fontSize": "0.78rem",
-                                    "padding": "0.25rem 0.55rem",
-                                    "border": f"1px solid {COLORS['border']}",
-                                    "borderRadius": "999px",
-                                    "whiteSpace": "nowrap",
-                                }),
-                            ]),
-
-                            dash_table.DataTable(
-                                id="insights-games-table",
-                                columns=[
-                                    {"name": "#", "id": "rank"},
-                                    {"name": "Game", "id": "game"},
-                                    {"name": "Entries", "id": "entries"},
-                                    {"name": "Share", "id": "share"},
-                                ],
-                                data=[],
-                                page_size=8,
-                                sort_action="native",
-                                style_table={"overflowX": "auto", "marginBottom": "1rem"},
-                                style_header={
-                                    "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
-                                    "fontWeight": "600",
-                                    "fontSize": "0.72rem",
-                                    "textTransform": "uppercase",
-                                    "letterSpacing": "0.05em",
-                                    "padding": "0.7rem",
-                                    "borderBottom": f"2px solid {COLORS['accent_yellow']}",
-                                },
-                                style_cell={
-                                    "backgroundColor": COLORS["bg_card"],
-                                    "color": COLORS["text_primary"],
                                     "border": "none",
-                                    "borderBottom": f"1px solid {COLORS['border']}",
-                                    "padding": "0.62rem 0.8rem",
-                                    "fontSize": "0.78rem",
-                                    "textAlign": "left",
+                                    "padding": "1rem 1.5rem",
                                 },
-                                style_data_conditional=[
-                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
-                                ],
-                            ),
-                        ]),
-
-                        html.Div(id="insights-view-events", children=[
-                            dash_table.DataTable(
-                                id="insights-events-table",
-                            columns=[
-                                {"name": "Event", "id": "event_display_name"},
-                                {"name": "Slug", "id": "event_slug"},
-                                {"name": "Date", "id": "event_date"},
-                                {"name": "Participants", "id": "total_participants"},
-                                {"name": "Checked-in/Reg", "id": "checked_in_vs_registered"},
-                                {"name": "Revenue", "id": "total_revenue"},
-                                {"name": "Member %", "id": "member_rate"},
-                                {"name": "Start.gg %", "id": "startgg_rate"},
-                                {"name": "Retention %", "id": "retention_rate"},
-                                {"name": "No-shows", "id": "no_show_count"},
-                                {"name": "No-show %", "id": "no_show_rate"},
-                            ],
-                            data=[],
-                            page_size=10,
-                            sort_action="native",
-                            style_table={"overflowX": "auto"},
-                            style_header={
-                                "backgroundColor": COLORS["bg_dark"],
-                                "color": COLORS["text_primary"],
-                                "fontWeight": "600",
-                                "fontSize": "0.75rem",
-                                "textTransform": "uppercase",
-                                "letterSpacing": "0.05em",
-                                "padding": "0.75rem",
-                                "borderBottom": f"2px solid {COLORS['accent_blue']}",
-                            },
-                            style_cell={
-                                "backgroundColor": COLORS["bg_card"],
-                                "color": COLORS["text_primary"],
-                                "border": "none",
-                                "borderBottom": f"1px solid {COLORS['border']}",
-                                "padding": "0.55rem 0.75rem",
-                                "fontSize": "0.8rem",
-                                "textAlign": "left",
-                                "maxWidth": "220px",
-                                "overflow": "hidden",
-                                "textOverflow": "ellipsis",
-                            },
-                            style_data_conditional=[
-                                {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
-                            ],
-                        ),
-                        ]),
-
-                        html.Div(id="insights-view-earnings", children=[
-                            dash_table.DataTable(
-                                id="insights-earnings-table",
-                                columns=[
-                                    {"name": "Event", "id": "event_display_name"},
-                                    {"name": "Date", "id": "event_date"},
-                                    {"name": "Participants", "id": "total_participants"},
-                                    {"name": "Revenue", "id": "total_revenue"},
-                                    {"name": "SEK / Player", "id": "revenue_per_player"},
-                                ],
-                                data=[],
-                                page_size=10,
-                                sort_action="native",
-                                style_table={"overflowX": "auto"},
-                                style_header={
+                                selected_style={
                                     "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
-                                    "fontWeight": "600",
-                                    "fontSize": "0.75rem",
-                                    "textTransform": "uppercase",
-                                    "letterSpacing": "0.05em",
-                                    "padding": "0.75rem",
-                                    "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                    "color": COLORS["accent_blue"],
+                                    "borderTop": f"2px solid {COLORS['accent_blue']}",
+                                    "padding": "1rem 1.5rem",
                                 },
-                                style_cell={
+                            ),
+                            dcc.Tab(
+                                label="📈 Insights",
+                                value="tab-insights",
+                                style={
                                     "backgroundColor": COLORS["bg_card"],
-                                    "color": COLORS["text_primary"],
+                                    "color": COLORS["text_secondary"],
                                     "border": "none",
-                                    "borderBottom": f"1px solid {COLORS['border']}",
-                                    "padding": "0.55rem 0.75rem",
-                                    "fontSize": "0.8rem",
-                                    "textAlign": "left",
+                                    "padding": "1rem 1.5rem",
                                 },
-                                style_data_conditional=[
-                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
-                                ],
-                            ),
-                        ]),
-                    ]),
-                ]),
-
-                # ========== TAB 3: Settings ==========
-                html.Div(id="tab-settings-content", style={"display": "none"}, children=[
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("Event Configuration", style=STYLES["section_title"]),
-
-                        html.Div(style={"marginBottom": "1.5rem"}, children=[
-                            html.Label("Start.gg Tournament Link", style={"fontSize": "0.875rem", "color": COLORS["text_secondary"], "marginBottom": "0.5rem", "display": "block"}),
-                            dcc.Input(
-                                id="input-startgg-link",
-                                type="text",
-                                placeholder="https://www.start.gg/tournament/your-tournament",
-                                style={
-                                    **STYLES["input"],
-                                    "minHeight": "44px",
-                                    "lineHeight": "1.4",
-                                    "boxSizing": "border-box",
-                                },
-                            ),
-                        ]),
-
-                        html.Button("Fetch Event Data", id="btn-fetch-event", n_clicks=0, style=STYLES["button_primary"]),
-                        html.Div(id="settings-output", style={"marginTop": "1rem", "padding": "1rem", "borderRadius": "8px", "backgroundColor": COLORS["bg_dark"]}),
-                    ]),
-
-                    # Check-in Requirements
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("Check-in Requirements", style=STYLES["section_title"]),
-                        html.P("Choose which requirements players must meet to be marked as 'Ready'.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
-
-                        # Require Payment
-                        html.Div(style={"marginBottom": "1rem", "display": "flex", "alignItems": "center", "gap": "0.75rem"}, children=[
-                            dcc.Checklist(
-                                id="require-payment-toggle",
-                                options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_payment") is True else [],
-                                style={"display": "inline-block"},
-                                inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
-                            ),
-                            html.Div(children=[
-                                html.Span("Require Payment", style={"fontWeight": "600", "color": COLORS["text_primary"]}),
-                                html.P("Player must pay to be marked as Ready", style={"margin": "0", "fontSize": "0.75rem", "color": COLORS["text_muted"]}),
-                            ]),
-                        ]),
-
-                        # Require Membership
-                        html.Div(style={"marginBottom": "1rem", "display": "flex", "alignItems": "center", "gap": "0.75rem"}, children=[
-                            dcc.Checklist(
-                                id="require-membership-toggle",
-                                options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_membership") is True else [],
-                                style={"display": "inline-block"},
-                                inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
-                            ),
-                            html.Div(children=[
-                                html.Span("Require Membership (eBas)", style={"fontWeight": "600", "color": COLORS["text_primary"]}),
-                                html.P("Player must be a Sverok member", style={"margin": "0", "fontSize": "0.75rem", "color": COLORS["text_muted"]}),
-                            ]),
-                        ]),
-
-                        # Require Start.gg
-                        html.Div(style={"marginBottom": "1.5rem", "display": "flex", "alignItems": "center", "gap": "0.75rem"}, children=[
-                            dcc.Checklist(
-                                id="require-startgg-toggle",
-                                options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("require_startgg") is True else [],
-                                style={"display": "inline-block"},
-                                inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
-                            ),
-                            html.Div(children=[
-                                html.Span("Require Start.gg Registration", style={"fontWeight": "600", "color": COLORS["text_primary"]}),
-                                html.P("Player must be registered in the tournament", style={"margin": "0", "fontSize": "0.75rem", "color": COLORS["text_muted"]}),
-                            ]),
-                        ]),
-
-                        html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.5rem 0"}),
-
-                        # Offer Membership (optional)
-                        html.Div(style={"marginBottom": "1.5rem", "display": "flex", "alignItems": "center", "gap": "0.75rem"}, children=[
-                            dcc.Checklist(
-                                id="offer-membership-toggle",
-                                options=[{"label": "", "value": True}],
-                                value=[True] if settings.get("offer_membership") is True else [],
-                                style={"display": "inline-block"},
-                                inputStyle={"width": "18px", "height": "18px", "cursor": "pointer"},
-                            ),
-                            html.Div(children=[
-                                html.Span("Offer Membership (optional)", style={"fontWeight": "600", "color": COLORS["text_primary"]}),
-                                html.P("Show 'Become a member' on Ready page even when not required", style={"margin": "0", "fontSize": "0.75rem", "color": COLORS["text_muted"]}),
-                            ]),
-                        ]),
-
-                        html.Button("Save Requirements", id="btn-save-requirements", n_clicks=0, style=STYLES["button_primary"]),
-                        html.Div(id="requirements-save-feedback", style={"marginTop": "1rem"}),
-                    ]),
-
-                    # Payment Settings
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("Payment Settings", style=STYLES["section_title"]),
-                        html.P("Configure Swish payment details for this event.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
-
-                        # Price per game
-                        html.Div(style={"marginBottom": "1rem"}, children=[
-                            html.Label("Price per game (kr)", style={"fontWeight": "600", "color": COLORS["text_primary"], "marginBottom": "0.5rem", "display": "block"}),
-                            dcc.Input(
-                                id="input-price-per-game",
-                                type="number",
-                                value=settings.get("swish_expected_per_game", 25),
-                                min=0,
-                                step=5,
-                                style={
-                                    "width": "120px",
-                                    "padding": "0.5rem",
-                                    "borderRadius": "6px",
-                                    "border": f"1px solid {COLORS['border']}",
+                                selected_style={
                                     "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
+                                    "color": COLORS["accent_blue"],
+                                    "borderTop": f"2px solid {COLORS['accent_blue']}",
+                                    "padding": "1rem 1.5rem",
                                 },
                             ),
-                        ]),
-
-                        # Swish number
-                        html.Div(style={"marginBottom": "1rem"}, children=[
-                            html.Label("Swish number", style={"fontWeight": "600", "color": COLORS["text_primary"], "marginBottom": "0.5rem", "display": "block"}),
-                            dcc.Input(
-                                id="input-swish-number",
-                                type="text",
-                                value=settings.get("swish_number", "123-456 78 90"),
+                            dcc.Tab(
+                                label="⚙️ Settings",
+                                value="tab-settings",
                                 style={
-                                    "width": "200px",
-                                    "padding": "0.5rem",
-                                    "borderRadius": "6px",
-                                    "border": f"1px solid {COLORS['border']}",
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "color": COLORS["text_secondary"],
+                                    "border": "none",
+                                    "padding": "1rem 1.5rem",
+                                },
+                                selected_style={
                                     "backgroundColor": COLORS["bg_dark"],
-                                    "color": COLORS["text_primary"],
+                                    "color": COLORS["accent_blue"],
+                                    "borderTop": f"2px solid {COLORS['accent_blue']}",
+                                    "padding": "1rem 1.5rem",
                                 },
                             ),
-                        ]),
-
-                        html.Button("Save Payment Settings", id="btn-save-payment-settings", n_clicks=0, style=STYLES["button_primary"]),
-                        html.Div(id="payment-settings-feedback", style={"marginTop": "1rem"}),
-                    ]),
-
-                    # Archive Event
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("Event Archive", style=STYLES["section_title"]),
-                        html.P(
-                            "Archive current event data to historical tables (event_archive + event_stats).",
-                            style={"color": COLORS["text_secondary"], "marginBottom": "1rem"},
-                        ),
-                        dcc.Checklist(
-                            id="archive-clear-active-toggle",
-                            options=[{"label": " Clear active check-ins after archive", "value": "clear"}],
-                            value=[],
-                            style={"marginBottom": "1rem", "color": COLORS["text_secondary"]},
-                            inputStyle={"marginRight": "0.5rem"},
-                        ),
-                        html.Button("Archive Current Event", id="btn-archive-event", n_clicks=0, style=STYLES["button_primary"]),
-                        html.P(
-                            "Tip: quick archive button is available next to Refresh in Live Check-ins.",
-                            style={"marginTop": "0.75rem", "color": COLORS["text_muted"], "fontSize": "0.82rem"},
-                        ),
-                        html.Div(id="archive-feedback", style={"marginTop": "1rem"}),
-
-                        html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.25rem 0"}),
-
-                        html.H3("Reopen Event", style=STYLES["section_title"]),
-                        html.P(
-                            "Reopen archived event and optionally restore active check-ins from archive snapshot.",
-                            style={"color": COLORS["text_secondary"], "marginBottom": "1rem"},
-                        ),
-                        dcc.Checklist(
-                            id="reopen-restore-active-toggle",
-                            options=[{"label": " Restore active check-ins from archive", "value": "restore"}],
-                            value=["restore"],
-                            style={"marginBottom": "1rem", "color": COLORS["text_secondary"]},
-                            inputStyle={"marginRight": "0.5rem"},
-                        ),
-                        html.Button("Reopen Current Event", id="btn-reopen-event", n_clicks=0, style=STYLES["button_secondary"]),
-                        html.Div(id="reopen-feedback", style={"marginTop": "1rem"}),
-
-                    ]),
-
-                    # Hidden elements to satisfy callback dependencies
-                    html.Div(style={"display": "none"}, children=[
-                        dcc.Dropdown(id="game-dropdown", className="fgc-dropdown", options=[], value=None),
-                        html.Div(id="game-help"),
-                    ]),
-
-                    # Column visibility settings
-                    html.Div(style=STYLES["card"], children=[
-                        html.H3("Table Columns", style=STYLES["section_title"]),
-                        html.P("Choose which columns to display in the check-ins table.", style={"color": COLORS["text_secondary"], "marginBottom": "1rem"}),
-                        dcc.Dropdown(
-                            id="column-visibility-dropdown",
-                            className="fgc-dropdown",
-                            options=[opt for opt in [
-                                {"label": "Name", "value": "name"},
-                                {"label": "Tag", "value": "tag"},
-                                {"label": "Status", "value": "status"},
-                                {"label": "Payment", "value": "payment_valid"} if settings.get("require_payment") is True else None,
-                                {"label": "Phone", "value": "telephone"},
-                                {"label": "Member", "value": "member"} if settings.get("require_membership") is True else None,
-                                {"label": "Start.gg", "value": "startgg"},
-                                {"label": "Guest", "value": "is_guest"},
-                                {"label": "Games", "value": "tournament_games_registered"},
-                                {"label": "Email", "value": "email"},
-                                {"label": "UUID", "value": "UUID"},
-                                {"label": "Created", "value": "created"},
-                            ] if opt is not None],
-                            value=[c for c in ["name", "tag", "status", "payment_valid", "telephone", "member", "startgg", "is_guest", "tournament_games_registered"]
-                                   if not (c == "payment_valid" and settings.get("require_payment") is not True)
-                                   and not (c == "member" and settings.get("require_membership") is not True)],
-                            multi=True,
-                            clearable=False,
-                            style={"backgroundColor": COLORS["bg_dark"]},
-                        ),
-                    ]),
-
-                    # Advanced (collapsible)
-                    html.Div(style=STYLES["card"], children=[
-                        html.Details(open=False, children=[
-                            html.Summary(
-                                "Advanced",
-                                style={
-                                    "cursor": "pointer",
-                                    "fontWeight": "700",
-                                    "color": COLORS["text_primary"],
-                                    "fontSize": "1rem",
-                                },
-                            ),
-                            html.Div(style={"marginTop": "1rem"}, children=[
-                                html.H3("Delete Archived Event", style={**STYLES["section_title"], "color": COLORS["accent_red"]}),
-                                html.P(
-                                    "Permanently delete this event from history (event_archive + event_stats)."
-                                    " Active check-ins are not touched.",
-                                    style={"color": COLORS["text_secondary"], "marginBottom": "0.75rem"},
-                                ),
-                                dcc.Dropdown(
-                                    id="delete-archive-event-dropdown",
-                                    className="fgc-dropdown",
-                                    options=[
-                                        {"label": s.replace("-", " ").title(), "value": s}
-                                        for s in archived_slugs
-                                    ],
-                                    placeholder="Select archived event to delete",
-                                    value=(archived_slugs[0] if archived_slugs else None),
-                                    clearable=False,
-                                    style={"marginBottom": "0.75rem"},
-                                ),
-                                dcc.Textarea(
-                                    id="input-delete-event-reason",
-                                    placeholder="Reason for deletion (required, shown in audit log)",
-                                    style={
-                                        "width": "100%",
-                                        "minHeight": "72px",
-                                        "padding": "0.6rem",
-                                        "borderRadius": "8px",
-                                        "border": f"1px solid {COLORS['border']}",
-                                        "backgroundColor": COLORS["bg_dark"],
-                                        "color": COLORS["text_primary"],
-                                    },
-                                ),
-                                html.Div(style={"marginTop": "0.75rem"}, children=[
-                                    html.Button(
-                                        "Delete Archived Event",
-                                        id="btn-delete-event-history",
-                                        n_clicks=0,
+                        ],
+                    ),
+                    # Tab content container
+                    html.Div(
+                        id="tabs-content",
+                        children=[
+                            # ========== TAB 1: Live Check-ins ==========
+                            html.Div(
+                                id="tab-checkins-content",
+                                children=[
+                                    # Event selector row
+                                    html.Div(
                                         style={
-                                            "backgroundColor": COLORS["accent_red"],
-                                            "color": "#fff",
-                                            "border": "none",
-                                            "borderRadius": "8px",
-                                            "padding": "0.6rem 1rem",
-                                            "fontSize": "0.875rem",
-                                            "fontWeight": "600",
-                                            "cursor": "pointer",
-                                        },
-                                    ),
-                                ]),
-                                html.Div(id="delete-event-feedback", style={"marginTop": "0.75rem"}),
-                                dcc.ConfirmDialog(
-                                    id="confirm-delete-event-dialog",
-                                    message="Are you sure you want to permanently delete this event from history?",
-                                ),
-                                html.Hr(style={"border": "none", "borderTop": f"1px solid {COLORS['border']}", "margin": "1.1rem 0"}),
-                                html.Details(open=False, children=[
-                                    html.Summary(
-                                        "Audit Log",
-                                        style={
-                                            "cursor": "pointer",
-                                            "fontWeight": "700",
-                                            "color": COLORS["text_primary"],
-                                            "fontSize": "0.95rem",
-                                        },
-                                    ),
-                                    html.Div(style={"marginTop": "0.9rem"}, children=[
-                                        html.P(
-                                            "Track all administrative actions performed in the system.",
-                                            style={
-                                                "color": COLORS["text_secondary"],
-                                                "marginBottom": "0.85rem",
-                                                "fontSize": "0.86rem",
-                                                "lineHeight": "1.45",
-                                            },
-                                        ),
-                                        html.Div(style={
                                             "display": "flex",
-                                            "gap": "0.85rem",
-                                            "marginBottom": "1.1rem",
+                                            "gap": "1rem",
+                                            "marginBottom": "1.5rem",
                                             "flexWrap": "wrap",
                                             "alignItems": "flex-end",
-                                        }, children=[
-                                            html.Div(style={"minWidth": "180px", "flex": "1"}, children=[
-                                                html.Label("Action", style={
-                                                    "fontSize": "0.72rem",
-                                                    "color": COLORS["text_secondary"],
-                                                    "marginBottom": "0.45rem",
-                                                    "letterSpacing": "0.04em",
-                                                    "textTransform": "uppercase",
-                                                    "display": "block",
-                                                }),
-                                                dcc.Dropdown(
-                                                    id="audit-filter-action",
-                                                    className="fgc-dropdown",
-                                                    options=[],
-                                                    value=None,
-                                                    placeholder="All actions",
-                                                    clearable=True,
-                                                    style={"backgroundColor": COLORS["bg_dark"]},
-                                                ),
-                                            ]),
-                                            html.Div(style={"minWidth": "180px", "flex": "1"}, children=[
-                                                html.Label("User", style={
-                                                    "fontSize": "0.72rem",
-                                                    "color": COLORS["text_secondary"],
-                                                    "marginBottom": "0.45rem",
-                                                    "letterSpacing": "0.04em",
-                                                    "textTransform": "uppercase",
-                                                    "display": "block",
-                                                }),
-                                                dcc.Dropdown(
-                                                    id="audit-filter-user",
-                                                    className="fgc-dropdown",
-                                                    options=[],
-                                                    value=None,
-                                                    placeholder="All users",
-                                                    clearable=True,
-                                                    style={"backgroundColor": COLORS["bg_dark"]},
-                                                ),
-                                            ]),
+                                        },
+                                        children=[
+                                            html.Div(
+                                                style={"flex": "1", "minWidth": "250px"},
+                                                children=[
+                                                    html.Label(
+                                                        "Current Event",
+                                                        style={
+                                                            "fontSize": "0.75rem",
+                                                            "color": COLORS["text_secondary"],
+                                                            "marginBottom": "0.5rem",
+                                                            "display": "block",
+                                                        },
+                                                    ),
+                                                    dcc.Dropdown(
+                                                        id="event-dropdown",
+                                                        className="fgc-dropdown",
+                                                        options=[
+                                                            {
+                                                                "label": "🔍 All Events (Debug)",
+                                                                "value": "__ALL__",
+                                                            },
+                                                        ]
+                                                        + [
+                                                            # Use event_display_name for active slug (has proper åäö), fallback to slug title
+                                                            {
+                                                                "label": (
+                                                                    event_display_name
+                                                                    if s == active_slug
+                                                                    and event_display_name
+                                                                    else s.replace("-", " ").title()
+                                                                ),
+                                                                "value": s,
+                                                            }
+                                                            for s in event_slugs
+                                                        ],
+                                                        value=(
+                                                            active_slug
+                                                            if active_slug in event_slugs
+                                                            else (
+                                                                event_slugs[0]
+                                                                if event_slugs
+                                                                else None
+                                                            )
+                                                        ),
+                                                        clearable=False,
+                                                        style={
+                                                            "backgroundColor": COLORS["bg_dark"]
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
                                             html.Button(
                                                 "Refresh",
-                                                id="btn-audit-refresh",
+                                                id="btn-refresh",
                                                 n_clicks=0,
-                                                style={**STYLES["button_secondary"], "height": "40px", "padding": "0 1rem"},
-                                            ),
-                                        ]),
-                                        dcc.Loading(
-                                            type="circle",
-                                            color=COLORS["accent_blue"],
-                                            children=dash_table.DataTable(
-                                                id="audit-log-table",
-                                                columns=[
-                                                    {"name": "Time", "id": "timestamp"},
-                                                    {"name": "User", "id": "user_name"},
-                                                    {"name": "Category", "id": "action_category"},
-                                                    {"name": "Action", "id": "action"},
-                                                    {"name": "Table", "id": "target_table"},
-                                                    {"name": "Event", "id": "target_event"},
-                                                    {"name": "Player", "id": "target_player"},
-                                                    {"name": "Reason", "id": "reason"},
-                                                ],
-                                                data=[],
-                                                page_size=25,
-                                                sort_action="native",
-                                                style_table={
-                                                    "overflowX": "auto",
-                                                    "border": f"1px solid {COLORS['border']}",
-                                                    "borderRadius": "10px",
+                                                style={
+                                                    **STYLES["button_secondary"],
+                                                    "height": "38px",
                                                 },
-                                                style_header={
-                                                    "backgroundColor": COLORS["bg_dark"],
+                                            ),
+                                            html.Button(
+                                                "Archive Event",
+                                                id="btn-archive-event-quick",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_primary"],
+                                                    "height": "38px",
+                                                    "backgroundColor": COLORS["accent_yellow"],
+                                                    "color": "#111827",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    # Active requirements indicator
+                                    html.Div(
+                                        id="requirements-indicator",
+                                        style={
+                                            "display": "flex",
+                                            "alignItems": "center",
+                                            "gap": "0.75rem",
+                                            "marginBottom": "1rem",
+                                            "padding": "0.5rem 0.75rem",
+                                            "backgroundColor": COLORS["bg_card"],
+                                            "borderRadius": "8px",
+                                            "border": f"1px solid {COLORS['border']}",
+                                            "fontSize": "0.75rem",
+                                        },
+                                        children=[
+                                            html.Span(
+                                                "Active Requirements:",
+                                                style={
+                                                    "color": COLORS["text_muted"],
+                                                    "fontWeight": "500",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="requirement-badges",
+                                                style={
+                                                    "display": "flex",
+                                                    "gap": "0.5rem",
+                                                    "flexWrap": "wrap",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    # Stats cards (clickable as filters)
+                                    html.Div(
+                                        id="stats-cards",
+                                        style={
+                                            "display": "flex",
+                                            "gap": "1rem",
+                                            "marginBottom": "1.5rem",
+                                            "flexWrap": "wrap",
+                                        },
+                                        children=[
+                                            html.Div(
+                                                id="filter-all",
+                                                n_clicks=0,
+                                                className="stat-card-live",
+                                                style={
+                                                    **STYLES["stat_card"],
+                                                    "borderTop": f"3px solid {COLORS['accent_blue']}",
+                                                    "cursor": "pointer",
+                                                    "transition": "all 0.2s",
+                                                },
+                                                children=[
+                                                    html.P(
+                                                        str(len(data)),
+                                                        id="stat-total",
+                                                        style={
+                                                            **STYLES["stat_value"],
+                                                            "color": COLORS["accent_blue"],
+                                                        },
+                                                    ),
+                                                    html.P("Total", style=STYLES["stat_label"]),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="filter-ready",
+                                                n_clicks=0,
+                                                className="stat-card-live",
+                                                style={
+                                                    **STYLES["stat_card"],
+                                                    "borderTop": f"3px solid {COLORS['accent_green']}",
+                                                    "cursor": "pointer",
+                                                    "transition": "all 0.2s",
+                                                },
+                                                children=[
+                                                    html.P(
+                                                        str(
+                                                            len(
+                                                                [
+                                                                    d
+                                                                    for d in data
+                                                                    if d.get("status") == "Ready"
+                                                                ]
+                                                            )
+                                                        ),
+                                                        id="stat-ready",
+                                                        style={
+                                                            **STYLES["stat_value"],
+                                                            "color": COLORS["accent_green"],
+                                                        },
+                                                    ),
+                                                    html.P("Ready", style=STYLES["stat_label"]),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="filter-pending",
+                                                n_clicks=0,
+                                                className="stat-card-live",
+                                                style={
+                                                    **STYLES["stat_card"],
+                                                    "borderTop": f"3px solid {COLORS['accent_yellow']}",
+                                                    "cursor": "pointer",
+                                                    "transition": "all 0.2s",
+                                                },
+                                                children=[
+                                                    html.P(
+                                                        str(
+                                                            len(
+                                                                [
+                                                                    d
+                                                                    for d in data
+                                                                    if d.get("status") == "Pending"
+                                                                ]
+                                                            )
+                                                        ),
+                                                        id="stat-pending",
+                                                        style={
+                                                            **STYLES["stat_value"],
+                                                            "color": COLORS["accent_yellow"],
+                                                        },
+                                                    ),
+                                                    html.P("Pending", style=STYLES["stat_label"]),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="filter-no-payment",
+                                                n_clicks=0,
+                                                className="stat-card-live",
+                                                style={
+                                                    **STYLES["stat_card"],
+                                                    "borderTop": f"3px solid {COLORS['accent_red']}",
+                                                    "cursor": "pointer",
+                                                    "transition": "all 0.2s",
+                                                },
+                                                children=[
+                                                    html.P(
+                                                        "0",
+                                                        id="stat-attention",
+                                                        style={
+                                                            **STYLES["stat_value"],
+                                                            "color": COLORS["accent_red"],
+                                                        },
+                                                    ),
+                                                    html.P(
+                                                        "No Payment", style=STYLES["stat_label"]
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                    # Needs attention section (collapsible)
+                                    html.Div(
+                                        id="needs-attention-section",
+                                        style={
+                                            **STYLES["card"],
+                                            "borderLeft": f"4px solid {COLORS['accent_red']}",
+                                            "display": "none",  # Hidden by default, shown by callback when needed
+                                        },
+                                        children=[
+                                            # Header with toggle
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "justifyContent": "space-between",
+                                                    "alignItems": "center",
+                                                    "cursor": "pointer",
+                                                },
+                                                id="needs-attention-header",
+                                                n_clicks=0,
+                                                children=[
+                                                    html.H3(
+                                                        "🚨 Needs Attention",
+                                                        style={
+                                                            **STYLES["section_title"],
+                                                            "color": COLORS["accent_red"],
+                                                            "margin": "0",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "alignItems": "center",
+                                                            "gap": "0.5rem",
+                                                        },
+                                                        children=[
+                                                            html.Span(
+                                                                id="needs-attention-count",
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "accent_red"
+                                                                    ],
+                                                                    "color": "#fff",
+                                                                    "padding": "0.25rem 0.6rem",
+                                                                    "borderRadius": "12px",
+                                                                    "fontSize": "0.8rem",
+                                                                    "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                            html.Span(
+                                                                "▼",
+                                                                id="needs-attention-chevron",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.8rem",
+                                                                    "transition": "transform 0.2s",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            # Collapsible content
+                                            html.Div(
+                                                id="needs-attention-list",
+                                                children=[
+                                                    html.P(
+                                                        "No issues",
+                                                        style={
+                                                            "color": COLORS["text_muted"],
+                                                            "margin": "0",
+                                                        },
+                                                    )
+                                                ],
+                                                style={"marginTop": "1rem"},
+                                            ),
+                                        ],
+                                    ),
+                                    # Main checkins table
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            # Header row with title and player count
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "justifyContent": "space-between",
+                                                    "alignItems": "center",
+                                                    "marginBottom": "1rem",
+                                                    "gap": "0.8rem",
+                                                    "flexWrap": "wrap",
+                                                },
+                                                children=[
+                                                    html.H3(
+                                                        "Player List",
+                                                        style={
+                                                            **STYLES["section_title"],
+                                                            "margin": "0",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "gap": "0.7rem",
+                                                            "alignItems": "center",
+                                                            "flexWrap": "wrap",
+                                                        },
+                                                        children=[
+                                                            html.Span(
+                                                                id="active-event-coverage",
+                                                                children="",
+                                                                style={
+                                                                    "color": COLORS["accent_blue"],
+                                                                    "fontSize": "0.82rem",
+                                                                    "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                            html.Span(
+                                                                id="player-count",
+                                                                children=f"{len(data)} players",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.875rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="duplicate-warning",
+                                                style={
+                                                    "marginBottom": "0.75rem",
+                                                    "display": "none",
+                                                },
+                                                children=[
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "gap": "0.6rem",
+                                                        },
+                                                        children=[
+                                                            html.Span(
+                                                                id="duplicate-warning-text",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": "#f59e0b",
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Dismiss",
+                                                                id="duplicate-warning-dismiss",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    "backgroundColor": "transparent",
+                                                                    "border": "1px solid rgba(245, 158, 11, 0.45)",
+                                                                    "color": "#fbbf24",
+                                                                    "borderRadius": "6px",
+                                                                    "padding": "0.2rem 0.55rem",
+                                                                    "fontSize": "0.75rem",
+                                                                    "cursor": "pointer",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Ul(
+                                                        id="duplicate-warning-list",
+                                                        style={
+                                                            "margin": "0.35rem 0 0 1rem",
+                                                            "color": "#fbbf24",
+                                                            "fontSize": "0.82rem",
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            # Search and game filter row
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "gap": "1rem",
+                                                    "marginBottom": "1rem",
+                                                    "flexWrap": "wrap",
+                                                    "alignItems": "center",
+                                                },
+                                                children=[
+                                                    # Search field
+                                                    dcc.Input(
+                                                        id="search-input",
+                                                        type="text",
+                                                        placeholder="Search name or tag...",
+                                                        style={
+                                                            **STYLES["input"],
+                                                            "maxWidth": "250px",
+                                                            "flex": "1",
+                                                        },
+                                                        debounce=True,
+                                                    ),
+                                                    # Game filter dropdown
+                                                    html.Div(
+                                                        style={"minWidth": "140px"},
+                                                        children=[
+                                                            dcc.Dropdown(
+                                                                id="game-filter",
+                                                                className="fgc-dropdown",
+                                                                options=[],  # Populated dynamically
+                                                                value=None,
+                                                                placeholder="All games",
+                                                                clearable=True,
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ],
+                                                                    "minWidth": "140px",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            dcc.Loading(
+                                                type="circle",
+                                                color=COLORS["accent_blue"],
+                                                children=dash_table.DataTable(
+                                                    id="checkins-table",
+                                                    columns=columns,
+                                                    data=data,
+                                                    editable=False,
+                                                    page_size=20,
+                                                    sort_action="native",
+                                                    row_selectable="multi",
+                                                    style_table={"overflowX": "auto"},
+                                                    style_header={
+                                                        "backgroundColor": COLORS["bg_dark"],
+                                                        "color": COLORS["text_primary"],
+                                                        "fontWeight": "600",
+                                                        "fontSize": "0.75rem",
+                                                        "textTransform": "uppercase",
+                                                        "letterSpacing": "0.05em",
+                                                        "padding": "1rem",
+                                                        "borderBottom": f"2px solid {COLORS['accent_blue']}",
+                                                    },
+                                                    style_cell={
+                                                        "backgroundColor": COLORS["bg_card"],
+                                                        "color": COLORS["text_primary"],
+                                                        "border": "none",
+                                                        "borderBottom": f"1px solid {COLORS['border']}",
+                                                        "padding": "1rem",
+                                                        "fontSize": "0.875rem",
+                                                        "textAlign": "left",
+                                                    },
+                                                    style_data_conditional=[
+                                                        # Ready status - green row highlight
+                                                        {
+                                                            "if": {
+                                                                "filter_query": "{status} = 'Ready'"
+                                                            },
+                                                            "backgroundColor": "rgba(16, 185, 129, 0.1)",
+                                                            "borderLeft": f"3px solid {COLORS['accent_green']}",
+                                                        },
+                                                        # Pending status - yellow row highlight
+                                                        {
+                                                            "if": {
+                                                                "filter_query": "{status} = 'Pending'"
+                                                            },
+                                                            "backgroundColor": "rgba(245, 158, 11, 0.1)",
+                                                            "borderLeft": f"3px solid {COLORS['accent_yellow']}",
+                                                        },
+                                                        # Icon cells: ✓ = green (clickable columns have cursor pointer)
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{member} = "✓"',
+                                                                "column_id": "member",
+                                                            },
+                                                            "color": COLORS["accent_green"],
+                                                            "fontWeight": "600",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{startgg} = "✓"',
+                                                                "column_id": "startgg",
+                                                            },
+                                                            "color": COLORS["accent_green"],
+                                                            "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{is_guest} = "✓"',
+                                                                "column_id": "is_guest",
+                                                            },
+                                                            "color": COLORS["accent_blue"],
+                                                            "fontWeight": "600",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{payment_valid} = "✓"',
+                                                                "column_id": "payment_valid",
+                                                            },
+                                                            "color": COLORS["accent_green"],
+                                                            "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
+                                                        },
+                                                        # Icon cells: ✗ = red (clickable columns have cursor pointer)
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{member} = "✗"',
+                                                                "column_id": "member",
+                                                            },
+                                                            "color": COLORS["accent_red"],
+                                                            "fontWeight": "600",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{startgg} = "✗"',
+                                                                "column_id": "startgg",
+                                                            },
+                                                            "color": COLORS["accent_red"],
+                                                            "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{is_guest} = "✗"',
+                                                                "column_id": "is_guest",
+                                                            },
+                                                            "color": COLORS["text_muted"],
+                                                            "fontWeight": "600",
+                                                        },
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{payment_valid} = "✗"',
+                                                                "column_id": "payment_valid",
+                                                            },
+                                                            "color": COLORS["accent_red"],
+                                                            "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
+                                                        },
+                                                        # Hover/active effect - keep text readable
+                                                        {
+                                                            "if": {"state": "active"},
+                                                            "backgroundColor": "#1e293b",
+                                                            "color": "#ffffff",
+                                                        },
+                                                        {
+                                                            "if": {"state": "selected"},
+                                                            "backgroundColor": "#1e293b",
+                                                            "color": "#ffffff",
+                                                        },
+                                                        # Row striping
+                                                        {
+                                                            "if": {"row_index": "odd"},
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                        },
+                                                    ],
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                    # Action buttons row
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "gap": "1rem",
+                                            "marginTop": "1rem",
+                                            "alignItems": "center",
+                                            "flexWrap": "wrap",
+                                        },
+                                        children=[
+                                            html.Button(
+                                                "Delete Selected",
+                                                id="btn-delete-selected",
+                                                n_clicks=0,
+                                                style={
+                                                    "backgroundColor": COLORS["accent_red"],
+                                                    "color": "#fff",
+                                                    "border": "none",
+                                                    "borderRadius": "8px",
+                                                    "padding": "0.5rem 1rem",
+                                                    "fontSize": "0.875rem",
+                                                    "fontWeight": "600",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Export Guests (CSV)",
+                                                id="btn-export-guests",
+                                                n_clicks=0,
+                                                style={
+                                                    "backgroundColor": COLORS["accent_blue"],
+                                                    "color": "#fff",
+                                                    "border": "none",
+                                                    "borderRadius": "8px",
+                                                    "padding": "0.5rem 1rem",
+                                                    "fontSize": "0.875rem",
+                                                    "fontWeight": "600",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                            html.Span(
+                                                "Click row to select • Click Payment/Start.gg/Member to toggle • Edit Name/Tag/Phone/Games inline",
+                                                style={
+                                                    "color": COLORS["text_muted"],
+                                                    "fontSize": "0.75rem",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        style={"marginTop": "0.75rem"},
+                                        children=[
+                                            html.Button(
+                                                "Manual Tools ▾",
+                                                id="btn-toggle-manual-checkin",
+                                                n_clicks=0,
+                                                style={
+                                                    "backgroundColor": "transparent",
+                                                    "color": COLORS["text_secondary"],
+                                                    "border": f"1px solid {COLORS['border']}",
+                                                    "borderRadius": "8px",
+                                                    "padding": "0.4rem 0.75rem",
+                                                    "fontSize": "0.78rem",
+                                                    "fontWeight": "600",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="manual-checkin-panel",
+                                                style={"display": "none", "marginTop": "0.6rem"},
+                                                children=[
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "gap": "0.6rem",
+                                                            "flexWrap": "wrap",
+                                                            "alignItems": "center",
+                                                        },
+                                                        children=[
+                                                            dcc.Input(
+                                                                id="input-manual-name",
+                                                                type="text",
+                                                                placeholder="Manual check-in: Name",
+                                                                style={
+                                                                    **STYLES["input"],
+                                                                    "maxWidth": "230px",
+                                                                    "height": "40px",
+                                                                    "fontSize": "0.82rem",
+                                                                    "lineHeight": "1.2",
+                                                                },
+                                                            ),
+                                                            dcc.Input(
+                                                                id="input-manual-tag",
+                                                                type="text",
+                                                                placeholder="Tag (optional)",
+                                                                style={
+                                                                    **STYLES["input"],
+                                                                    "maxWidth": "180px",
+                                                                    "height": "40px",
+                                                                    "fontSize": "0.82rem",
+                                                                    "lineHeight": "1.2",
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Add Manual Check-in",
+                                                                id="btn-manual-checkin",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "accent_green"
+                                                                    ],
+                                                                    "color": "#fff",
+                                                                    "border": "none",
+                                                                    "borderRadius": "8px",
+                                                                    "padding": "0.5rem 0.9rem",
+                                                                    "fontSize": "0.8rem",
+                                                                    "fontWeight": "600",
+                                                                    "cursor": "pointer",
+                                                                },
+                                                            ),
+                                                            html.Span(
+                                                                "Use for Start.gg players who missed the kiosk check-in.",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.75rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "gap": "0.6rem",
+                                            "flexWrap": "wrap",
+                                            "marginTop": "0.75rem",
+                                            "alignItems": "center",
+                                        },
+                                        children=[
+                                            html.Button(
+                                                "Re-check Start.gg",
+                                                id="btn-recheck-startgg",
+                                                n_clicks=0,
+                                                style={
+                                                    "backgroundColor": "#a78bfa",
+                                                    "color": "#fff",
+                                                    "border": "none",
+                                                    "borderRadius": "8px",
+                                                    "padding": "0.5rem 0.9rem",
+                                                    "fontSize": "0.8rem",
+                                                    "fontWeight": "600",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                            html.Span(
+                                                "Select a player row first. Re-validates Start.gg registration and syncs games.",
+                                                style={
+                                                    "color": COLORS["text_muted"],
+                                                    "fontSize": "0.75rem",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="recheck-startgg-feedback", style={"marginTop": "0.5rem"}
+                                    ),
+                                    # Feedback messages
+                                    html.Div(
+                                        id="payment-update-feedback", style={"marginTop": "0.5rem"}
+                                    ),
+                                    html.Div(
+                                        id="manual-checkin-feedback", style={"marginTop": "0.5rem"}
+                                    ),
+                                    html.Div(id="delete-feedback", style={"marginTop": "0.5rem"}),
+                                    html.Div(id="export-feedback", style={"marginTop": "0.5rem"}),
+                                    # Download component for CSV export
+                                    dcc.Download(id="download-guests-csv"),
+                                    # Confirmation dialog for delete
+                                    dcc.ConfirmDialog(
+                                        id="confirm-delete-dialog",
+                                        message="Are you sure you want to delete this player?",
+                                    ),
+                                ],
+                            ),
+                            # ========== TAB 2: Insights ==========
+                            html.Div(
+                                id="tab-insights-content",
+                                style={"display": "none"},
+                                children=[
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.Div(
+                                                id="insights-summary-title",
+                                                style={
                                                     "color": COLORS["text_primary"],
                                                     "fontWeight": "600",
-                                                    "fontSize": "0.72rem",
-                                                    "textTransform": "uppercase",
-                                                    "letterSpacing": "0.05em",
-                                                    "padding": "0.85rem 0.95rem",
-                                                    "borderBottom": f"2px solid {COLORS['accent_purple']}",
+                                                    "marginBottom": "0.45rem",
                                                 },
-                                                style_cell={
-                                                    "backgroundColor": COLORS["bg_card"],
-                                                    "color": COLORS["text_primary"],
-                                                    "border": "none",
-                                                    "borderBottom": f"1px solid {COLORS['border']}",
-                                                    "padding": "0.62rem 0.9rem",
-                                                    "fontSize": "0.8rem",
-                                                    "lineHeight": "1.35",
-                                                    "textAlign": "left",
-                                                    "maxWidth": "200px",
-                                                    "overflow": "hidden",
-                                                    "textOverflow": "ellipsis",
-                                                },
-                                                style_cell_conditional=[
-                                                    {
-                                                        "if": {"column_id": "action_category"},
-                                                        "width": "120px",
-                                                        "minWidth": "120px",
-                                                        "maxWidth": "120px",
-                                                    },
-                                                    {
-                                                        "if": {"column_id": "action"},
-                                                        "width": "260px",
-                                                        "minWidth": "220px",
-                                                        "maxWidth": "320px",
-                                                    },
-                                                ],
-                                                style_data_conditional=[
-                                                    {"if": {"row_index": "odd"}, "backgroundColor": COLORS["bg_dark"]},
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Auth'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": "#93c5fd",
-                                                        "fontWeight": "700",
-                                                    },
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Settings'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": "#86efac",
-                                                        "fontWeight": "700",
-                                                    },
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Check-ins'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": "#fcd34d",
-                                                        "fontWeight": "700",
-                                                    },
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Archive'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": "#f9a8d4",
-                                                        "fontWeight": "700",
-                                                    },
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Integrations'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": "#67e8f9",
-                                                        "fontWeight": "700",
-                                                    },
-                                                    {
-                                                        "if": {
-                                                            "filter_query": "{action_category} = 'Other'",
-                                                            "column_id": "action_category",
-                                                        },
-                                                        "color": COLORS["text_secondary"],
-                                                        "fontWeight": "600",
-                                                    },
-                                                ],
-                                                tooltip_data=[],
-                                                tooltip_duration=None,
                                             ),
-                                        ),
-                                        html.Div(
-                                            id="audit-log-count",
-                                            style={
-                                                "color": COLORS["text_muted"],
-                                                "fontSize": "0.72rem",
-                                                "marginTop": "0.75rem",
-                                                "letterSpacing": "0.03em",
-                                            },
-                                            children="0 entries",
-                                        ),
-                                    ]),
-                                ]),
-                            ]),
-                        ]),
-                    ]),
-                ]),
-            ]),
-        ]),
-
-        # Footer
-        html.Footer(style={
-            "textAlign": "center",
-            "padding": "2rem",
-            "color": COLORS["text_muted"],
-            "fontSize": "0.75rem",
-            "borderTop": f"1px solid {COLORS['border']}",
-            "marginTop": "2rem",
-        }, children=[
-            html.P([
-                "Powered by ",
-                html.Strong("IMLO"),
-            ], style={"margin": "0"}),
-        ]),
-    ])
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "gap": "1rem",
+                                                    "flexWrap": "wrap",
+                                                    "alignItems": "flex-end",
+                                                    "marginBottom": "1rem",
+                                                },
+                                                children=[
+                                                    html.Div(
+                                                        style={"flex": "1", "minWidth": "300px"},
+                                                        children=[
+                                                            html.Label(
+                                                                "Archived Events",
+                                                                style={
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "marginBottom": "0.5rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Dropdown(
+                                                                id="insights-event-dropdown",
+                                                                className="fgc-dropdown",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                clearable=True,
+                                                                placeholder="Select events (empty = all)",
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ]
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "190px"},
+                                                        children=[
+                                                            html.Label(
+                                                                "Period",
+                                                                style={
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "marginBottom": "0.5rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Dropdown(
+                                                                id="insights-period-dropdown",
+                                                                className="fgc-dropdown",
+                                                                clearable=False,
+                                                                value="month",
+                                                                options=[
+                                                                    {
+                                                                        "label": "Last 24h",
+                                                                        "value": "day",
+                                                                    },
+                                                                    {
+                                                                        "label": "Last 7 days",
+                                                                        "value": "week",
+                                                                    },
+                                                                    {
+                                                                        "label": "Last 30 days",
+                                                                        "value": "month",
+                                                                    },
+                                                                    {
+                                                                        "label": "Last 90 days",
+                                                                        "value": "quarter",
+                                                                    },
+                                                                    {
+                                                                        "label": "Last 365 days",
+                                                                        "value": "year",
+                                                                    },
+                                                                    {
+                                                                        "label": "Custom range",
+                                                                        "value": "custom",
+                                                                    },
+                                                                    {
+                                                                        "label": "All time",
+                                                                        "value": "all",
+                                                                    },
+                                                                ],
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ]
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "240px"},
+                                                        children=[
+                                                            html.Label(
+                                                                "Series",
+                                                                style={
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "marginBottom": "0.5rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Dropdown(
+                                                                id="insights-series-dropdown",
+                                                                className="fgc-dropdown",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                clearable=True,
+                                                                placeholder="Filter by series (optional)",
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ]
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-custom-range-wrap",
+                                                        style={
+                                                            "display": "none",
+                                                            "minWidth": "320px",
+                                                        },
+                                                        children=[
+                                                            html.Label(
+                                                                "Custom Date Range",
+                                                                style={
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "marginBottom": "0.5rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.DatePickerRange(
+                                                                id="insights-date-range",
+                                                                minimum_nights=0,
+                                                                updatemode="bothdates",
+                                                                display_format="YYYY-MM-DD",
+                                                                style={
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ]
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Button(
+                                                        "Refresh",
+                                                        id="btn-insights-refresh",
+                                                        n_clicks=0,
+                                                        style={
+                                                            **STYLES["button_secondary"],
+                                                            "height": "38px",
+                                                        },
+                                                    ),
+                                                    html.Button(
+                                                        "Export CSV",
+                                                        id="btn-insights-export-csv",
+                                                        n_clicks=0,
+                                                        style={
+                                                            **STYLES["button_secondary"],
+                                                            "height": "38px",
+                                                        },
+                                                    ),
+                                                    dcc.Download(id="insights-download"),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-empty-hint",
+                                                style={
+                                                    "color": COLORS["text_muted"],
+                                                    "fontSize": "0.82rem",
+                                                    "marginBottom": "0.75rem",
+                                                },
+                                            ),
+                                            dcc.Tabs(
+                                                id="insights-subtabs",
+                                                value="players",
+                                                style={"marginBottom": "0.9rem"},
+                                                children=[
+                                                    dcc.Tab(
+                                                        label="Players",
+                                                        value="players",
+                                                        className="insights-subtab",
+                                                        selected_className="insights-subtab--selected",
+                                                    ),
+                                                    dcc.Tab(
+                                                        label="Games",
+                                                        value="games",
+                                                        className="insights-subtab",
+                                                        selected_className="insights-subtab--selected",
+                                                    ),
+                                                    dcc.Tab(
+                                                        label="Events",
+                                                        value="events",
+                                                        className="insights-subtab",
+                                                        selected_className="insights-subtab--selected",
+                                                    ),
+                                                    dcc.Tab(
+                                                        label="Earnings",
+                                                        value="earnings",
+                                                        className="insights-subtab",
+                                                        selected_className="insights-subtab--selected",
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-kpi-grid",
+                                                style={"gap": "0.75rem", "marginBottom": "0.65rem"},
+                                                children=[
+                                                    html.Div(
+                                                        id="insights-card-total",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid #22d3ee",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0",
+                                                                id="insights-kpi-total",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#22d3ee",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Participants",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-total-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-ready",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid {COLORS['accent_green']}",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0%",
+                                                                id="insights-kpi-readyrate",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": COLORS["accent_green"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Ready Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-readyrate-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-member",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid {COLORS['accent_purple']}",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0%",
+                                                                id="insights-kpi-memberrate",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": COLORS[
+                                                                        "accent_purple"
+                                                                    ],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Member Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-memberrate-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-guest",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #2dd4bf",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0%",
+                                                                id="insights-kpi-guestrate",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#2dd4bf",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Guest Share",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-guestrate-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-startgg",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid {COLORS['accent_yellow']}",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0%",
+                                                                id="insights-kpi-startggrate",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": COLORS[
+                                                                        "accent_yellow"
+                                                                    ],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Start.gg Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-startggrate-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-retention",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid {COLORS['accent_red']}",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0%",
+                                                                id="insights-kpi-retention",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": COLORS["accent_red"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Retention",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-retention-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-revenue",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #818cf8",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0 kr",
+                                                                id="insights-kpi-revenue",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.6rem",
+                                                                    "color": "#818cf8",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Total Revenue",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-revenue-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-kpi-help",
+                                                style={
+                                                    "color": COLORS["text_muted"],
+                                                    "fontSize": "0.78rem",
+                                                    "marginBottom": "0.9rem",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="insights-view-players",
+                                                children=[
+                                                    html.Div(
+                                                        id="insights-top-players-title",
+                                                        style={
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "marginBottom": "0.6rem",
+                                                        },
+                                                    ),
+                                                    dash_table.DataTable(
+                                                        id="insights-top-players-table",
+                                                        columns=[
+                                                            {"name": "#", "id": "rank"},
+                                                            {"name": "Name", "id": "name"},
+                                                            {"name": "Tag", "id": "tag"},
+                                                            {
+                                                                "name": "Events",
+                                                                "id": "events_attended",
+                                                            },
+                                                        ],
+                                                        data=[],
+                                                        page_size=8,
+                                                        sort_action="native",
+                                                        style_table={
+                                                            "overflowX": "auto",
+                                                            "marginBottom": "1rem",
+                                                        },
+                                                        style_header={
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.72rem",
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "padding": "0.7rem",
+                                                            "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                                        },
+                                                        style_cell={
+                                                            "backgroundColor": COLORS["bg_card"],
+                                                            "color": COLORS["text_primary"],
+                                                            "border": "none",
+                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                            "padding": "0.62rem 0.8rem",
+                                                            "fontSize": "0.78rem",
+                                                            "textAlign": "left",
+                                                        },
+                                                        style_data_conditional=[
+                                                            {
+                                                                "if": {"row_index": "odd"},
+                                                                "backgroundColor": COLORS[
+                                                                    "bg_dark"
+                                                                ],
+                                                            },
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-view-games",
+                                                children=[
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "gap": "0.75rem",
+                                                            "marginBottom": "0.6rem",
+                                                        },
+                                                        children=[
+                                                            html.Div(
+                                                                id="insights-games-title",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                id="insights-top-game",
+                                                                style={
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "fontSize": "0.78rem",
+                                                                    "padding": "0.25rem 0.55rem",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "borderRadius": "999px",
+                                                                    "whiteSpace": "nowrap",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    dash_table.DataTable(
+                                                        id="insights-games-table",
+                                                        columns=[
+                                                            {"name": "#", "id": "rank"},
+                                                            {"name": "Game", "id": "game"},
+                                                            {"name": "Entries", "id": "entries"},
+                                                            {"name": "Share", "id": "share"},
+                                                        ],
+                                                        data=[],
+                                                        page_size=8,
+                                                        sort_action="native",
+                                                        style_table={
+                                                            "overflowX": "auto",
+                                                            "marginBottom": "1rem",
+                                                        },
+                                                        style_header={
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.72rem",
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "padding": "0.7rem",
+                                                            "borderBottom": f"2px solid {COLORS['accent_yellow']}",
+                                                        },
+                                                        style_cell={
+                                                            "backgroundColor": COLORS["bg_card"],
+                                                            "color": COLORS["text_primary"],
+                                                            "border": "none",
+                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                            "padding": "0.62rem 0.8rem",
+                                                            "fontSize": "0.78rem",
+                                                            "textAlign": "left",
+                                                        },
+                                                        style_data_conditional=[
+                                                            {
+                                                                "if": {"row_index": "odd"},
+                                                                "backgroundColor": COLORS[
+                                                                    "bg_dark"
+                                                                ],
+                                                            },
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-view-events",
+                                                children=[
+                                                    dash_table.DataTable(
+                                                        id="insights-events-table",
+                                                        columns=[
+                                                            {
+                                                                "name": "Event",
+                                                                "id": "event_display_name",
+                                                            },
+                                                            {"name": "Slug", "id": "event_slug"},
+                                                            {"name": "Date", "id": "event_date"},
+                                                            {
+                                                                "name": "Participants",
+                                                                "id": "total_participants",
+                                                            },
+                                                            {
+                                                                "name": "Checked-in/Reg",
+                                                                "id": "checked_in_vs_registered",
+                                                            },
+                                                            {
+                                                                "name": "Revenue",
+                                                                "id": "total_revenue",
+                                                            },
+                                                            {
+                                                                "name": "Member %",
+                                                                "id": "member_rate",
+                                                            },
+                                                            {
+                                                                "name": "Start.gg %",
+                                                                "id": "startgg_rate",
+                                                            },
+                                                            {
+                                                                "name": "Retention %",
+                                                                "id": "retention_rate",
+                                                            },
+                                                            {
+                                                                "name": "No-shows",
+                                                                "id": "no_show_count",
+                                                            },
+                                                            {
+                                                                "name": "No-show %",
+                                                                "id": "no_show_rate",
+                                                            },
+                                                        ],
+                                                        data=[],
+                                                        page_size=10,
+                                                        sort_action="native",
+                                                        style_table={"overflowX": "auto"},
+                                                        style_header={
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.75rem",
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "padding": "0.75rem",
+                                                            "borderBottom": f"2px solid {COLORS['accent_blue']}",
+                                                        },
+                                                        style_cell={
+                                                            "backgroundColor": COLORS["bg_card"],
+                                                            "color": COLORS["text_primary"],
+                                                            "border": "none",
+                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                            "padding": "0.55rem 0.75rem",
+                                                            "fontSize": "0.8rem",
+                                                            "textAlign": "left",
+                                                            "maxWidth": "220px",
+                                                            "overflow": "hidden",
+                                                            "textOverflow": "ellipsis",
+                                                        },
+                                                        style_data_conditional=[
+                                                            {
+                                                                "if": {"row_index": "odd"},
+                                                                "backgroundColor": COLORS[
+                                                                    "bg_dark"
+                                                                ],
+                                                            },
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-view-earnings",
+                                                children=[
+                                                    dash_table.DataTable(
+                                                        id="insights-earnings-table",
+                                                        columns=[
+                                                            {
+                                                                "name": "Event",
+                                                                "id": "event_display_name",
+                                                            },
+                                                            {"name": "Date", "id": "event_date"},
+                                                            {
+                                                                "name": "Participants",
+                                                                "id": "total_participants",
+                                                            },
+                                                            {
+                                                                "name": "Revenue",
+                                                                "id": "total_revenue",
+                                                            },
+                                                            {
+                                                                "name": "SEK / Player",
+                                                                "id": "revenue_per_player",
+                                                            },
+                                                        ],
+                                                        data=[],
+                                                        page_size=10,
+                                                        sort_action="native",
+                                                        style_table={"overflowX": "auto"},
+                                                        style_header={
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.75rem",
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "padding": "0.75rem",
+                                                            "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                                        },
+                                                        style_cell={
+                                                            "backgroundColor": COLORS["bg_card"],
+                                                            "color": COLORS["text_primary"],
+                                                            "border": "none",
+                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                            "padding": "0.55rem 0.75rem",
+                                                            "fontSize": "0.8rem",
+                                                            "textAlign": "left",
+                                                        },
+                                                        style_data_conditional=[
+                                                            {
+                                                                "if": {"row_index": "odd"},
+                                                                "backgroundColor": COLORS[
+                                                                    "bg_dark"
+                                                                ],
+                                                            },
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            # ========== TAB 3: Settings ==========
+                            html.Div(
+                                id="tab-settings-content",
+                                style={"display": "none"},
+                                children=[
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3(
+                                                "Event Configuration", style=STYLES["section_title"]
+                                            ),
+                                            html.Div(
+                                                style={"marginBottom": "1.5rem"},
+                                                children=[
+                                                    html.Label(
+                                                        "Start.gg Tournament Link",
+                                                        style={
+                                                            "fontSize": "0.875rem",
+                                                            "color": COLORS["text_secondary"],
+                                                            "marginBottom": "0.5rem",
+                                                            "display": "block",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="input-startgg-link",
+                                                        type="text",
+                                                        placeholder="https://www.start.gg/tournament/your-tournament",
+                                                        style={
+                                                            **STYLES["input"],
+                                                            "minHeight": "44px",
+                                                            "lineHeight": "1.4",
+                                                            "boxSizing": "border-box",
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Button(
+                                                "Fetch Event Data",
+                                                id="btn-fetch-event",
+                                                n_clicks=0,
+                                                style=STYLES["button_primary"],
+                                            ),
+                                            html.Div(
+                                                id="settings-output",
+                                                style={
+                                                    "marginTop": "1rem",
+                                                    "padding": "1rem",
+                                                    "borderRadius": "8px",
+                                                    "backgroundColor": COLORS["bg_dark"],
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    # Check-in Requirements
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3(
+                                                "Check-in Requirements",
+                                                style=STYLES["section_title"],
+                                            ),
+                                            html.P(
+                                                "Choose which requirements players must meet to be marked as 'Ready'.",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            # Require Payment
+                                            html.Div(
+                                                style={
+                                                    "marginBottom": "1rem",
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "0.75rem",
+                                                },
+                                                children=[
+                                                    dcc.Checklist(
+                                                        id="require-payment-toggle",
+                                                        options=[{"label": "", "value": True}],
+                                                        value=(
+                                                            [True]
+                                                            if settings.get("require_payment")
+                                                            is True
+                                                            else []
+                                                        ),
+                                                        style={"display": "inline-block"},
+                                                        inputStyle={
+                                                            "width": "18px",
+                                                            "height": "18px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Span(
+                                                                "Require Payment",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Player must pay to be marked as Ready",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS["text_muted"],
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
+                                            # Require Membership
+                                            html.Div(
+                                                style={
+                                                    "marginBottom": "1rem",
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "0.75rem",
+                                                },
+                                                children=[
+                                                    dcc.Checklist(
+                                                        id="require-membership-toggle",
+                                                        options=[{"label": "", "value": True}],
+                                                        value=(
+                                                            [True]
+                                                            if settings.get("require_membership")
+                                                            is True
+                                                            else []
+                                                        ),
+                                                        style={"display": "inline-block"},
+                                                        inputStyle={
+                                                            "width": "18px",
+                                                            "height": "18px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Span(
+                                                                "Require Membership (eBas)",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Player must be a Sverok member",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS["text_muted"],
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
+                                            # Require Start.gg
+                                            html.Div(
+                                                style={
+                                                    "marginBottom": "1.5rem",
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "0.75rem",
+                                                },
+                                                children=[
+                                                    dcc.Checklist(
+                                                        id="require-startgg-toggle",
+                                                        options=[{"label": "", "value": True}],
+                                                        value=(
+                                                            [True]
+                                                            if settings.get("require_startgg")
+                                                            is True
+                                                            else []
+                                                        ),
+                                                        style={"display": "inline-block"},
+                                                        inputStyle={
+                                                            "width": "18px",
+                                                            "height": "18px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Span(
+                                                                "Require Start.gg Registration",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Player must be registered in the tournament",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS["text_muted"],
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Hr(
+                                                style={
+                                                    "border": "none",
+                                                    "borderTop": f"1px solid {COLORS['border']}",
+                                                    "margin": "1.5rem 0",
+                                                }
+                                            ),
+                                            # Offer Membership (optional)
+                                            html.Div(
+                                                style={
+                                                    "marginBottom": "1.5rem",
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "0.75rem",
+                                                },
+                                                children=[
+                                                    dcc.Checklist(
+                                                        id="offer-membership-toggle",
+                                                        options=[{"label": "", "value": True}],
+                                                        value=(
+                                                            [True]
+                                                            if settings.get("offer_membership")
+                                                            is True
+                                                            else []
+                                                        ),
+                                                        style={"display": "inline-block"},
+                                                        inputStyle={
+                                                            "width": "18px",
+                                                            "height": "18px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Span(
+                                                                "Offer Membership (optional)",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Show 'Become a member' on Ready page even when not required",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS["text_muted"],
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Button(
+                                                "Save Requirements",
+                                                id="btn-save-requirements",
+                                                n_clicks=0,
+                                                style=STYLES["button_primary"],
+                                            ),
+                                            html.Div(
+                                                id="requirements-save-feedback",
+                                                style={"marginTop": "1rem"},
+                                            ),
+                                        ],
+                                    ),
+                                    # Payment Settings
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3(
+                                                "Payment Settings", style=STYLES["section_title"]
+                                            ),
+                                            html.P(
+                                                "Configure Swish payment details for this event.",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            # Price per game
+                                            html.Div(
+                                                style={"marginBottom": "1rem"},
+                                                children=[
+                                                    html.Label(
+                                                        "Price per game (kr)",
+                                                        style={
+                                                            "fontWeight": "600",
+                                                            "color": COLORS["text_primary"],
+                                                            "marginBottom": "0.5rem",
+                                                            "display": "block",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="input-price-per-game",
+                                                        type="number",
+                                                        value=settings.get(
+                                                            "swish_expected_per_game", 25
+                                                        ),
+                                                        min=0,
+                                                        step=5,
+                                                        style={
+                                                            "width": "120px",
+                                                            "padding": "0.5rem",
+                                                            "borderRadius": "6px",
+                                                            "border": f"1px solid {COLORS['border']}",
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            # Swish number
+                                            html.Div(
+                                                style={"marginBottom": "1rem"},
+                                                children=[
+                                                    html.Label(
+                                                        "Swish number",
+                                                        style={
+                                                            "fontWeight": "600",
+                                                            "color": COLORS["text_primary"],
+                                                            "marginBottom": "0.5rem",
+                                                            "display": "block",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="input-swish-number",
+                                                        type="text",
+                                                        value=settings.get(
+                                                            "swish_number", "123-456 78 90"
+                                                        ),
+                                                        style={
+                                                            "width": "200px",
+                                                            "padding": "0.5rem",
+                                                            "borderRadius": "6px",
+                                                            "border": f"1px solid {COLORS['border']}",
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Button(
+                                                "Save Payment Settings",
+                                                id="btn-save-payment-settings",
+                                                n_clicks=0,
+                                                style=STYLES["button_primary"],
+                                            ),
+                                            html.Div(
+                                                id="payment-settings-feedback",
+                                                style={"marginTop": "1rem"},
+                                            ),
+                                        ],
+                                    ),
+                                    # Archive Event
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3("Event Archive", style=STYLES["section_title"]),
+                                            html.P(
+                                                "Archive current event data to historical tables (event_archive + event_stats).",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            dcc.Checklist(
+                                                id="archive-clear-active-toggle",
+                                                options=[
+                                                    {
+                                                        "label": " Clear active check-ins after archive",
+                                                        "value": "clear",
+                                                    }
+                                                ],
+                                                value=[],
+                                                style={
+                                                    "marginBottom": "1rem",
+                                                    "color": COLORS["text_secondary"],
+                                                },
+                                                inputStyle={"marginRight": "0.5rem"},
+                                            ),
+                                            html.Button(
+                                                "Archive Current Event",
+                                                id="btn-archive-event",
+                                                n_clicks=0,
+                                                style=STYLES["button_primary"],
+                                            ),
+                                            html.P(
+                                                "Tip: quick archive button is available next to Refresh in Live Check-ins.",
+                                                style={
+                                                    "marginTop": "0.75rem",
+                                                    "color": COLORS["text_muted"],
+                                                    "fontSize": "0.82rem",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="archive-feedback", style={"marginTop": "1rem"}
+                                            ),
+                                            html.Hr(
+                                                style={
+                                                    "border": "none",
+                                                    "borderTop": f"1px solid {COLORS['border']}",
+                                                    "margin": "1.25rem 0",
+                                                }
+                                            ),
+                                            html.H3("Reopen Event", style=STYLES["section_title"]),
+                                            html.P(
+                                                "Reopen archived event and optionally restore active check-ins from archive snapshot.",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            dcc.Checklist(
+                                                id="reopen-restore-active-toggle",
+                                                options=[
+                                                    {
+                                                        "label": " Restore active check-ins from archive",
+                                                        "value": "restore",
+                                                    }
+                                                ],
+                                                value=["restore"],
+                                                style={
+                                                    "marginBottom": "1rem",
+                                                    "color": COLORS["text_secondary"],
+                                                },
+                                                inputStyle={"marginRight": "0.5rem"},
+                                            ),
+                                            html.Button(
+                                                "Reopen Current Event",
+                                                id="btn-reopen-event",
+                                                n_clicks=0,
+                                                style=STYLES["button_secondary"],
+                                            ),
+                                            html.Div(
+                                                id="reopen-feedback", style={"marginTop": "1rem"}
+                                            ),
+                                        ],
+                                    ),
+                                    # Hidden elements to satisfy callback dependencies
+                                    html.Div(
+                                        style={"display": "none"},
+                                        children=[
+                                            dcc.Dropdown(
+                                                id="game-dropdown",
+                                                className="fgc-dropdown",
+                                                options=[],
+                                                value=None,
+                                            ),
+                                            html.Div(id="game-help"),
+                                        ],
+                                    ),
+                                    # Column visibility settings
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3("Table Columns", style=STYLES["section_title"]),
+                                            html.P(
+                                                "Choose which columns to display in the check-ins table.",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            dcc.Dropdown(
+                                                id="column-visibility-dropdown",
+                                                className="fgc-dropdown",
+                                                options=[
+                                                    opt
+                                                    for opt in [
+                                                        {"label": "Name", "value": "name"},
+                                                        {"label": "Tag", "value": "tag"},
+                                                        {"label": "Status", "value": "status"},
+                                                        (
+                                                            {
+                                                                "label": "Payment",
+                                                                "value": "payment_valid",
+                                                            }
+                                                            if settings.get("require_payment")
+                                                            is True
+                                                            else None
+                                                        ),
+                                                        {"label": "Phone", "value": "telephone"},
+                                                        (
+                                                            {"label": "Member", "value": "member"}
+                                                            if settings.get("require_membership")
+                                                            is True
+                                                            else None
+                                                        ),
+                                                        {"label": "Start.gg", "value": "startgg"},
+                                                        {"label": "Guest", "value": "is_guest"},
+                                                        {
+                                                            "label": "Games",
+                                                            "value": "tournament_games_registered",
+                                                        },
+                                                        {"label": "Email", "value": "email"},
+                                                        {"label": "UUID", "value": "UUID"},
+                                                        {"label": "Created", "value": "created"},
+                                                    ]
+                                                    if opt is not None
+                                                ],
+                                                value=[
+                                                    c
+                                                    for c in [
+                                                        "name",
+                                                        "tag",
+                                                        "status",
+                                                        "payment_valid",
+                                                        "telephone",
+                                                        "member",
+                                                        "startgg",
+                                                        "is_guest",
+                                                        "tournament_games_registered",
+                                                    ]
+                                                    if not (
+                                                        c == "payment_valid"
+                                                        and settings.get("require_payment")
+                                                        is not True
+                                                    )
+                                                    and not (
+                                                        c == "member"
+                                                        and settings.get("require_membership")
+                                                        is not True
+                                                    )
+                                                ],
+                                                multi=True,
+                                                clearable=False,
+                                                style={"backgroundColor": COLORS["bg_dark"]},
+                                            ),
+                                        ],
+                                    ),
+                                    # Advanced (collapsible)
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.Details(
+                                                open=False,
+                                                children=[
+                                                    html.Summary(
+                                                        "Advanced",
+                                                        style={
+                                                            "cursor": "pointer",
+                                                            "fontWeight": "700",
+                                                            "color": COLORS["text_primary"],
+                                                            "fontSize": "1rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        style={"marginTop": "1rem"},
+                                                        children=[
+                                                            html.H3(
+                                                                "Delete Archived Event",
+                                                                style={
+                                                                    **STYLES["section_title"],
+                                                                    "color": COLORS["accent_red"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Permanently delete this event from history (event_archive + event_stats)."
+                                                                " Active check-ins are not touched.",
+                                                                style={
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "marginBottom": "0.75rem",
+                                                                },
+                                                            ),
+                                                            dcc.Dropdown(
+                                                                id="delete-archive-event-dropdown",
+                                                                className="fgc-dropdown",
+                                                                options=[
+                                                                    {
+                                                                        "label": s.replace(
+                                                                            "-", " "
+                                                                        ).title(),
+                                                                        "value": s,
+                                                                    }
+                                                                    for s in archived_slugs
+                                                                ],
+                                                                placeholder="Select archived event to delete",
+                                                                value=(
+                                                                    archived_slugs[0]
+                                                                    if archived_slugs
+                                                                    else None
+                                                                ),
+                                                                clearable=False,
+                                                                style={"marginBottom": "0.75rem"},
+                                                            ),
+                                                            dcc.Textarea(
+                                                                id="input-delete-event-reason",
+                                                                placeholder="Reason for deletion (required, shown in audit log)",
+                                                                style={
+                                                                    "width": "100%",
+                                                                    "minHeight": "72px",
+                                                                    "padding": "0.6rem",
+                                                                    "borderRadius": "8px",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ],
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                style={"marginTop": "0.75rem"},
+                                                                children=[
+                                                                    html.Button(
+                                                                        "Delete Archived Event",
+                                                                        id="btn-delete-event-history",
+                                                                        n_clicks=0,
+                                                                        style={
+                                                                            "backgroundColor": COLORS[
+                                                                                "accent_red"
+                                                                            ],
+                                                                            "color": "#fff",
+                                                                            "border": "none",
+                                                                            "borderRadius": "8px",
+                                                                            "padding": "0.6rem 1rem",
+                                                                            "fontSize": "0.875rem",
+                                                                            "fontWeight": "600",
+                                                                            "cursor": "pointer",
+                                                                        },
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                            html.Div(
+                                                                id="delete-event-feedback",
+                                                                style={"marginTop": "0.75rem"},
+                                                            ),
+                                                            dcc.ConfirmDialog(
+                                                                id="confirm-delete-event-dialog",
+                                                                message="Are you sure you want to permanently delete this event from history?",
+                                                            ),
+                                                            html.Hr(
+                                                                style={
+                                                                    "border": "none",
+                                                                    "borderTop": f"1px solid {COLORS['border']}",
+                                                                    "margin": "1.1rem 0",
+                                                                }
+                                                            ),
+                                                            html.Details(
+                                                                open=False,
+                                                                children=[
+                                                                    html.Summary(
+                                                                        "Audit Log",
+                                                                        style={
+                                                                            "cursor": "pointer",
+                                                                            "fontWeight": "700",
+                                                                            "color": COLORS[
+                                                                                "text_primary"
+                                                                            ],
+                                                                            "fontSize": "0.95rem",
+                                                                        },
+                                                                    ),
+                                                                    html.Div(
+                                                                        style={
+                                                                            "marginTop": "0.9rem"
+                                                                        },
+                                                                        children=[
+                                                                            html.P(
+                                                                                "Track all administrative actions performed in the system.",
+                                                                                style={
+                                                                                    "color": COLORS[
+                                                                                        "text_secondary"
+                                                                                    ],
+                                                                                    "marginBottom": "0.85rem",
+                                                                                    "fontSize": "0.86rem",
+                                                                                    "lineHeight": "1.45",
+                                                                                },
+                                                                            ),
+                                                                            html.Div(
+                                                                                style={
+                                                                                    "display": "flex",
+                                                                                    "gap": "0.85rem",
+                                                                                    "marginBottom": "1.1rem",
+                                                                                    "flexWrap": "wrap",
+                                                                                    "alignItems": "flex-end",
+                                                                                },
+                                                                                children=[
+                                                                                    html.Div(
+                                                                                        style={
+                                                                                            "minWidth": "180px",
+                                                                                            "flex": "1",
+                                                                                        },
+                                                                                        children=[
+                                                                                            html.Label(
+                                                                                                "Action",
+                                                                                                style={
+                                                                                                    "fontSize": "0.72rem",
+                                                                                                    "color": COLORS[
+                                                                                                        "text_secondary"
+                                                                                                    ],
+                                                                                                    "marginBottom": "0.45rem",
+                                                                                                    "letterSpacing": "0.04em",
+                                                                                                    "textTransform": "uppercase",
+                                                                                                    "display": "block",
+                                                                                                },
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="audit-filter-action",
+                                                                                                className="fgc-dropdown",
+                                                                                                options=[],
+                                                                                                value=None,
+                                                                                                placeholder="All actions",
+                                                                                                clearable=True,
+                                                                                                style={
+                                                                                                    "backgroundColor": COLORS[
+                                                                                                        "bg_dark"
+                                                                                                    ]
+                                                                                                },
+                                                                                            ),
+                                                                                        ],
+                                                                                    ),
+                                                                                    html.Div(
+                                                                                        style={
+                                                                                            "minWidth": "180px",
+                                                                                            "flex": "1",
+                                                                                        },
+                                                                                        children=[
+                                                                                            html.Label(
+                                                                                                "User",
+                                                                                                style={
+                                                                                                    "fontSize": "0.72rem",
+                                                                                                    "color": COLORS[
+                                                                                                        "text_secondary"
+                                                                                                    ],
+                                                                                                    "marginBottom": "0.45rem",
+                                                                                                    "letterSpacing": "0.04em",
+                                                                                                    "textTransform": "uppercase",
+                                                                                                    "display": "block",
+                                                                                                },
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="audit-filter-user",
+                                                                                                className="fgc-dropdown",
+                                                                                                options=[],
+                                                                                                value=None,
+                                                                                                placeholder="All users",
+                                                                                                clearable=True,
+                                                                                                style={
+                                                                                                    "backgroundColor": COLORS[
+                                                                                                        "bg_dark"
+                                                                                                    ]
+                                                                                                },
+                                                                                            ),
+                                                                                        ],
+                                                                                    ),
+                                                                                    html.Button(
+                                                                                        "Refresh",
+                                                                                        id="btn-audit-refresh",
+                                                                                        n_clicks=0,
+                                                                                        style={
+                                                                                            **STYLES[
+                                                                                                "button_secondary"
+                                                                                            ],
+                                                                                            "height": "40px",
+                                                                                            "padding": "0 1rem",
+                                                                                        },
+                                                                                    ),
+                                                                                ],
+                                                                            ),
+                                                                            dcc.Loading(
+                                                                                type="circle",
+                                                                                color=COLORS[
+                                                                                    "accent_blue"
+                                                                                ],
+                                                                                children=dash_table.DataTable(
+                                                                                    id="audit-log-table",
+                                                                                    columns=[
+                                                                                        {
+                                                                                            "name": "Time",
+                                                                                            "id": "timestamp",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "User",
+                                                                                            "id": "user_name",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Category",
+                                                                                            "id": "action_category",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Action",
+                                                                                            "id": "action",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Table",
+                                                                                            "id": "target_table",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Event",
+                                                                                            "id": "target_event",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Player",
+                                                                                            "id": "target_player",
+                                                                                        },
+                                                                                        {
+                                                                                            "name": "Reason",
+                                                                                            "id": "reason",
+                                                                                        },
+                                                                                    ],
+                                                                                    data=[],
+                                                                                    page_size=25,
+                                                                                    sort_action="native",
+                                                                                    style_table={
+                                                                                        "overflowX": "auto",
+                                                                                        "border": f"1px solid {COLORS['border']}",
+                                                                                        "borderRadius": "10px",
+                                                                                    },
+                                                                                    style_header={
+                                                                                        "backgroundColor": COLORS[
+                                                                                            "bg_dark"
+                                                                                        ],
+                                                                                        "color": COLORS[
+                                                                                            "text_primary"
+                                                                                        ],
+                                                                                        "fontWeight": "600",
+                                                                                        "fontSize": "0.72rem",
+                                                                                        "textTransform": "uppercase",
+                                                                                        "letterSpacing": "0.05em",
+                                                                                        "padding": "0.85rem 0.95rem",
+                                                                                        "borderBottom": f"2px solid {COLORS['accent_purple']}",
+                                                                                    },
+                                                                                    style_cell={
+                                                                                        "backgroundColor": COLORS[
+                                                                                            "bg_card"
+                                                                                        ],
+                                                                                        "color": COLORS[
+                                                                                            "text_primary"
+                                                                                        ],
+                                                                                        "border": "none",
+                                                                                        "borderBottom": f"1px solid {COLORS['border']}",
+                                                                                        "padding": "0.62rem 0.9rem",
+                                                                                        "fontSize": "0.8rem",
+                                                                                        "lineHeight": "1.35",
+                                                                                        "textAlign": "left",
+                                                                                        "maxWidth": "200px",
+                                                                                        "overflow": "hidden",
+                                                                                        "textOverflow": "ellipsis",
+                                                                                    },
+                                                                                    style_cell_conditional=[
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "column_id": "action_category"
+                                                                                            },
+                                                                                            "width": "120px",
+                                                                                            "minWidth": "120px",
+                                                                                            "maxWidth": "120px",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "column_id": "action"
+                                                                                            },
+                                                                                            "width": "260px",
+                                                                                            "minWidth": "220px",
+                                                                                            "maxWidth": "320px",
+                                                                                        },
+                                                                                    ],
+                                                                                    style_data_conditional=[
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "row_index": "odd"
+                                                                                            },
+                                                                                            "backgroundColor": COLORS[
+                                                                                                "bg_dark"
+                                                                                            ],
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Auth'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": "#93c5fd",
+                                                                                            "fontWeight": "700",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Settings'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": "#86efac",
+                                                                                            "fontWeight": "700",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Check-ins'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": "#fcd34d",
+                                                                                            "fontWeight": "700",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Archive'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": "#f9a8d4",
+                                                                                            "fontWeight": "700",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Integrations'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": "#67e8f9",
+                                                                                            "fontWeight": "700",
+                                                                                        },
+                                                                                        {
+                                                                                            "if": {
+                                                                                                "filter_query": "{action_category} = 'Other'",
+                                                                                                "column_id": "action_category",
+                                                                                            },
+                                                                                            "color": COLORS[
+                                                                                                "text_secondary"
+                                                                                            ],
+                                                                                            "fontWeight": "600",
+                                                                                        },
+                                                                                    ],
+                                                                                    tooltip_data=[],
+                                                                                    tooltip_duration=None,
+                                                                                ),
+                                                                            ),
+                                                                            html.Div(
+                                                                                id="audit-log-count",
+                                                                                style={
+                                                                                    "color": COLORS[
+                                                                                        "text_muted"
+                                                                                    ],
+                                                                                    "fontSize": "0.72rem",
+                                                                                    "marginTop": "0.75rem",
+                                                                                    "letterSpacing": "0.03em",
+                                                                                },
+                                                                                children="0 entries",
+                                                                            ),
+                                                                        ],
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            # Footer
+            html.Footer(
+                style={
+                    "textAlign": "center",
+                    "padding": "2rem",
+                    "color": COLORS["text_muted"],
+                    "fontSize": "0.75rem",
+                    "borderTop": f"1px solid {COLORS['border']}",
+                    "marginTop": "2rem",
+                },
+                children=[
+                    html.P(
+                        [
+                            "Powered by ",
+                            html.Strong("IMLO"),
+                        ],
+                        style={"margin": "0"},
+                    ),
+                ],
+            ),
+        ],
+    )

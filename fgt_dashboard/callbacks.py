@@ -36,7 +36,10 @@ ACTION_META = {
     "admin_update_requirements": ("Settings", "Update Requirements"),
     "admin_update_payment_settings": ("Settings", "Update Payment Settings"),
     "admin_toggle_field": ("Check-ins", "Toggle Field"),
+    "admin_update_name": ("Check-ins", "Update Name"),
     "admin_update_tag": ("Check-ins", "Update Tag"),
+    "admin_update_telephone": ("Check-ins", "Update Phone"),
+    "admin_update_games": ("Check-ins", "Update Games"),
     "admin_manual_checkin": ("Check-ins", "Manual Check-in"),
     "admin_recheck_startgg": ("Check-ins", "Re-check Start.gg"),
     "admin_delete_checkin": ("Check-ins", "Delete Player"),
@@ -83,6 +86,7 @@ def action_sort_key(action: str) -> tuple:
         group_rank = len(ACTION_GROUP_ORDER)
     return (group_rank, label.lower())
 
+
 def register_callbacks(app):
     """
     Register all Dash callbacks for:
@@ -98,6 +102,7 @@ def register_callbacks(app):
         Output("checkins-table", "data"),
         Output("checkins-table", "columns"),
         Output("player-count", "children"),
+        Output("active-event-coverage", "children"),
         Output("game-filter", "options"),
         Output("duplicate-warning", "style"),
         Output("duplicate-warning-text", "children"),
@@ -112,7 +117,17 @@ def register_callbacks(app):
         Input("game-filter", "value"),
         State("requirements-store", "data"),
     )
-    def update_table(selected_slug, _interval, _clicks, _sse_trigger, visible_columns, active_filter, search_query, game_filter, requirements):
+    def update_table(
+        selected_slug,
+        _interval,
+        _clicks,
+        _sse_trigger,
+        visible_columns,
+        active_filter,
+        search_query,
+        game_filter,
+        requirements,
+    ):
         """
         Refresh the check-ins table when:
         - user selects a different event slug
@@ -122,11 +137,29 @@ def register_callbacks(app):
         """
         if not selected_slug:
             logger.warning("No event slug selected – skipping table update.")
-            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
 
         # Default columns if none specified
         if not visible_columns:
-            visible_columns = ["name", "tag", "telephone", "member", "startgg", "is_guest", "payment_valid", "status"]
+            visible_columns = [
+                "name",
+                "tag",
+                "telephone",
+                "member",
+                "startgg",
+                "is_guest",
+                "payment_valid",
+                "status",
+            ]
 
         # Hide columns for disabled requirements
         requirements = requirements or {}
@@ -137,7 +170,9 @@ def register_callbacks(app):
 
         # Handle special "__ALL__" value for debugging
         is_all_events = selected_slug == "__ALL__"
-        logger.info(f"Updating check-ins table for: {'ALL EVENTS' if is_all_events else selected_slug}")
+        logger.info(
+            f"Updating check-ins table for: {'ALL EVENTS' if is_all_events else selected_slug}"
+        )
 
         try:
             if is_all_events:
@@ -146,10 +181,34 @@ def register_callbacks(app):
                 data = get_checkins(selected_slug) or []
             if not isinstance(data, list) or not data:
                 logger.info(f"No check-ins found for slug: {selected_slug}")
-                return [], [{"name": "No participants", "id": "info"}], "0 players", [], {"display": "none"}, "", []
+                return (
+                    [],
+                    [{"name": "No participants", "id": "info"}],
+                    "0 players",
+                    "",
+                    [],
+                    {"display": "none"},
+                    "",
+                    [],
+                )
 
             df = pd.DataFrame(data)
             total_count = len(df)
+            coverage_text = ""
+
+            try:
+                settings = get_active_settings() or {}
+                events_json = settings.get("events_json")
+                registered_count = 0
+                if isinstance(events_json, dict):
+                    registered_count = int(events_json.get("tournament_entrants") or 0)
+                elif isinstance(settings.get("startgg_registered_count"), (int, float, str)):
+                    registered_count = int(settings.get("startgg_registered_count") or 0)
+                if registered_count > 0:
+                    coverage_rate = (total_count / registered_count) * 100
+                    coverage_text = f"Start.gg coverage: {total_count}/{registered_count} ({coverage_rate:.0f}%)"
+            except Exception:
+                coverage_text = ""
 
             def _normalize_text(v):
                 if v is None:
@@ -210,7 +269,9 @@ def register_callbacks(app):
                     "borderRadius": "8px",
                     "padding": "0.55rem 0.75rem",
                 }
-                duplicate_warning_text = f"⚠ Possible duplicate participants detected ({len(flagged)})."
+                duplicate_warning_text = (
+                    f"⚠ Possible duplicate participants detected ({len(flagged)})."
+                )
                 duplicate_warning_list = preview_rows
 
             # Game name shortening map
@@ -258,18 +319,26 @@ def register_callbacks(app):
             # Format multi-select fields: shorten names + join with comma
             if "tournament_games_registered" in df.columns:
                 df["tournament_games_registered"] = df["tournament_games_registered"].apply(
-                    lambda x: ", ".join(shorten_game(g) for g in x) if isinstance(x, list) else shorten_game(x) if x else ""
+                    lambda x: (
+                        ", ".join(shorten_game(g) for g in x)
+                        if isinstance(x, list)
+                        else shorten_game(x) if x else ""
+                    )
                 )
 
             # Store original boolean values for filtering before converting to icons
             for col in ["member", "startgg", "payment_valid", "is_guest"]:
                 if col in df.columns:
-                    df[f"_{col}_bool"] = df[col].apply(lambda x: x is True or str(x).lower() == "true")
+                    df[f"_{col}_bool"] = df[col].apply(
+                        lambda x: x is True or str(x).lower() == "true"
+                    )
 
             # Convert booleans to icons ✓/✗
             for col in ["member", "startgg", "payment_valid", "is_guest"]:
                 if col in df.columns:
-                    df[col] = df[col].apply(lambda x: "✓" if x is True or str(x).lower() == "true" else "✗")
+                    df[col] = df[col].apply(
+                        lambda x: "✓" if x is True or str(x).lower() == "true" else "✗"
+                    )
 
             # Apply quick filter
             # If payment is not required, disable the no-payment filter behavior.
@@ -296,7 +365,11 @@ def register_callbacks(app):
 
             # Apply game filter
             if game_filter and "tournament_games_registered" in df.columns:
-                df = df[df["tournament_games_registered"].str.contains(game_filter, case=False, na=False)]
+                df = df[
+                    df["tournament_games_registered"].str.contains(
+                        game_filter, case=False, na=False
+                    )
+                ]
 
             filtered_count = len(df)
 
@@ -331,7 +404,13 @@ def register_callbacks(app):
             for c in visible_cols:
                 if c in df_filtered.columns:
                     header = COLUMN_HEADERS.get(c, str(c).replace("_", " ").title())
-                    col_def = {"name": header, "id": str(c), "reorderable": True, "editable": c == "tag"}
+                    col_def = {
+                        "name": header,
+                        "id": str(c),
+                        "reorderable": True,
+                        "editable": c
+                        in ["name", "tag", "telephone", "tournament_games_registered"],
+                    }
                     cols.append(col_def)
 
             # Player count text
@@ -344,6 +423,7 @@ def register_callbacks(app):
                 df_filtered.to_dict("records"),
                 cols,
                 count_text,
+                coverage_text,
                 game_options,
                 duplicate_warning_style,
                 duplicate_warning_text,
@@ -352,7 +432,16 @@ def register_callbacks(app):
 
         except Exception as e:
             logger.exception(f"Error fetching check-ins for slug '{selected_slug}': {e}")
-            return [], [{"name": "Error fetching data", "id": "error"}], "Error", [], {"display": "none"}, "", []
+            return (
+                [],
+                [{"name": "Error fetching data", "id": "error"}],
+                "Error",
+                "",
+                [],
+                {"display": "none"},
+                "",
+                [],
+            )
 
     @app.callback(
         Output("duplicate-warning", "style", allow_duplicate=True),
@@ -390,7 +479,9 @@ def register_callbacks(app):
         State("requirements-store", "data"),
         prevent_initial_call=True,
     )
-    def update_active_filter(all_clicks, pending_clicks, ready_clicks, no_payment_clicks, requirements):
+    def update_active_filter(
+        all_clicks, pending_clicks, ready_clicks, no_payment_clicks, requirements
+    ):
         """Update the active filter based on which button was clicked."""
         triggered = ctx.triggered_id
         if triggered == "filter-pending":
@@ -431,8 +522,8 @@ def register_callbacks(app):
 
         # Define colors for each card
         colors = {
-            "all": "#00d4ff",      # accent_blue
-            "ready": "#10b981",    # accent_green
+            "all": "#00d4ff",  # accent_blue
+            "ready": "#10b981",  # accent_green
             "pending": "#f59e0b",  # accent_yellow
             "no-payment": "#ef4444",  # accent_red
         }
@@ -565,9 +656,11 @@ def register_callbacks(app):
         start_iso = None
         if tournament.get("startAt"):
             try:
-                start_iso = datetime.fromtimestamp(
-                    int(tournament["startAt"]), tz=timezone.utc
-                ).date().isoformat()
+                start_iso = (
+                    datetime.fromtimestamp(int(tournament["startAt"]), tz=timezone.utc)
+                    .date()
+                    .isoformat()
+                )
             except Exception:
                 start_iso = None
 
@@ -581,7 +674,8 @@ def register_callbacks(app):
                 "startAt": e.get("startAt"),
                 "numEntrants": e.get("numEntrants"),
             }
-            for e in events if isinstance(e, dict)
+            for e in events
+            if isinstance(e, dict)
         ]
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
@@ -598,10 +692,16 @@ def register_callbacks(app):
         try:
             prev_raw = current_fields.get("events_json")
             if prev_raw:
-                parsed_prev = prev_raw if isinstance(prev_raw, (list, dict)) else json.loads(prev_raw)
-                prev_list = parsed_prev.get("events") if isinstance(parsed_prev, dict) else parsed_prev
+                parsed_prev = (
+                    prev_raw if isinstance(prev_raw, (list, dict)) else json.loads(prev_raw)
+                )
+                prev_list = (
+                    parsed_prev.get("events") if isinstance(parsed_prev, dict) else parsed_prev
+                )
                 if isinstance(prev_list, list):
-                    prev_names = {e.get("name") for e in prev_list if isinstance(e, dict) and e.get("name")}
+                    prev_names = {
+                        e.get("name") for e in prev_list if isinstance(e, dict) and e.get("name")
+                    }
         except Exception:
             prev_names = set()
 
@@ -665,6 +765,7 @@ def register_callbacks(app):
 
         # Build new dropdown options with the new slug
         from shared.storage import get_all_event_slugs
+
         all_slugs = get_all_event_slugs() or []
         if slug not in all_slugs:
             all_slugs = [slug] + all_slugs
@@ -672,7 +773,14 @@ def register_callbacks(app):
         # Use tournament name (with proper åäö) for the active slug
         tournament_name = tournament.get("name", "")
         dropdown_options = [
-            {"label": tournament_name if s == slug and tournament_name else s.replace("-", " ").title(), "value": s}
+            {
+                "label": (
+                    tournament_name
+                    if s == slug and tournament_name
+                    else s.replace("-", " ").title()
+                ),
+                "value": s,
+            }
             for s in all_slugs
         ]
 
@@ -721,7 +829,8 @@ def register_callbacks(app):
                 if isinstance(evs, list):
                     mapping = [
                         {"name": e.get("name"), "id": e.get("id"), "slug": e.get("slug")}
-                        for e in evs if isinstance(e, dict)
+                        for e in evs
+                        if isinstance(e, dict)
                     ]
             except Exception:
                 logger.warning("Failed to parse events_json")
@@ -789,15 +898,22 @@ def register_callbacks(app):
             if missing:
                 name = row.get("name") or row.get("tag") or "Unknown"
                 tag = row.get("tag", "")
-                needs_help.append({
-                    "name": name,
-                    "tag": tag,
-                    "missing": missing,
-                    "record_id": row.get("record_id", ""),
-                })
+                needs_help.append(
+                    {
+                        "name": name,
+                        "tag": tag,
+                        "missing": missing,
+                        "record_id": row.get("record_id", ""),
+                    }
+                )
 
         if not needs_help:
-            return html.P("✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"}), "0"
+            return (
+                html.P(
+                    "✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"}
+                ),
+                "0",
+            )
 
         # Badge styles matching Active Requirements (same colors/styling)
         badge_styles = {
@@ -841,26 +957,48 @@ def register_callbacks(app):
                 missing_badges.append(html.Span(f"{icon} {field.upper()}", style=style))
 
             items.append(
-                html.Div([
-                    # Player name with bullet point
-                    html.Div([
-                        html.Span("•", style={"color": "#ef4444", "marginRight": "0.5rem", "fontSize": "1.2rem"}),
-                        html.Span(display_name, style={"color": "#fff", "fontWeight": "500"}),
-                    ], style={"display": "flex", "alignItems": "center", "marginBottom": "0.25rem"}),
-                    # Missing badges on second line, indented
-                    html.Div(missing_badges, style={
-                        "display": "flex",
-                        "gap": "0.5rem",
-                        "flexWrap": "wrap",
-                        "marginLeft": "1rem",
-                    }),
-                ], style={
-                    "padding": "0.75rem",
-                    "marginBottom": "0.5rem",
-                    "backgroundColor": "rgba(239, 68, 68, 0.05)",
-                    "borderRadius": "8px",
-                    "borderLeft": "3px solid #ef4444",
-                })
+                html.Div(
+                    [
+                        # Player name with bullet point
+                        html.Div(
+                            [
+                                html.Span(
+                                    "•",
+                                    style={
+                                        "color": "#ef4444",
+                                        "marginRight": "0.5rem",
+                                        "fontSize": "1.2rem",
+                                    },
+                                ),
+                                html.Span(
+                                    display_name, style={"color": "#fff", "fontWeight": "500"}
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "alignItems": "center",
+                                "marginBottom": "0.25rem",
+                            },
+                        ),
+                        # Missing badges on second line, indented
+                        html.Div(
+                            missing_badges,
+                            style={
+                                "display": "flex",
+                                "gap": "0.5rem",
+                                "flexWrap": "wrap",
+                                "marginLeft": "1rem",
+                            },
+                        ),
+                    ],
+                    style={
+                        "padding": "0.75rem",
+                        "marginBottom": "0.5rem",
+                        "backgroundColor": "rgba(239, 68, 68, 0.05)",
+                        "borderRadius": "8px",
+                        "borderLeft": "3px solid #ef4444",
+                    },
+                )
             )
 
         return items, str(len(needs_help))
@@ -999,10 +1137,14 @@ def register_callbacks(app):
                 events = storage_api.get_event_history() or []
         except Exception as e:
             logger.exception(f"Failed to load insights data: {e}")
-            return _empty_response("Could not load insights. Try refreshing.", "Insights unavailable")
+            return _empty_response(
+                "Could not load insights. Try refreshing.", "Insights unavailable"
+            )
 
         if not events:
-            return _empty_response("No archived events yet. Archive your first event to unlock insights.")
+            return _empty_response(
+                "No archived events yet. Archive your first event to unlock insights."
+            )
 
         all_events = list(events)
 
@@ -1132,7 +1274,8 @@ def register_callbacks(app):
 
         # Empty selection means "all events in selected period"
         selected_events = [
-            ev for ev in series_scoped_events
+            ev
+            for ev in series_scoped_events
             if (not selected_event_slugs) or ev.get("event_slug") in selected_event_slugs
         ]
 
@@ -1189,7 +1332,11 @@ def register_callbacks(app):
                 "guest_count": guest_count,
                 "startgg_count": startgg_count,
                 "ready_count": ready_count,
-                "retention": (weighted_retention_sum / weighted_retention_den) if weighted_retention_den > 0 else 0.0,
+                "retention": (
+                    (weighted_retention_sum / weighted_retention_den)
+                    if weighted_retention_den > 0
+                    else 0.0
+                ),
                 "top_game_counts": top_game_counts,
                 "startgg_registered_total": startgg_registered_total,
                 "checked_in_total": checked_in_total,
@@ -1201,8 +1348,12 @@ def register_callbacks(app):
         earnings_rows = []
         for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
-            ev_member_rate = (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
-            ev_startgg_rate = (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            ev_member_rate = (
+                (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            )
+            ev_startgg_rate = (
+                (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
+            )
             ev_revenue = _as_float(ev.get("total_revenue"))
             revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
             ev_no_show = _as_int(ev.get("no_show_count"))
@@ -1242,10 +1393,18 @@ def register_callbacks(app):
 
         metrics = _aggregate_metrics(selected_events)
 
-        ready_rate = (metrics["ready_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
-        member_rate = (metrics["member_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
-        guest_rate = (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
-        startgg_rate = (metrics["startgg_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        ready_rate = (
+            (metrics["ready_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        )
+        member_rate = (
+            (metrics["member_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        )
+        guest_rate = (
+            (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        )
+        startgg_rate = (
+            (metrics["startgg_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        )
         retention = metrics["retention"]
 
         if metrics["top_game_counts"]:
@@ -1292,13 +1451,51 @@ def register_callbacks(app):
             if prev_events:
                 prev_metrics = _aggregate_metrics(prev_events)
 
-        total_delta = _fmt_delta(metrics["total"], prev_metrics["total"] if prev_metrics else None, "count")
-        revenue_delta = _fmt_delta(metrics["revenue"], prev_metrics["revenue"] if prev_metrics else None, "kr")
-        ready_delta = _fmt_delta(ready_rate, ((prev_metrics["ready_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
-        member_delta = _fmt_delta(member_rate, ((prev_metrics["member_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
-        guest_delta = _fmt_delta(guest_rate, ((prev_metrics["guest_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
-        startgg_delta = _fmt_delta(startgg_rate, ((prev_metrics["startgg_count"] / prev_metrics["total"] * 100) if prev_metrics and prev_metrics["total"] > 0 else None), "pp")
-        retention_delta = _fmt_delta(retention, prev_metrics["retention"] if prev_metrics else None, "pp")
+        total_delta = _fmt_delta(
+            metrics["total"], prev_metrics["total"] if prev_metrics else None, "count"
+        )
+        revenue_delta = _fmt_delta(
+            metrics["revenue"], prev_metrics["revenue"] if prev_metrics else None, "kr"
+        )
+        ready_delta = _fmt_delta(
+            ready_rate,
+            (
+                (prev_metrics["ready_count"] / prev_metrics["total"] * 100)
+                if prev_metrics and prev_metrics["total"] > 0
+                else None
+            ),
+            "pp",
+        )
+        member_delta = _fmt_delta(
+            member_rate,
+            (
+                (prev_metrics["member_count"] / prev_metrics["total"] * 100)
+                if prev_metrics and prev_metrics["total"] > 0
+                else None
+            ),
+            "pp",
+        )
+        guest_delta = _fmt_delta(
+            guest_rate,
+            (
+                (prev_metrics["guest_count"] / prev_metrics["total"] * 100)
+                if prev_metrics and prev_metrics["total"] > 0
+                else None
+            ),
+            "pp",
+        )
+        startgg_delta = _fmt_delta(
+            startgg_rate,
+            (
+                (prev_metrics["startgg_count"] / prev_metrics["total"] * 100)
+                if prev_metrics and prev_metrics["total"] > 0
+                else None
+            ),
+            "pp",
+        )
+        retention_delta = _fmt_delta(
+            retention, prev_metrics["retention"] if prev_metrics else None, "pp"
+        )
 
         period_label = {
             "day": "Last 24h",
@@ -1326,7 +1523,9 @@ def register_callbacks(app):
         no_show_rate = metrics.get("no_show_rate", 0.0)
         if reg_total > 0:
             checked_rate = (checked_in_total / reg_total) * 100
-            heads_up_text = f"Checked-in coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
+            heads_up_text = (
+                f"Checked-in coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
+            )
             if reg_total >= 10:
                 if no_show_rate >= 30:
                     heads_up_text += (
@@ -1345,13 +1544,18 @@ def register_callbacks(app):
         try:
             top_players_fn = getattr(storage_api, "get_top_players_history", None)
             if top_players_fn:
-                selected_scope_slugs = [ev.get("event_slug") for ev in selected_events if ev.get("event_slug")]
-                top_players_rows = top_players_fn(
-                    event_slugs=selected_scope_slugs,
-                    start_date=range_start.isoformat() if range_start else None,
-                    end_date=range_end.isoformat() if range_end else None,
-                    limit=15,
-                ) or []
+                selected_scope_slugs = [
+                    ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
+                ]
+                top_players_rows = (
+                    top_players_fn(
+                        event_slugs=selected_scope_slugs,
+                        start_date=range_start.isoformat() if range_start else None,
+                        end_date=range_end.isoformat() if range_end else None,
+                        limit=15,
+                    )
+                    or []
+                )
                 top_players_title = f"Top attendees ({len(top_players_rows)} shown)"
         except Exception as e:
             logger.warning(f"Failed to load top players leaderboard: {e}")
@@ -1606,7 +1810,10 @@ def register_callbacks(app):
         player_name = row.get("name") or row.get("tag") or "Unknown"
 
         if not record_id:
-            return html.Span("❌ No record_id found for this player.", style={"color": "#ef4444"}), no_update
+            return (
+                html.Span("❌ No record_id found for this player.", style={"color": "#ef4444"}),
+                no_update,
+            )
 
         # Helper to check if value is truthy
         def is_checked(val):
@@ -1684,13 +1891,18 @@ def register_callbacks(app):
                 logger.warning(f"Failed to broadcast SSE: {e}")
 
             # Feedback message based on column
-            col_labels = {"payment_valid": "Payment", "startgg": "Start.gg", "member": "Member", "is_guest": "Guest"}
+            col_labels = {
+                "payment_valid": "Payment",
+                "startgg": "Start.gg",
+                "member": "Member",
+                "is_guest": "Guest",
+            }
             col_label = col_labels.get(col_id, col_id)
             status_emoji = "✅" if new_val else "⏸️"
 
             feedback = html.Span(
                 f"{status_emoji} {player_name}: {col_label} {'✓' if new_val else '✗'}, status={new_status}",
-                style={"color": "#10b981" if new_val else "#f59e0b"}
+                style={"color": "#10b981" if new_val else "#f59e0b"},
             )
 
             # Audit log for manual admin toggle
@@ -1734,14 +1946,18 @@ def register_callbacks(app):
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def save_tag_edits(_timestamp, table_data, previous_data, active_cell, selected_slug, auth_state):
-        """Persist manual tag edits from the check-ins table."""
+    def save_tag_edits(
+        _timestamp, table_data, previous_data, active_cell, selected_slug, auth_state
+    ):
+        """Persist inline edits (name/tag/phone/games) from the check-ins table."""
         if not table_data or not previous_data:
             return no_update, no_update
 
-        # Only run when the active edited cell is the tag column.
-        if not active_cell or active_cell.get("column_id") != "tag":
+        editable_columns = ["name", "tag", "telephone", "tournament_games_registered"]
+        if not active_cell or active_cell.get("column_id") not in editable_columns:
             return no_update, no_update
+
+        edited_column = active_cell.get("column_id")
 
         prev_by_id = {
             str(r.get("record_id")): r
@@ -1757,15 +1973,53 @@ def register_callbacks(app):
         if not prev_by_id or not curr_by_id:
             return no_update, no_update
 
+        settings = get_active_settings() or {}
+        per_game = int(settings.get("swish_expected_per_game") or 0)
+
+        def _clean_phone(value):
+            txt = str(value or "").strip()
+            return re.sub(r"\s+", "", txt)
+
+        def _parse_games(value):
+            if value is None:
+                return []
+            if isinstance(value, list):
+                raw = value
+            else:
+                raw = re.split(r"[,;\n]+", str(value))
+            out = []
+            seen = set()
+            for item in raw:
+                g = str(item or "").strip()
+                if not g:
+                    continue
+                key = g.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(g)
+            return out
+
         changed_rows = []
         for record_id, curr_row in curr_by_id.items():
             prev_row = prev_by_id.get(record_id)
             if not prev_row:
                 continue
-            old_tag = str(prev_row.get("tag") or "").strip()
-            new_tag = str(curr_row.get("tag") or "").strip()
-            if old_tag != new_tag:
-                changed_rows.append((record_id, old_tag, new_tag))
+            old_val = prev_row.get(edited_column)
+            new_val = curr_row.get(edited_column)
+
+            if edited_column == "telephone":
+                old_cmp = _clean_phone(old_val)
+                new_cmp = _clean_phone(new_val)
+            elif edited_column == "tournament_games_registered":
+                old_cmp = ", ".join(_parse_games(old_val)).lower()
+                new_cmp = ", ".join(_parse_games(new_val)).lower()
+            else:
+                old_cmp = str(old_val or "").strip()
+                new_cmp = str(new_val or "").strip()
+
+            if old_cmp != new_cmp:
+                changed_rows.append((record_id, old_val, new_val))
 
         if not changed_rows:
             return no_update, no_update
@@ -1773,22 +2027,69 @@ def register_callbacks(app):
         updated = 0
         reverted = 0
         messages = []
+        table_needs_refresh = False
 
-        for record_id, old_tag, new_tag in changed_rows:
+        action_by_column = {
+            "name": "admin_update_name",
+            "tag": "admin_update_tag",
+            "telephone": "admin_update_telephone",
+            "tournament_games_registered": "admin_update_games",
+        }
+        label_by_column = {
+            "name": "name",
+            "tag": "tag",
+            "telephone": "phone",
+            "tournament_games_registered": "games",
+        }
+
+        for record_id, old_value, new_value in changed_rows:
             row = curr_by_id.get(record_id, {})
-            player_name = row.get("name") or old_tag or "Unknown"
+            player_name = row.get("name") or row.get("tag") or "Unknown"
 
-            if not new_tag:
-                row["tag"] = old_tag
-                reverted += 1
-                messages.append(f"{player_name}: tag cannot be empty")
-                continue
+            update_data = {}
+            old_clean = old_value
+            new_clean = new_value
 
-            result = update_checkin(record_id, {"tag": new_tag})
+            if edited_column in ["name", "tag"]:
+                old_clean = str(old_value or "").strip()
+                new_clean = str(new_value or "").strip()
+                if not new_clean:
+                    row[edited_column] = old_clean
+                    reverted += 1
+                    messages.append(
+                        f"{player_name}: {label_by_column[edited_column]} cannot be empty"
+                    )
+                    table_needs_refresh = True
+                    continue
+                update_data[edited_column] = new_clean
+
+            elif edited_column == "telephone":
+                old_clean = _clean_phone(old_value)
+                new_clean = _clean_phone(new_value)
+                row[edited_column] = new_clean
+                update_data[edited_column] = new_clean
+                table_needs_refresh = True
+
+            elif edited_column == "tournament_games_registered":
+                old_games = _parse_games(old_value)
+                new_games = _parse_games(new_value)
+                old_clean = old_games
+                new_clean = new_games
+                row[edited_column] = ", ".join(new_games)
+                update_data[edited_column] = new_games
+                if per_game >= 0:
+                    update_data["payment_expected"] = len(new_games) * per_game
+                table_needs_refresh = True
+
+            result = update_checkin(record_id, update_data, typecast=True)
             if not result:
-                row["tag"] = old_tag
+                if edited_column in ["name", "tag", "telephone"]:
+                    row[edited_column] = str(old_value or "").strip()
+                elif edited_column == "tournament_games_registered":
+                    row[edited_column] = ", ".join(_parse_games(old_value))
                 reverted += 1
-                messages.append(f"{player_name}: failed to save")
+                messages.append(f"{player_name}: failed to save {label_by_column[edited_column]}")
+                table_needs_refresh = True
                 continue
 
             updated += 1
@@ -1800,28 +2101,38 @@ def register_callbacks(app):
                         "user_name": (auth_state or {}).get("user_name", "system"),
                         "user_email": (auth_state or {}).get("user_email", ""),
                     },
-                    "admin_update_tag",
+                    action_by_column[edited_column],
                     "active_event_data",
                     target_event=selected_slug or "",
                     target_record=record_id,
                     target_player=player_name,
-                    details=json.dumps({"old_tag": old_tag, "new_tag": new_tag}),
+                    details=json.dumps(
+                        {"field": edited_column, "old": old_clean, "new": new_clean}
+                    ),
                 )
             except Exception as e:
-                logger.warning(f"Failed to write audit log for tag update: {e}")
+                logger.warning(f"Failed to write audit log for inline edit: {e}")
 
         if updated and not reverted:
             if updated == 1:
-                feedback = html.Span("✅ Tag updated.", style={"color": "#10b981"})
+                feedback = html.Span(
+                    f"✅ {label_by_column[edited_column].title()} updated.",
+                    style={"color": "#10b981"},
+                )
             else:
-                feedback = html.Span(f"✅ Updated {updated} tags.", style={"color": "#10b981"})
+                feedback = html.Span(
+                    f"✅ Updated {updated} {label_by_column[edited_column]} values.",
+                    style={"color": "#10b981"},
+                )
         elif reverted and not updated:
-            msg = "; ".join(messages[:2]) if messages else "No valid tag changes saved."
+            msg = "; ".join(messages[:2]) if messages else "No valid changes saved."
             feedback = html.Span(f"⚠️ {msg}", style={"color": "#f59e0b"})
         else:
-            feedback = html.Span(f"✅ Updated {updated} tags, ⚠️ reverted {reverted}.", style={"color": "#f59e0b"})
+            feedback = html.Span(
+                f"✅ Updated {updated}, ⚠️ reverted {reverted}.", style={"color": "#f59e0b"}
+            )
 
-        return feedback, table_data
+        return feedback, table_data if table_needs_refresh else no_update
 
     @app.callback(
         Output("manual-checkin-feedback", "children"),
@@ -1840,12 +2151,20 @@ def register_callbacks(app):
             return no_update, no_update, no_update
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span("⚠️ Select a specific event first.", style={"color": "#f59e0b"}), no_update, no_update
+            return (
+                html.Span("⚠️ Select a specific event first.", style={"color": "#f59e0b"}),
+                no_update,
+                no_update,
+            )
 
         name = (input_name or "").strip()
         tag = (input_tag or "").strip()
         if not name and not tag:
-            return html.Span("⚠️ Enter at least name or tag.", style={"color": "#f59e0b"}), no_update, no_update
+            return (
+                html.Span("⚠️ Enter at least name or tag.", style={"color": "#f59e0b"}),
+                no_update,
+                no_update,
+            )
 
         if not name:
             name = tag
@@ -1870,7 +2189,14 @@ def register_callbacks(app):
 
         begin_fn = getattr(storage_api, "begin_checkin", None)
         if not callable(begin_fn):
-            return html.Span("❌ Manual check-in is not available in current backend.", style={"color": "#ef4444"}), no_update, no_update
+            return (
+                html.Span(
+                    "❌ Manual check-in is not available in current backend.",
+                    style={"color": "#ef4444"},
+                ),
+                no_update,
+                no_update,
+            )
 
         try:
             result = begin_fn(selected_slug, payload)
@@ -1912,7 +2238,11 @@ def register_callbacks(app):
             return feedback, "", ""
         except Exception as e:
             logger.exception(f"Manual check-in failed for '{name}': {e}")
-            return html.Span(f"❌ Manual check-in failed: {e}", style={"color": "#ef4444"}), no_update, no_update
+            return (
+                html.Span(f"❌ Manual check-in failed: {e}", style={"color": "#ef4444"}),
+                no_update,
+                no_update,
+            )
 
     # -------------------------------------------------------------------------
     # Re-check Start.gg - re-validate registration + sync games for selected player
@@ -1973,7 +2303,11 @@ def register_callbacks(app):
             )
 
             if resp.status_code >= 400:
-                error_detail = resp.json().get("detail", resp.text[:200]) if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
+                error_detail = (
+                    resp.json().get("detail", resp.text[:200])
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text[:200]
+                )
                 return html.Span(
                     f"Re-check failed: {error_detail}",
                     style={"color": "#ef4444"},
@@ -1998,14 +2332,16 @@ def register_callbacks(app):
                     target_event=selected_slug or "",
                     target_record=record_id,
                     target_player=player_name,
-                    details=json.dumps({
-                        "tag": player_tag,
-                        "prev_startgg": prev_startgg,
-                        "new_startgg": startgg,
-                        "prev_games": prev_games,
-                        "new_games": events,
-                        "new_status": status,
-                    }),
+                    details=json.dumps(
+                        {
+                            "tag": player_tag,
+                            "prev_startgg": prev_startgg,
+                            "new_startgg": startgg,
+                            "prev_games": prev_games,
+                            "new_games": events,
+                            "new_status": status,
+                        }
+                    ),
                 )
             except Exception as e:
                 logger.warning(f"Failed to write audit log for recheck: {e}")
@@ -2048,7 +2384,15 @@ def register_callbacks(app):
     def show_delete_confirmation(n_clicks, selected_rows, table_data):
         """Show confirmation dialog before deleting player(s)."""
         if not n_clicks or not selected_rows or not table_data:
-            return False, "", html.Span("⚠️ No row selected.", style={"color": "#f59e0b"}) if n_clicks else no_update
+            return (
+                False,
+                "",
+                (
+                    html.Span("⚠️ No row selected.", style={"color": "#f59e0b"})
+                    if n_clicks
+                    else no_update
+                ),
+            )
 
         # Build list of names to delete
         names = []
@@ -2057,16 +2401,26 @@ def register_callbacks(app):
                 row = table_data[row_idx]
                 player_name = row.get("name") or row.get("tag") or "Unknown"
                 player_tag = row.get("tag") or ""
-                display_name = f"{player_name} ({player_tag})" if player_tag and player_tag != player_name else player_name
+                display_name = (
+                    f"{player_name} ({player_tag})"
+                    if player_tag and player_tag != player_name
+                    else player_name
+                )
                 names.append(display_name)
 
         if not names:
             return False, "", html.Span("⚠️ No row selected.", style={"color": "#f59e0b"})
 
         if len(names) == 1:
-            message = f"Are you sure you want to delete {names[0]}?\n\nThis action cannot be undone."
+            message = (
+                f"Are you sure you want to delete {names[0]}?\n\nThis action cannot be undone."
+            )
         else:
-            message = f"Are you sure you want to delete {len(names)} players?\n\n• " + "\n• ".join(names) + "\n\nThis action cannot be undone."
+            message = (
+                f"Are you sure you want to delete {len(names)} players?\n\n• "
+                + "\n• ".join(names)
+                + "\n\nThis action cannot be undone."
+            )
 
         return True, message, no_update
 
@@ -2083,7 +2437,9 @@ def register_callbacks(app):
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def delete_selected_player(submit_n_clicks, selected_rows, table_data, selected_slug, auth_state):
+    def delete_selected_player(
+        submit_n_clicks, selected_rows, table_data, selected_slug, auth_state
+    ):
         """Delete the selected player(s) after confirmation."""
         if not submit_n_clicks or not selected_rows or not table_data:
             return no_update, no_update
@@ -2137,11 +2493,18 @@ def register_callbacks(app):
             if len(deleted_names) == 1:
                 feedback = html.Span(f"🗑️ Deleted: {deleted_names[0]}", style={"color": "#ef4444"})
             else:
-                feedback = html.Span(f"🗑️ Deleted {len(deleted_names)} players", style={"color": "#ef4444"})
+                feedback = html.Span(
+                    f"🗑️ Deleted {len(deleted_names)} players", style={"color": "#ef4444"}
+                )
         elif failed_names and not deleted_names:
-            feedback = html.Span(f"❌ Failed to delete: {', '.join(failed_names)}", style={"color": "#ef4444"})
+            feedback = html.Span(
+                f"❌ Failed to delete: {', '.join(failed_names)}", style={"color": "#ef4444"}
+            )
         elif deleted_names and failed_names:
-            feedback = html.Span(f"🗑️ Deleted {len(deleted_names)}, ❌ Failed: {len(failed_names)}", style={"color": "#f59e0b"})
+            feedback = html.Span(
+                f"🗑️ Deleted {len(deleted_names)}, ❌ Failed: {len(failed_names)}",
+                style={"color": "#f59e0b"},
+            )
         else:
             feedback = html.Span("⚠️ No rows to delete", style={"color": "#f59e0b"})
 
@@ -2173,10 +2536,7 @@ def register_callbacks(app):
         guests = [row for row in table_data if is_guest(row.get("is_guest", ""))]
 
         if not guests:
-            return no_update, html.Span(
-                "⚠️ No guests found to export.",
-                style={"color": "#f59e0b"}
-            )
+            return no_update, html.Span("⚠️ No guests found to export.", style={"color": "#f59e0b"})
 
         # Build export data grouped by game
         # Players registered for multiple games are duplicated to each game section
@@ -2196,10 +2556,12 @@ def register_callbacks(app):
             # Add one row per game for this player
             for game in games:
                 if game:  # Skip empty
-                    export_data.append({
-                        "Tag": tag,
-                        "Game": game,
-                    })
+                    export_data.append(
+                        {
+                            "Tag": tag,
+                            "Game": game,
+                        }
+                    )
 
         # Sort by Game so all players per game are grouped together
         df = pd.DataFrame(export_data)
@@ -2216,7 +2578,7 @@ def register_callbacks(app):
 
         feedback = html.Span(
             f"✅ Exported {unique_guests} guests ({total_rows} entries across games)",
-            style={"color": "#10b981"}
+            style={"color": "#10b981"},
         )
 
         return dict(content=df.to_csv(index=False), filename=filename), feedback
@@ -2256,7 +2618,10 @@ def register_callbacks(app):
 
         record_id = settings_data.get("record_id")
         if not record_id:
-            return html.Span("❌ Could not find settings record", style={"color": "#ef4444"}), no_update
+            return (
+                html.Span("❌ Could not find settings record", style={"color": "#ef4444"}),
+                no_update,
+            )
 
         # Prepare update data (checklist returns [True] if checked, [] if not)
         update_data = {
@@ -2317,7 +2682,9 @@ def register_callbacks(app):
                                 "new": bool(req_startgg),
                             },
                             "offer_membership": {
-                                "old": bool((settings_data.get("fields") or {}).get("offer_membership")),
+                                "old": bool(
+                                    (settings_data.get("fields") or {}).get("offer_membership")
+                                ),
                                 "new": bool(offer_membership),
                             },
                         }
@@ -2364,37 +2731,57 @@ def register_callbacks(app):
 
         # Payment badge
         if req_payment:
-            badges.append(html.Span("💳 Payment", style={
-                **badge_style_active,
-                "backgroundColor": "rgba(16, 185, 129, 0.2)",
-                "color": "#10b981",
-            }))
+            badges.append(
+                html.Span(
+                    "💳 Payment",
+                    style={
+                        **badge_style_active,
+                        "backgroundColor": "rgba(16, 185, 129, 0.2)",
+                        "color": "#10b981",
+                    },
+                )
+            )
         else:
             badges.append(html.Span("💳 Payment", style=badge_style_inactive))
 
         # Membership badge
         if req_membership:
-            badges.append(html.Span("🎫 Membership", style={
-                **badge_style_active,
-                "backgroundColor": "rgba(139, 92, 246, 0.2)",
-                "color": "#8b5cf6",
-            }))
+            badges.append(
+                html.Span(
+                    "🎫 Membership",
+                    style={
+                        **badge_style_active,
+                        "backgroundColor": "rgba(139, 92, 246, 0.2)",
+                        "color": "#8b5cf6",
+                    },
+                )
+            )
         else:
             badges.append(html.Span("🎫 Membership", style=badge_style_inactive))
 
         # Start.gg badge
         if req_startgg:
-            badges.append(html.Span("🎮 Start.gg", style={
-                **badge_style_active,
-                "backgroundColor": "rgba(0, 212, 255, 0.2)",
-                "color": "#00d4ff",
-            }))
+            badges.append(
+                html.Span(
+                    "🎮 Start.gg",
+                    style={
+                        **badge_style_active,
+                        "backgroundColor": "rgba(0, 212, 255, 0.2)",
+                        "color": "#00d4ff",
+                    },
+                )
+            )
         else:
             badges.append(html.Span("🎮 Start.gg", style=badge_style_inactive))
 
         # If nothing required, add a note
         if not any([req_payment, req_membership, req_startgg]):
-            badges.append(html.Span("(All players auto-Ready)", style={"color": "#f59e0b", "fontStyle": "italic", "marginLeft": "0.5rem"}))
+            badges.append(
+                html.Span(
+                    "(All players auto-Ready)",
+                    style={"color": "#f59e0b", "fontStyle": "italic", "marginLeft": "0.5rem"},
+                )
+            )
 
         return badges
 
@@ -2492,7 +2879,7 @@ def register_callbacks(app):
 
             return html.Span(
                 f"✅ Saved! Price: {price} kr/game, Swish: {swish_number}",
-                style={"color": "#10b981"}
+                style={"color": "#10b981"},
             )
         else:
             return html.Span("❌ Failed to save settings", style={"color": "#ef4444"})
@@ -2514,7 +2901,9 @@ def register_callbacks(app):
             return no_update
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span("❌ Select a specific event before archiving.", style={"color": "#ef4444"})
+            return html.Span(
+                "❌ Select a specific event before archiving.", style={"color": "#ef4444"}
+            )
 
         clear_active = "clear" in (clear_flags or [])
 
@@ -2567,13 +2956,15 @@ def register_callbacks(app):
                 "event_archived",
                 "event_stats",
                 target_event=selected_slug,
-                details=json.dumps({
-                    "archived": result.get("archived", 0),
-                    "total_revenue": result.get("total_revenue", 0),
-                    "new_players": result.get("new_players", 0),
-                    "returning_players": result.get("returning_players", 0),
-                    "clear_active": clear_active,
-                }),
+                details=json.dumps(
+                    {
+                        "archived": result.get("archived", 0),
+                        "total_revenue": result.get("total_revenue", 0),
+                        "new_players": result.get("new_players", 0),
+                        "returning_players": result.get("returning_players", 0),
+                        "clear_active": clear_active,
+                    }
+                ),
             )
         except Exception as e:
             logger.warning(f"Failed to write audit log for archive: {e}")
@@ -2610,7 +3001,9 @@ def register_callbacks(app):
             return no_update
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span("❌ Select a specific event before reopening.", style={"color": "#ef4444"})
+            return html.Span(
+                "❌ Select a specific event before reopening.", style={"color": "#ef4444"}
+            )
 
         restore_active = "restore" in (restore_flags or [])
         payload = {
@@ -2657,10 +3050,12 @@ def register_callbacks(app):
                 "event_reopened",
                 "event_stats",
                 target_event=selected_slug,
-                details=json.dumps({
-                    "restore_active": restore_active,
-                    "restored_rows": result.get("restored_rows", 0),
-                }),
+                details=json.dumps(
+                    {
+                        "restore_active": restore_active,
+                        "restored_rows": result.get("restored_rows", 0),
+                    }
+                ),
             )
         except Exception as e:
             logger.warning(f"Failed to write audit log for reopen: {e}")
@@ -2696,7 +3091,10 @@ def register_callbacks(app):
             return (
                 False,
                 "",
-                html.Span("❌ Select a specific event before deleting archive.", style={"color": "#ef4444"}),
+                html.Span(
+                    "❌ Select a specific event before deleting archive.",
+                    style={"color": "#ef4444"},
+                ),
             )
 
         reason_text = (reason or "").strip()
@@ -2730,7 +3128,9 @@ def register_callbacks(app):
             return no_update
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span("❌ Select a specific event before deleting archive.", style={"color": "#ef4444"})
+            return html.Span(
+                "❌ Select a specific event before deleting archive.", style={"color": "#ef4444"}
+            )
 
         reason_text = (reason or "").strip()
         if not reason_text:
@@ -2850,7 +3250,9 @@ def register_callbacks(app):
             key=str.lower,
         )
 
-        action_options = [{"label": format_action_filter_label(a), "value": a} for a in action_values]
+        action_options = [
+            {"label": format_action_filter_label(a), "value": a} for a in action_values
+        ]
         # User filter uses user_id for filtering but shows user_name
         user_id_map = {}
         for e in all_entries:
