@@ -1240,15 +1240,99 @@ def archive_event(
     else:
         settings = None
 
+    def _coerce_to_iso_date(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+
+        # Unix timestamp support (seconds or milliseconds)
+        if isinstance(value, (int, float)):
+            ts = int(value)
+            if ts > 10_000_000_000:
+                ts = ts // 1000
+            try:
+                return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+            except Exception:
+                return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        if text.isdigit() and len(text) in (10, 13):
+            ts = int(text)
+            if len(text) == 13:
+                ts = ts // 1000
+            try:
+                return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+            except Exception:
+                return None
+
+        # ISO datetime/date strings (including trailing Z)
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        except Exception:
+            pass
+
+        # Plain date fallback
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(text, fmt).date().isoformat()
+            except Exception:
+                continue
+
+        return None
+
+    def _extract_date_from_snapshot(snapshot: Any, slug: str) -> Optional[str]:
+        if not isinstance(snapshot, dict):
+            return None
+
+        date_keys = ["event_date", "date", "start_at", "startAt", "event_start_at", "eventStartAt"]
+
+        for key in date_keys:
+            parsed = _coerce_to_iso_date(snapshot.get(key))
+            if parsed:
+                return parsed
+
+        events = snapshot.get("events")
+        if isinstance(events, list):
+            selected_event = None
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                ev_slug = str(ev.get("event_slug") or ev.get("slug") or "").strip()
+                if ev_slug and ev_slug == slug:
+                    selected_event = ev
+                    break
+            if selected_event is None:
+                selected_event = next((ev for ev in events if isinstance(ev, dict)), None)
+
+            if isinstance(selected_event, dict):
+                for key in date_keys:
+                    parsed = _coerce_to_iso_date(selected_event.get(key))
+                    if parsed:
+                        return parsed
+
+        return None
+
     if not event_date:
         if settings:
             ed = settings.get("event_date")
             if ed:
                 event_date = ed.isoformat() if hasattr(ed, "isoformat") else str(ed)
+
         if not event_date:
-            raise ValueError(
-                "event_date is required for archiving "
-                "(not provided as parameter and not found in active settings)"
+            snapshot_for_date = startgg_snapshot
+            if snapshot_for_date is None and settings:
+                snapshot_for_date = settings.get("events_json")
+            event_date = _extract_date_from_snapshot(snapshot_for_date, event_slug)
+
+        if not event_date:
+            event_date = datetime.now(timezone.utc).date().isoformat()
+            logger.warning(
+                "archive_event: missing event_date in payload/settings/snapshot for '%s'; "
+                "falling back to today's date (%s)",
+                event_slug,
+                event_date,
             )
 
     if not event_display_name and settings:
