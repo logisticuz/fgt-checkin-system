@@ -599,6 +599,7 @@ def create_layout():
                                 id="checkins-table",
                                 columns=columns,
                                 data=data,
+                                editable=False,
                                 page_size=20,
                                 sort_action="native",
                                 row_selectable="multi",
@@ -698,11 +699,101 @@ def create_layout():
                                 "cursor": "pointer",
                             }
                         ),
-                        html.Span("Click row to select • Click Payment/Start.gg/Guest to toggle", style={"color": COLORS["text_muted"], "fontSize": "0.75rem"}),
+                        html.Span("Click row to select • Click Payment/Start.gg/Member to toggle • Edit Tag inline", style={"color": COLORS["text_muted"], "fontSize": "0.75rem"}),
                     ]),
+
+                    html.Div(style={"marginTop": "0.75rem"}, children=[
+                        html.Button(
+                            "Manual Tools ▾",
+                            id="btn-toggle-manual-checkin",
+                            n_clicks=0,
+                            style={
+                                "backgroundColor": "transparent",
+                                "color": COLORS["text_secondary"],
+                                "border": f"1px solid {COLORS['border']}",
+                                "borderRadius": "8px",
+                                "padding": "0.4rem 0.75rem",
+                                "fontSize": "0.78rem",
+                                "fontWeight": "600",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Div(
+                            id="manual-checkin-panel",
+                            style={"display": "none", "marginTop": "0.6rem"},
+                            children=[
+                                html.Div(style={"display": "flex", "gap": "0.6rem", "flexWrap": "wrap", "alignItems": "center"}, children=[
+                                    dcc.Input(
+                                        id="input-manual-name",
+                                        type="text",
+                                        placeholder="Manual check-in: Name",
+                                        style={
+                                            **STYLES["input"],
+                                            "maxWidth": "230px",
+                                            "height": "40px",
+                                            "fontSize": "0.82rem",
+                                            "lineHeight": "1.2",
+                                        },
+                                    ),
+                                    dcc.Input(
+                                        id="input-manual-tag",
+                                        type="text",
+                                        placeholder="Tag (optional)",
+                                        style={
+                                            **STYLES["input"],
+                                            "maxWidth": "180px",
+                                            "height": "40px",
+                                            "fontSize": "0.82rem",
+                                            "lineHeight": "1.2",
+                                        },
+                                    ),
+                                    html.Button(
+                                        "Add Manual Check-in",
+                                        id="btn-manual-checkin",
+                                        n_clicks=0,
+                                        style={
+                                            "backgroundColor": COLORS["accent_green"],
+                                            "color": "#fff",
+                                            "border": "none",
+                                            "borderRadius": "8px",
+                                            "padding": "0.5rem 0.9rem",
+                                            "fontSize": "0.8rem",
+                                            "fontWeight": "600",
+                                            "cursor": "pointer",
+                                        },
+                                    ),
+                                    html.Span(
+                                        "Use for Start.gg players who missed the kiosk check-in.",
+                                        style={"color": COLORS["text_muted"], "fontSize": "0.75rem"},
+                                    ),
+                                ]),
+                            ],
+                        ),
+                    ]),
+
+                    html.Div(style={"display": "flex", "gap": "0.6rem", "flexWrap": "wrap", "marginTop": "0.75rem", "alignItems": "center"}, children=[
+                        html.Button(
+                            "Re-check Start.gg",
+                            id="btn-recheck-startgg",
+                            n_clicks=0,
+                            style={
+                                "backgroundColor": "#a78bfa",
+                                "color": "#fff",
+                                "border": "none",
+                                "borderRadius": "8px",
+                                "padding": "0.5rem 0.9rem",
+                                "fontSize": "0.8rem",
+                                "fontWeight": "600",
+                                "cursor": "pointer",
+                            }
+                        ),
+                        html.Span("Select a player row first. Re-validates Start.gg registration and syncs games.", style={"color": COLORS["text_muted"], "fontSize": "0.75rem"}),
+                    ]),
+                    html.Div(id="recheck-startgg-feedback", style={"marginTop": "0.5rem"}),
 
                     # Feedback messages
                     html.Div(id="payment-update-feedback", style={"marginTop": "0.5rem"}),
+                    html.Div(id="manual-checkin-feedback", style={"marginTop": "0.5rem"}),
                     html.Div(id="delete-feedback", style={"marginTop": "0.5rem"}),
                     html.Div(id="export-feedback", style={"marginTop": "0.5rem"}),
 
@@ -941,6 +1032,7 @@ def create_layout():
                                 {"name": "Slug", "id": "event_slug"},
                                 {"name": "Date", "id": "event_date"},
                                 {"name": "Participants", "id": "total_participants"},
+                                {"name": "Checked-in/Reg", "id": "checked_in_vs_registered"},
                                 {"name": "Revenue", "id": "total_revenue"},
                                 {"name": "Member %", "id": "member_rate"},
                                 {"name": "Start.gg %", "id": "startgg_rate"},

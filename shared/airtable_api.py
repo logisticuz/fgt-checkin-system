@@ -458,6 +458,77 @@ def delete_checkin(record_id: str) -> bool:
     return _delete_record(CHECKINS_TABLE, record_id)
 
 
+def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create or update a check-in attempt and return checkin_id.
+
+    Dedupe strategy:
+    - event_slug + tag (case-insensitive) if tag exists
+    - else event_slug + name (case-insensitive) if name exists
+    """
+    if not event_slug:
+        raise ValueError("event_slug is required")
+
+    payload = payload or {}
+    tag = (payload.get("tag") or "").strip()
+    name = (payload.get("name") or "").strip()
+
+    existing = None
+    if tag:
+        existing = get_checkin_by_tag(tag, event_slug)
+    elif name:
+        existing = get_checkin_by_name(name, event_slug)
+
+    games = payload.get("tournament_games_registered")
+    if isinstance(games, str):
+        games = [g.strip() for g in games.split(",") if g.strip()]
+    if not isinstance(games, list):
+        games = []
+
+    fields = {
+        "event_slug": event_slug,
+        "name": payload.get("name"),
+        "tag": payload.get("tag"),
+        "email": payload.get("email"),
+        "telephone": payload.get("telephone"),
+        "status": payload.get("status") or "Pending",
+        "member": bool(payload.get("member", False)),
+        "startgg": bool(payload.get("startgg", False)),
+        "is_guest": bool(payload.get("is_guest", False)),
+        "payment_valid": bool(payload.get("payment_valid", False)),
+        "payment_amount": payload.get("payment_amount") or 0,
+        "payment_expected": payload.get("payment_expected") or 0,
+        "tournament_games_registered": games,
+        "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
+        "startgg_event_id": payload.get("startgg_event_id"),
+        "external_id": payload.get("external_id"),
+    }
+
+    if existing and existing.get("record_id"):
+        checkin_id = existing["record_id"]
+        updated = update_checkin(checkin_id, fields, typecast=True)
+        if not updated:
+            raise RuntimeError("Failed to update existing checkin")
+        return {
+            "checkin_id": checkin_id,
+            "record_id": checkin_id,
+            "event_slug": event_slug,
+            "created": False,
+        }
+
+    created = _create_record(CHECKINS_TABLE, fields, typecast=True)
+    if not created:
+        raise RuntimeError("Failed to create checkin")
+
+    checkin_id = created.get("id")
+    return {
+        "checkin_id": checkin_id,
+        "record_id": checkin_id,
+        "event_slug": event_slug,
+        "created": True,
+    }
+
+
 # -----------------------------
 # Sessions (Airtable-backed)
 # -----------------------------
