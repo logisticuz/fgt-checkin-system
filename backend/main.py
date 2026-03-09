@@ -47,10 +47,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === Config ===
-DATA_BACKEND = os.getenv("DATA_BACKEND", "airtable").lower().strip()
+DATA_BACKEND = os.getenv("DATA_BACKEND", "postgres").lower().strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-# Table name used for Airtable fallback mode
-AIRTABLE_TABLE = "active_event_data"
+AIRTABLE_TABLE = "active_event_data"  # Only used if DATA_BACKEND=airtable
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
 STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET")
@@ -356,7 +355,7 @@ def get_active_settings() -> dict:
     Fetch active event settings from the configured storage backend.
     Returns dict with swish_number, swish_expected_per_game, active_event_slug,
     and configurable check-in requirements.
-    Uses shared storage facade (postgres or airtable fallback).
+    Uses shared storage facade.
     """
     fields = storage_get_active_settings() or {}
     return {

@@ -399,7 +399,7 @@ async def auth_callback(code: str = ""):
                     status_code=403,
                 )
 
-        # Step 3: Create session in Airtable
+        # Step 3: Create session
         session_id = create_session(user_info, access_token)
         if not session_id:
             return JSONResponse({"error": "Session creation failed"}, status_code=500)
