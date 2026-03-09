@@ -2557,6 +2557,27 @@ def register_callbacks(app):
                 logger.exception(f"Archive API call failed for {selected_slug}: {e}")
                 return html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"})
 
+        try:
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "event_archived",
+                "event_stats",
+                target_event=selected_slug,
+                details=json.dumps({
+                    "archived": result.get("archived", 0),
+                    "total_revenue": result.get("total_revenue", 0),
+                    "new_players": result.get("new_players", 0),
+                    "returning_players": result.get("returning_players", 0),
+                    "clear_active": clear_active,
+                }),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for archive: {e}")
+
         return html.Div(
             style={"color": "#10b981", "lineHeight": "1.5"},
             children=[
@@ -2625,6 +2646,24 @@ def register_callbacks(app):
             except Exception as e:
                 logger.exception(f"Reopen API call failed for {selected_slug}: {e}")
                 return html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"})
+
+        try:
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "event_reopened",
+                "event_stats",
+                target_event=selected_slug,
+                details=json.dumps({
+                    "restore_active": restore_active,
+                    "restored_rows": result.get("restored_rows", 0),
+                }),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for reopen: {e}")
 
         return html.Div(
             style={"color": "#10b981", "lineHeight": "1.5"},
