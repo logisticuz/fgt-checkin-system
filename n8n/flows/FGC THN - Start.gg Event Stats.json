@@ -33,7 +33,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ query: 'query T($slug: String!) { tournament(slug: $slug) { id name numEntrants events { id name numEntrants } } }', variables: { slug: $json.slug } }) }}",
+        "jsonBody": "={{ JSON.stringify({ query: 'query T($slug: String!) { tournament(slug: $slug) { id name events { id name entrants(query: {page: 1, perPage: 1}) { pageInfo { total } } } } }', variables: { slug: $json.slug } }) }}",
         "options": {}
       },
       "id": "startgg-query",
@@ -45,7 +45,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst tournament = input?.data?.tournament;\nconst slug = $('Webhook').first().json.slug || '';\n\nif (!tournament) {\n  return [{ json: { error: 'Tournament not found', slug } }];\n}\n\nreturn [{\n  json: {\n    event_slug: slug,\n    startgg_registered_count: tournament.numEntrants || 0,\n    tournament_name: tournament.name || '',\n    events: (tournament.events || []).map(e => ({\n      id: e.id,\n      name: e.name,\n      numEntrants: e.numEntrants || 0\n    }))\n  }\n}];"
+        "jsCode": "const input = $input.first().json;\nconst tournament = input?.data?.tournament;\nconst slug = $('Webhook').first().json.slug || '';\n\nif (!tournament) {\n  return [{ json: { error: 'Tournament not found', slug } }];\n}\n\nconst events = (tournament.events || []).map(e => ({\n  id: e.id,\n  name: e.name,\n  numEntrants: (e.entrants?.pageInfo?.total) || 0\n}));\nconst totalEntrants = events.reduce((sum, e) => sum + e.numEntrants, 0);\n\nreturn [{\n  json: {\n    event_slug: slug,\n    startgg_registered_count: totalEntrants,\n    tournament_name: tournament.name || '',\n    events: events\n  }\n}];"
       },
       "id": "transform",
       "name": "Transform",

@@ -622,8 +622,15 @@ def register_callbacks(app):
                 name
                 startAt
                 timezone
-                numEntrants
-                events { id name slug startAt numEntrants }
+                events {
+                  id
+                  name
+                  slug
+                  startAt
+                  entrants(query: {page: 1, perPage: 1}) {
+                    pageInfo { total }
+                  }
+                }
               }
             }
             """,
@@ -666,17 +673,24 @@ def register_callbacks(app):
 
         # Build compact events array
         events = tournament.get("events") or []
-        events_compact = [
-            {
+        events_compact = []
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            entrant_total = 0
+            try:
+                entrant_total = e["entrants"]["pageInfo"]["total"]
+            except (KeyError, TypeError):
+                pass
+            events_compact.append({
                 "id": e.get("id"),
                 "name": e.get("name"),
                 "slug": e.get("slug"),
                 "startAt": e.get("startAt"),
-                "numEntrants": e.get("numEntrants"),
-            }
-            for e in events
-            if isinstance(e, dict)
-        ]
+                "numEntrants": entrant_total,
+            })
+        tournament_entrants = sum(ev.get("numEntrants", 0) for ev in events_compact)
+        logger.info(f"Entrant count from events: {tournament_entrants} (across {len(events_compact)} events)")
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
         # 3) Find active settings row using storage backend
@@ -723,7 +737,7 @@ def register_callbacks(app):
         # Wrap events_json as {tournament_entrants, events} for no-show tracking.
         # Readers already handle both list and dict formats (backward compatible).
         events_json_value = {
-            "tournament_entrants": tournament.get("numEntrants"),
+            "tournament_entrants": tournament_entrants,
             "events": events_compact,
         }
         patch_fields = {
