@@ -145,8 +145,15 @@
     }
 
     select {
-      min-height: 80px;
       cursor: pointer;
+    }
+    select[multiple] {
+      min-height: 80px;
+    }
+    #ci-pnr-picker-mode select,
+    #ci-pnr-picker-mode input {
+      width: auto;
+      padding: 0.4rem 0.4rem;
     }
 
     select option {
@@ -256,6 +263,7 @@
       color: #58aaff;
       text-decoration: none;
     }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
@@ -289,8 +297,30 @@
       </div>
 
       <div class="form-group" id="personnummer-group">
-        <label for="personnummer">Personal ID (YYYYMMDDXXXX)</label>
-        <input type="text" id="personnummer" name="personnummer" placeholder="199001011234" pattern="\d{10,12}">
+        <label>Personal ID</label>
+        <div id="ci-pnr-picker-mode">
+          <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
+            <select id="ci-pnr-year" style="flex: 1; min-width: 75px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();"><option value="">Year</option></select>
+            <select id="ci-pnr-month" style="flex: 1; min-width: 80px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();">
+              <option value="">Month</option>
+              <option value="01">01</option><option value="02">02</option><option value="03">03</option>
+              <option value="04">04</option><option value="05">05</option><option value="06">06</option>
+              <option value="07">07</option><option value="08">08</option><option value="09">09</option>
+              <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+            </select>
+            <select id="ci-pnr-day" style="flex: 0.7; min-width: 60px; padding: 0.4rem 0.4rem;" onchange="ciSyncPicker();"><option value="">Day</option></select>
+            <input type="text" id="ci-pnr-last4" placeholder="XXXX" maxlength="4" inputmode="numeric"
+                   style="flex: 0.8; min-width: 65px; text-align: center; letter-spacing: 2px; padding: 0.4rem 0.4rem;"
+                   oninput="this.value=this.value.replace(/\D/g,''); ciSyncPicker();">
+          </div>
+          <a href="#" onclick="ciTogglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Type manually instead</a>
+        </div>
+        <div id="ci-pnr-manual-mode" class="hidden">
+          <input type="text" id="ci-pnr-manual-input" placeholder="199001011234" pattern="\d{10,12}" oninput="ciSyncManual();">
+          <a href="#" onclick="ciTogglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Use date picker</a>
+        </div>
+        <input type="hidden" id="personnummer" name="personnummer">
+        <div id="ci-pnr-error" style="color: #f44336; font-size: 0.8rem; min-height: 1.1rem;"></div>
       </div>
 
       <div class="consent">
@@ -309,6 +339,93 @@
 
   <script src="/static/js/validation.js"></script>
   <script>
+    // === Personnummer date picker logic (checkin) ===
+    (function initCiPnrPicker() {
+      const yearSelect = document.getElementById("ci-pnr-year");
+      if (!yearSelect) return;
+      const currentYear = new Date().getFullYear();
+      for (let y = currentYear; y >= 1920; y--) {
+        const opt = document.createElement("option");
+        opt.value = String(y);
+        opt.textContent = String(y);
+        yearSelect.appendChild(opt);
+      }
+      ciUpdateDays();
+    })();
+
+    function ciUpdateDays() {
+      const yearVal = document.getElementById("ci-pnr-year").value;
+      const monthVal = document.getElementById("ci-pnr-month").value;
+      const daySelect = document.getElementById("ci-pnr-day");
+      const currentDay = daySelect.value;
+      let maxDays = 31;
+      if (monthVal) {
+        const m = parseInt(monthVal, 10);
+        const y = yearVal ? parseInt(yearVal, 10) : 2000;
+        if ([4, 6, 9, 11].includes(m)) maxDays = 30;
+        else if (m === 2) {
+          const leap = (y % 4 === 0 && y % 100 !== 0) || (y % 400 === 0);
+          maxDays = leap ? 29 : 28;
+        }
+      }
+      daySelect.innerHTML = '<option value="">Day</option>';
+      for (let d = 1; d <= maxDays; d++) {
+        const opt = document.createElement("option");
+        opt.value = String(d).padStart(2, "0");
+        opt.textContent = String(d).padStart(2, "0");
+        daySelect.appendChild(opt);
+      }
+      if (currentDay && parseInt(currentDay, 10) <= maxDays) daySelect.value = currentDay;
+    }
+
+    function ciSyncPicker() {
+      const y = document.getElementById("ci-pnr-year").value;
+      const m = document.getElementById("ci-pnr-month").value;
+      const d = document.getElementById("ci-pnr-day").value;
+      const last4 = document.getElementById("ci-pnr-last4").value;
+      const combined = (y && m && d && last4.length === 4) ? y + m + d + last4 : "";
+      document.getElementById("personnummer").value = combined;
+      ciValidatePnr(combined);
+    }
+
+    function ciSyncManual() {
+      const val = document.getElementById("ci-pnr-manual-input").value;
+      const cleaned = Validation.sanitizePersonnummer(val);
+      document.getElementById("personnummer").value = cleaned;
+      ciValidatePnr(cleaned);
+    }
+
+    function ciValidatePnr(value) {
+      const errorEl = document.getElementById("ci-pnr-error");
+      if (!value) { errorEl.textContent = ""; return; }
+      const result = Validation.validatePersonnummer(value);
+      errorEl.textContent = result.valid ? "" : (result.error || "");
+    }
+
+    function ciTogglePnrMode(e) {
+      e.preventDefault();
+      const picker = document.getElementById("ci-pnr-picker-mode");
+      const manual = document.getElementById("ci-pnr-manual-mode");
+      if (!picker.classList.contains("hidden")) {
+        picker.classList.add("hidden");
+        manual.classList.remove("hidden");
+        const current = document.getElementById("personnummer").value;
+        if (current) document.getElementById("ci-pnr-manual-input").value = current;
+      } else {
+        manual.classList.add("hidden");
+        picker.classList.remove("hidden");
+        const raw = Validation.sanitizePersonnummer(document.getElementById("ci-pnr-manual-input").value);
+        if (raw.length === 12) {
+          document.getElementById("ci-pnr-year").value = raw.slice(0, 4);
+          document.getElementById("ci-pnr-month").value = raw.slice(4, 6);
+          ciUpdateDays();
+          document.getElementById("ci-pnr-day").value = raw.slice(6, 8);
+          document.getElementById("ci-pnr-last4").value = raw.slice(8, 12);
+          ciSyncPicker();
+        }
+      }
+    }
+
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
 

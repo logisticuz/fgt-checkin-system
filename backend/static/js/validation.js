@@ -52,6 +52,43 @@ const Validation = {
   },
 
   /**
+   * Validate Swedish personnummer using Luhn algorithm.
+   * Accepts 10 or 12 digit string (sanitized, digits only).
+   * Returns {valid: boolean, error: string|null}
+   */
+  validatePersonnummer(value) {
+    if (!value) return { valid: false, error: "Personal ID is required" };
+
+    const digits = this.sanitizePersonnummer(value);
+    if (digits.length !== 10 && digits.length !== 12) {
+      return { valid: false, error: `Personal ID must be 10 or 12 digits (got ${digits.length})` };
+    }
+
+    // Use last 10 digits for Luhn (strip century if 12 digits)
+    const d = digits.length === 12 ? digits.slice(2) : digits;
+
+    // Basic date sanity check (YYMMDD)
+    const month = parseInt(d.slice(2, 4), 10);
+    const day = parseInt(d.slice(4, 6), 10);
+    if (month < 1 || month > 12) return { valid: false, error: "Invalid month in Personal ID" };
+    if (day < 1 || day > 31) return { valid: false, error: "Invalid day in Personal ID" };
+
+    // Luhn checksum on all 10 digits
+    const weights = [2, 1, 2, 1, 2, 1, 2, 1, 2, 1];
+    let sum = 0;
+    for (let i = 0; i < 10; i++) {
+      let val = parseInt(d[i], 10) * weights[i];
+      if (val >= 10) val -= 9;
+      sum += val;
+    }
+    if (sum % 10 !== 0) {
+      return { valid: false, error: "Invalid Personal ID (checksum failed)" };
+    }
+
+    return { valid: true, error: null };
+  },
+
+  /**
    * Validate a check-in form and return errors
    */
   validateForm(data) {
@@ -65,12 +102,12 @@ const Validation = {
       errors.push(`Name can be max ${this.MAX_LENGTHS.name} characters`);
     }
 
-    // Personnummer format (if provided)
+    // Personnummer validation with Luhn (if provided)
     const pnr = data.personnummer || data.personal_id || "";
     if (pnr) {
-      const cleaned = this.sanitizePersonnummer(pnr);
-      if (cleaned.length > 0 && cleaned.length !== 10 && cleaned.length !== 12) {
-        errors.push(`Personal ID must be 10 or 12 digits (got ${cleaned.length})`);
+      const result = this.validatePersonnummer(pnr);
+      if (!result.valid) {
+        errors.push(result.error);
       }
     }
 
