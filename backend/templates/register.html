@@ -263,10 +263,32 @@
         Membership is free. Registration can take up to 60 seconds while SPAR/Sverok confirms your details.
       </p>
 
-      <label for="pnr-ebas">Personal ID (YYYYMMDDXXXX)</label>
-      <input type="text" id="pnr-ebas" placeholder="199001011234" pattern="\d{10,12}" oninput="validateEbasForm()">
+      <label>Personal ID</label>
+      <div id="pnr-picker-mode">
+        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
+          <select id="pnr-year" style="flex: 1; min-width: 75px; padding: 0.4rem 0.4rem;" onchange="updatePnrDays(); syncPnrPicker();"><option value="">Year</option></select>
+          <select id="pnr-month" style="flex: 1; min-width: 80px; padding: 0.4rem 0.4rem;" onchange="updatePnrDays(); syncPnrPicker();">
+            <option value="">Month</option>
+            <option value="01">01</option><option value="02">02</option><option value="03">03</option>
+            <option value="04">04</option><option value="05">05</option><option value="06">06</option>
+            <option value="07">07</option><option value="08">08</option><option value="09">09</option>
+            <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+          </select>
+          <select id="pnr-day" style="flex: 0.7; min-width: 60px; padding: 0.4rem 0.4rem;" onchange="syncPnrPicker();"><option value="">Day</option></select>
+          <input type="text" id="pnr-last4" placeholder="XXXX" maxlength="4" inputmode="numeric"
+                 style="flex: 0.8; min-width: 65px; text-align: center; letter-spacing: 2px; padding: 0.4rem 0.4rem;"
+                 oninput="this.value=this.value.replace(/\D/g,''); syncPnrPicker();">
+        </div>
+        <a href="#" id="pnr-toggle-manual" onclick="togglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Type manually instead</a>
+      </div>
+      <div id="pnr-manual-mode" class="hidden">
+        <input type="text" id="pnr-manual-input" placeholder="199001011234" pattern="\d{10,12}" oninput="syncPnrManual();">
+        <a href="#" onclick="togglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Use date picker</a>
+      </div>
+      <input type="hidden" id="pnr-ebas">
+      <div id="pnr-error" style="color: #f44336; font-size: 0.8rem; min-height: 1.1rem; margin-bottom: 0.4rem;"></div>
 
-      <label for="email-ebas">Email (optional)</label>
+      <label for="email-ebas">Email</label>
       <input type="email" id="email-ebas" placeholder="your@email.com" oninput="validateEbasForm()">
 
       <label for="phone-ebas">Phone</label>
@@ -330,6 +352,86 @@
 
   <script src="/static/js/validation.js"></script>
   <script>
+    // === Personnummer date picker logic ===
+    (function initPnrPicker() {
+      const yearSelect = document.getElementById("pnr-year");
+      if (!yearSelect) return;
+      const currentYear = new Date().getFullYear();
+      for (let y = currentYear; y >= 1920; y--) {
+        const opt = document.createElement("option");
+        opt.value = String(y);
+        opt.textContent = String(y);
+        yearSelect.appendChild(opt);
+      }
+      updatePnrDays();
+    })();
+
+    function updatePnrDays() {
+      const yearVal = document.getElementById("pnr-year").value;
+      const monthVal = document.getElementById("pnr-month").value;
+      const daySelect = document.getElementById("pnr-day");
+      const currentDay = daySelect.value;
+      let maxDays = 31;
+      if (monthVal) {
+        const m = parseInt(monthVal, 10);
+        const y = yearVal ? parseInt(yearVal, 10) : 2000;
+        if ([4, 6, 9, 11].includes(m)) maxDays = 30;
+        else if (m === 2) {
+          const leap = (y % 4 === 0 && y % 100 !== 0) || (y % 400 === 0);
+          maxDays = leap ? 29 : 28;
+        }
+      }
+      daySelect.innerHTML = '<option value="">Day</option>';
+      for (let d = 1; d <= maxDays; d++) {
+        const opt = document.createElement("option");
+        opt.value = String(d).padStart(2, "0");
+        opt.textContent = String(d).padStart(2, "0");
+        daySelect.appendChild(opt);
+      }
+      if (currentDay && parseInt(currentDay, 10) <= maxDays) daySelect.value = currentDay;
+    }
+
+    function syncPnrPicker() {
+      const y = document.getElementById("pnr-year").value;
+      const m = document.getElementById("pnr-month").value;
+      const d = document.getElementById("pnr-day").value;
+      const last4 = document.getElementById("pnr-last4").value;
+      const combined = (y && m && d && last4.length === 4) ? y + m + d + last4 : "";
+      document.getElementById("pnr-ebas").value = combined;
+      validateEbasForm();
+    }
+
+    function syncPnrManual() {
+      const val = document.getElementById("pnr-manual-input").value;
+      document.getElementById("pnr-ebas").value = Validation.sanitizePersonnummer(val);
+      validateEbasForm();
+    }
+
+    function togglePnrMode(e) {
+      e.preventDefault();
+      const picker = document.getElementById("pnr-picker-mode");
+      const manual = document.getElementById("pnr-manual-mode");
+      if (!picker.classList.contains("hidden")) {
+        picker.classList.add("hidden");
+        manual.classList.remove("hidden");
+        const current = document.getElementById("pnr-ebas").value;
+        if (current) document.getElementById("pnr-manual-input").value = current;
+      } else {
+        manual.classList.add("hidden");
+        picker.classList.remove("hidden");
+        const raw = Validation.sanitizePersonnummer(document.getElementById("pnr-manual-input").value);
+        if (raw.length === 12) {
+          document.getElementById("pnr-year").value = raw.slice(0, 4);
+          document.getElementById("pnr-month").value = raw.slice(4, 6);
+          updatePnrDays();
+          document.getElementById("pnr-day").value = raw.slice(6, 8);
+          document.getElementById("pnr-last4").value = raw.slice(8, 12);
+          syncPnrPicker();
+        }
+      }
+      validateEbasForm();
+    }
+
     // Config
     const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
     const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
@@ -468,7 +570,17 @@
       if (state.needsEbas) {
         document.getElementById("section-ebas").classList.remove("hidden");
         // Pre-fill from localStorage
-        if (state.personnummer) document.getElementById("pnr-ebas").value = state.personnummer;
+        if (state.personnummer) {
+          const raw = Validation.sanitizePersonnummer(state.personnummer);
+          document.getElementById("pnr-ebas").value = raw;
+          if (raw.length === 12) {
+            document.getElementById("pnr-year").value = raw.slice(0, 4);
+            document.getElementById("pnr-month").value = raw.slice(4, 6);
+            updatePnrDays();
+            document.getElementById("pnr-day").value = raw.slice(6, 8);
+            document.getElementById("pnr-last4").value = raw.slice(8, 12);
+          }
+        }
       }
 
       if (state.needsPayment) {
@@ -501,17 +613,18 @@
       const btn = document.getElementById("btn-register-ebas");
       const pnrRaw = document.getElementById("pnr-ebas").value.trim();
       const phone = document.getElementById("phone-ebas").value.trim();
+      const errorEl = document.getElementById("pnr-error");
 
-      // Validate personnummer (10 or 12 digits)
-      const pnr = Validation.sanitizePersonnummer(pnrRaw);
-      const pnrValid = pnr && (pnr.length === 10 || pnr.length === 12);
+      // Validate personnummer with Luhn
+      const pnrResult = pnrRaw ? Validation.validatePersonnummer(pnrRaw) : { valid: false, error: null };
+      if (errorEl) errorEl.textContent = (pnrRaw && !pnrResult.valid) ? (pnrResult.error || "") : "";
 
       // Validate phone (minimum 7 digits)
       const cleanedPhone = Validation.sanitizePhone(phone);
       const phoneValid = cleanedPhone.length >= 7;
 
       // Enable button only if both are valid
-      btn.disabled = !(pnrValid && phoneValid);
+      btn.disabled = !(pnrResult.valid && phoneValid);
     }
 
     // eBas Registration
@@ -529,8 +642,9 @@
         return;
       }
 
-      if (pnr.length !== 10 && pnr.length !== 12) {
-        showMessage(`Personal ID must be 10 or 12 digits (you entered ${pnr.length} digits)`, "error");
+      const pnrCheck = Validation.validatePersonnummer(pnr);
+      if (!pnrCheck.valid) {
+        showMessage(pnrCheck.error, "error");
         return;
       }
 

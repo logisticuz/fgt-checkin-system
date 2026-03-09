@@ -95,6 +95,45 @@ def sanitize_personnummer(value: str) -> str:
     return digits
 
 
+def validate_personnummer(value: str) -> tuple:
+    """
+    Validate Swedish personnummer using Luhn algorithm.
+    Accepts sanitized digit string (10 or 12 digits).
+    Returns (is_valid, error_message).
+    """
+    if not value:
+        return (False, "Personal ID is required")
+
+    digits = sanitize_personnummer(value)
+    if len(digits) not in (10, 12):
+        return (False, f"Personal ID must be 10 or 12 digits (got {len(digits)})")
+
+    # Use last 10 digits for Luhn (strip century if 12 digits)
+    d = digits[-10:]
+
+    # Basic date sanity check (YYMMDD)
+    month = int(d[2:4])
+    day = int(d[4:6])
+    if month < 1 or month > 12:
+        return (False, "Invalid month in Personal ID")
+    if day < 1 or day > 31:
+        return (False, "Invalid day in Personal ID")
+
+    # Luhn checksum on all 10 digits
+    weights = [2, 1, 2, 1, 2, 1, 2, 1, 2, 1]
+    total = 0
+    for i in range(10):
+        val = int(d[i]) * weights[i]
+        if val >= 10:
+            val -= 9
+        total += val
+
+    if total % 10 != 0:
+        return (False, "Invalid Personal ID (checksum failed)")
+
+    return (True, "")
+
+
 def normalize_missing_keys(missing: list) -> list:
     """
     Normalize 'missing' keys to consistent lowercase English values.
@@ -187,12 +226,13 @@ def validate_checkin_payload(data: dict) -> list[str]:
     if not has_tag:
         errors.append("Tag/gamertag is required")
 
-    # Validate personnummer format (if provided)
+    # Validate personnummer with Luhn (if provided)
     for field in ["personnummer", "personal_id"]:
         if field in data and data[field]:
-            pnr = sanitize_personnummer(str(data[field]))
-            if pnr and len(pnr) not in [10, 12]:
-                errors.append(f"Invalid personal ID format (expected 10 or 12 digits, got {len(pnr)})")
+            is_valid, err = validate_personnummer(str(data[field]))
+            if not is_valid:
+                errors.append(err)
+                break
 
     # Validate phone format (if provided)
     for field in ["telefon", "phone", "telephone"]:
