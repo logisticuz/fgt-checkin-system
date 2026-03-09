@@ -36,6 +36,9 @@ ACTION_META = {
     "admin_update_requirements": ("Settings", "Update Requirements"),
     "admin_update_payment_settings": ("Settings", "Update Payment Settings"),
     "admin_toggle_field": ("Check-ins", "Toggle Field"),
+    "admin_update_tag": ("Check-ins", "Update Tag"),
+    "admin_manual_checkin": ("Check-ins", "Manual Check-in"),
+    "admin_recheck_startgg": ("Check-ins", "Re-check Start.gg"),
     "admin_delete_checkin": ("Check-ins", "Delete Player"),
     "integration_result": ("Integrations", "Result"),
     "event_archived": ("Archive", "Event Archived"),
@@ -328,7 +331,7 @@ def register_callbacks(app):
             for c in visible_cols:
                 if c in df_filtered.columns:
                     header = COLUMN_HEADERS.get(c, str(c).replace("_", " ").title())
-                    col_def = {"name": header, "id": str(c), "reorderable": True}
+                    col_def = {"name": header, "id": str(c), "reorderable": True, "editable": c == "tag"}
                     cols.append(col_def)
 
             # Player count text
@@ -462,6 +465,17 @@ def register_callbacks(app):
             }
 
         return styles["all"], styles["ready"], styles["pending"], styles["no-payment"]
+
+    @app.callback(
+        Output("manual-checkin-panel", "style"),
+        Output("btn-toggle-manual-checkin", "children"),
+        Input("btn-toggle-manual-checkin", "n_clicks"),
+    )
+    def toggle_manual_checkin_panel(n_clicks):
+        expanded = bool(n_clicks and n_clicks % 2 == 1)
+        if expanded:
+            return {"display": "block", "marginTop": "0.6rem"}, "Manual Tools ▴"
+        return {"display": "none", "marginTop": "0.6rem"}, "Manual Tools ▾"
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update settings
@@ -1199,6 +1213,11 @@ def register_callbacks(app):
                     "event_slug": ev.get("event_slug", ""),
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
+                    "checked_in_vs_registered": (
+                        f"{_as_int(ev.get('checked_in_count'))}/{_as_int(ev.get('startgg_registered_count'))}"
+                        if _as_int(ev.get("startgg_registered_count")) > 0
+                        else "-"
+                    ),
                     "total_revenue": f"{ev_revenue:.0f} kr",
                     "member_rate": f"{ev_member_rate:.0f}%",
                     "startgg_rate": f"{ev_startgg_rate:.0f}%",
@@ -1302,19 +1321,23 @@ def register_callbacks(app):
         # Community-friendly heads-up text for no-show trend (non-alarm tone).
         heads_up_text = ""
         reg_total = metrics.get("startgg_registered_total", 0)
+        checked_in_total = metrics.get("checked_in_total", 0)
         no_show_total = metrics.get("no_show_total", 0)
         no_show_rate = metrics.get("no_show_rate", 0.0)
-        if reg_total >= 10:
-            if no_show_rate >= 30:
-                heads_up_text = (
-                    f"Heads-up: no-show is {no_show_rate:.0f}% "
-                    f"({no_show_total} of {reg_total} Start.gg registrations) in this scope."
-                )
-            elif no_show_rate >= 15:
-                heads_up_text = (
-                    f"Heads-up: no-show is {no_show_rate:.0f}% "
-                    f"({no_show_total} of {reg_total}) in this scope."
-                )
+        if reg_total > 0:
+            checked_rate = (checked_in_total / reg_total) * 100
+            heads_up_text = f"Checked-in coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
+            if reg_total >= 10:
+                if no_show_rate >= 30:
+                    heads_up_text += (
+                        f" Heads-up: no-show is {no_show_rate:.0f}% "
+                        f"({no_show_total} of {reg_total} Start.gg registrations) in this scope."
+                    )
+                elif no_show_rate >= 15:
+                    heads_up_text += (
+                        f" Heads-up: no-show is {no_show_rate:.0f}% "
+                        f"({no_show_total} of {reg_total}) in this scope."
+                    )
 
         # Top attendees leaderboard for selected scope
         top_players_rows = []
@@ -1550,7 +1573,7 @@ def register_callbacks(app):
     # TO Toggle Fields - toggle payment_valid, startgg, is_guest by clicking cell
     # -------------------------------------------------------------------------
     @app.callback(
-        Output("payment-update-feedback", "children"),
+        Output("payment-update-feedback", "children", allow_duplicate=True),
         Output("checkins-table", "data", allow_duplicate=True),
         Input("checkins-table", "active_cell"),
         State("checkins-table", "data"),
@@ -1699,6 +1722,316 @@ def register_callbacks(app):
         else:
             logger.error(f"Failed to update {col_id} for {player_name}")
             return html.Span(f"❌ Failed to update {col_id}", style={"color": "#ef4444"}), no_update
+
+    @app.callback(
+        Output("payment-update-feedback", "children", allow_duplicate=True),
+        Output("checkins-table", "data", allow_duplicate=True),
+        Input("checkins-table", "data_timestamp"),
+        State("checkins-table", "data"),
+        State("checkins-table", "data_previous"),
+        State("checkins-table", "active_cell"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def save_tag_edits(_timestamp, table_data, previous_data, active_cell, selected_slug, auth_state):
+        """Persist manual tag edits from the check-ins table."""
+        if not table_data or not previous_data:
+            return no_update, no_update
+
+        # Only run when the active edited cell is the tag column.
+        if not active_cell or active_cell.get("column_id") != "tag":
+            return no_update, no_update
+
+        prev_by_id = {
+            str(r.get("record_id")): r
+            for r in previous_data
+            if isinstance(r, dict) and r.get("record_id")
+        }
+        curr_by_id = {
+            str(r.get("record_id")): r
+            for r in table_data
+            if isinstance(r, dict) and r.get("record_id")
+        }
+
+        if not prev_by_id or not curr_by_id:
+            return no_update, no_update
+
+        changed_rows = []
+        for record_id, curr_row in curr_by_id.items():
+            prev_row = prev_by_id.get(record_id)
+            if not prev_row:
+                continue
+            old_tag = str(prev_row.get("tag") or "").strip()
+            new_tag = str(curr_row.get("tag") or "").strip()
+            if old_tag != new_tag:
+                changed_rows.append((record_id, old_tag, new_tag))
+
+        if not changed_rows:
+            return no_update, no_update
+
+        updated = 0
+        reverted = 0
+        messages = []
+
+        for record_id, old_tag, new_tag in changed_rows:
+            row = curr_by_id.get(record_id, {})
+            player_name = row.get("name") or old_tag or "Unknown"
+
+            if not new_tag:
+                row["tag"] = old_tag
+                reverted += 1
+                messages.append(f"{player_name}: tag cannot be empty")
+                continue
+
+            result = update_checkin(record_id, {"tag": new_tag})
+            if not result:
+                row["tag"] = old_tag
+                reverted += 1
+                messages.append(f"{player_name}: failed to save")
+                continue
+
+            updated += 1
+
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_update_tag",
+                    "active_event_data",
+                    target_event=selected_slug or "",
+                    target_record=record_id,
+                    target_player=player_name,
+                    details=json.dumps({"old_tag": old_tag, "new_tag": new_tag}),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for tag update: {e}")
+
+        if updated and not reverted:
+            if updated == 1:
+                feedback = html.Span("✅ Tag updated.", style={"color": "#10b981"})
+            else:
+                feedback = html.Span(f"✅ Updated {updated} tags.", style={"color": "#10b981"})
+        elif reverted and not updated:
+            msg = "; ".join(messages[:2]) if messages else "No valid tag changes saved."
+            feedback = html.Span(f"⚠️ {msg}", style={"color": "#f59e0b"})
+        else:
+            feedback = html.Span(f"✅ Updated {updated} tags, ⚠️ reverted {reverted}.", style={"color": "#f59e0b"})
+
+        return feedback, table_data
+
+    @app.callback(
+        Output("manual-checkin-feedback", "children"),
+        Output("input-manual-name", "value"),
+        Output("input-manual-tag", "value"),
+        Input("btn-manual-checkin", "n_clicks"),
+        State("input-manual-name", "value"),
+        State("input-manual-tag", "value"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def add_manual_checkin(n_clicks, input_name, input_tag, selected_slug, auth_state):
+        """Manually add a missing Start.gg participant to active check-ins."""
+        if not n_clicks:
+            return no_update, no_update, no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return html.Span("⚠️ Select a specific event first.", style={"color": "#f59e0b"}), no_update, no_update
+
+        name = (input_name or "").strip()
+        tag = (input_tag or "").strip()
+        if not name and not tag:
+            return html.Span("⚠️ Enter at least name or tag.", style={"color": "#f59e0b"}), no_update, no_update
+
+        if not name:
+            name = tag
+
+        settings = get_active_settings() or {}
+        require_membership = settings.get("require_membership") is True
+        require_payment = settings.get("require_payment") is True
+
+        payload = {
+            "name": name,
+            "tag": tag,
+            "startgg": True,
+            "is_guest": False,
+            "member": require_membership,
+            "payment_valid": require_payment,
+        }
+
+        payment_ok = (not require_payment) or bool(payload["payment_valid"])
+        member_ok = (not require_membership) or bool(payload["member"])
+        startgg_ok = bool(payload["startgg"])
+        payload["status"] = "Ready" if (payment_ok and member_ok and startgg_ok) else "Pending"
+
+        begin_fn = getattr(storage_api, "begin_checkin", None)
+        if not callable(begin_fn):
+            return html.Span("❌ Manual check-in is not available in current backend.", style={"color": "#ef4444"}), no_update, no_update
+
+        try:
+            result = begin_fn(selected_slug, payload)
+            record_id = result.get("record_id") or result.get("checkin_id")
+            created = bool(result.get("created"))
+
+            try:
+                requests.post(
+                    "http://backend:8000/api/notify/update",
+                    json={
+                        "type": "manual_checkin",
+                        "record_id": record_id,
+                        "player_name": name,
+                    },
+                    timeout=2,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast manual check-in SSE: {e}")
+
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_manual_checkin",
+                    "active_event_data",
+                    target_event=selected_slug,
+                    target_record=record_id,
+                    target_player=name,
+                    details=json.dumps({"tag": tag, "created": created}),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for manual check-in: {e}")
+
+            label = "added" if created else "updated"
+            feedback = html.Span(f"✅ Manual check-in {label}: {name}", style={"color": "#10b981"})
+            return feedback, "", ""
+        except Exception as e:
+            logger.exception(f"Manual check-in failed for '{name}': {e}")
+            return html.Span(f"❌ Manual check-in failed: {e}", style={"color": "#ef4444"}), no_update, no_update
+
+    # -------------------------------------------------------------------------
+    # Re-check Start.gg - re-validate registration + sync games for selected player
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("recheck-startgg-feedback", "children"),
+        Input("btn-recheck-startgg", "n_clicks"),
+        State("checkins-table", "selected_rows"),
+        State("checkins-table", "data"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def recheck_startgg(n_clicks, selected_rows, table_data, selected_slug, auth_state):
+        """Re-validate Start.gg registration and sync games for a selected player."""
+        if not n_clicks:
+            return no_update
+
+        if not selected_rows or len(selected_rows) == 0:
+            return html.Span(
+                "Select a player row first.",
+                style={"color": "#f59e0b"},
+            )
+
+        if len(selected_rows) > 1:
+            return html.Span(
+                "Select only one player at a time for re-check.",
+                style={"color": "#f59e0b"},
+            )
+
+        row_idx = selected_rows[0]
+        if not table_data or row_idx >= len(table_data):
+            return no_update
+
+        row = table_data[row_idx]
+        record_id = row.get("record_id")
+        player_name = row.get("name") or row.get("tag") or "Unknown"
+        player_tag = row.get("tag") or ""
+
+        if not record_id:
+            return html.Span("No record_id for selected row.", style={"color": "#ef4444"})
+
+        if not player_tag:
+            return html.Span(
+                f"{player_name}: no tag set — add a tag first.",
+                style={"color": "#f59e0b"},
+            )
+
+        # Save previous state for audit
+        prev_startgg = row.get("startgg", False)
+        prev_games = row.get("tournament_games_registered", "")
+
+        try:
+            resp = requests.post(
+                "http://backend:8000/api/admin/recheck-startgg",
+                json={"record_id": record_id},
+                timeout=20,
+            )
+
+            if resp.status_code >= 400:
+                error_detail = resp.json().get("detail", resp.text[:200]) if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
+                return html.Span(
+                    f"Re-check failed: {error_detail}",
+                    style={"color": "#ef4444"},
+                )
+
+            data = resp.json()
+            startgg = data.get("startgg", False)
+            events = data.get("events", [])
+            status = data.get("status", "?")
+            events_str = ", ".join(events) if events else "none"
+
+            # Audit log
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_recheck_startgg",
+                    "active_event_data",
+                    target_event=selected_slug or "",
+                    target_record=record_id,
+                    target_player=player_name,
+                    details=json.dumps({
+                        "tag": player_tag,
+                        "prev_startgg": prev_startgg,
+                        "new_startgg": startgg,
+                        "prev_games": prev_games,
+                        "new_games": events,
+                        "new_status": status,
+                    }),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for recheck: {e}")
+
+            if startgg:
+                return html.Span(
+                    f"Re-checked {player_name}: Start.gg verified, Games: {events_str}, Status: {status}",
+                    style={"color": "#10b981"},
+                )
+            else:
+                return html.Span(
+                    f"Re-checked {player_name}: not found on Start.gg, Status: {status}",
+                    style={"color": "#f59e0b"},
+                )
+
+        except requests.exceptions.Timeout:
+            return html.Span(
+                "Re-check timed out — Start.gg or n8n may be slow. Try again.",
+                style={"color": "#ef4444"},
+            )
+        except Exception as e:
+            logger.exception(f"Re-check Start.gg failed for '{player_name}': {e}")
+            return html.Span(
+                f"Re-check failed: {e}",
+                style={"color": "#ef4444"},
+            )
 
     # -------------------------------------------------------------------------
     # Delete selected player - Step 1: Show confirmation dialog

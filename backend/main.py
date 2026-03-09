@@ -821,6 +821,135 @@ async def get_event_history():
     return storage_get_event_history()
 
 
+@app.post("/api/admin/recheck-startgg", tags=["Admin"])
+async def admin_recheck_startgg(request: Request):
+    """
+    Re-run Start.gg validation for a single checked-in player.
+
+    Called from dashboard after TO corrects a tag or wants to sync games.
+    Uses the n8n Start.gg Check sub-workflow, then applies the result
+    and recomputes status.
+
+    Body: { "record_id": "..." }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    record_id = (body.get("record_id") or "").strip()
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id is required")
+
+    # 1. Read existing checkin
+    get_by_id = getattr(storage_api, "get_checkin_by_record_id", None)
+    if not get_by_id:
+        raise HTTPException(status_code=501, detail="Not available for current backend")
+
+    checkin = get_by_id(record_id)
+    if not checkin:
+        raise HTTPException(status_code=404, detail="Checkin not found")
+
+    fields = checkin.get("fields", {})
+    tag = (fields.get("tag") or "").strip()
+    slug = (fields.get("event_slug") or "").strip()
+    player_name = fields.get("name") or tag or "Unknown"
+
+    if not tag:
+        raise HTTPException(status_code=400, detail="Player has no tag — cannot check Start.gg")
+    if not slug:
+        raise HTTPException(status_code=400, detail="No event_slug on checkin record")
+
+    # Save previous state for response
+    prev_startgg = bool(fields.get("startgg"))
+    prev_games = fields.get("tournament_games_registered") or []
+
+    # 2. Call n8n Start.gg Check sub-workflow
+    n8n_url = f"{N8N_INTERNAL}/webhook/startgg/check"
+    n8n_headers = {"Content-Type": "application/json"}
+    if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+        import base64
+        b64 = base64.b64encode(
+            f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
+        ).decode()
+        n8n_headers["authorization"] = f"Basic {b64}"
+
+    try:
+        n8n_resp = await httpx_client.post(
+            n8n_url,
+            json={"tag": tag, "slug": slug},
+            headers=n8n_headers,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"n8n Start.gg check failed: {e}")
+
+    if n8n_resp.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"n8n returned {n8n_resp.status_code}: {n8n_resp.text[:200]}",
+        )
+
+    n8n_data = n8n_resp.json()
+    # n8n Start.gg Check returns: {isRegistered, events, eventCount, tag, tournament}
+    is_registered = bool(n8n_data.get("isRegistered", False))
+    events = n8n_data.get("events") or []
+
+    # 3. Apply result via existing integration mechanism
+    apply_fn = getattr(storage_api, "apply_integration_result", None)
+    if apply_fn:
+        apply_fn(
+            checkin_id=record_id,
+            source="startgg",
+            ok=is_registered,
+            data={"registered": is_registered, "events": events},
+        )
+
+    # 4. Recompute status
+    settings = get_active_settings()
+    requirements = compute_requirements(settings)
+
+    updated_checkin = get_by_id(record_id)
+    uf = (updated_checkin or {}).get("fields", {})
+
+    status_dict = {
+        "member": bool(uf.get("member")),
+        "payment": bool(uf.get("payment_valid")),
+        "startgg": bool(uf.get("startgg")),
+    }
+    ready, missing = compute_ready_and_missing(status_dict, requirements)
+    final_status = "Ready" if ready else "Pending"
+    update_checkin(record_id, {"status": final_status})
+
+    # 5. Update payment_expected based on synced games
+    per_game = settings.get("swish_expected_per_game") or 0
+    new_games = uf.get("tournament_games_registered") or []
+    if per_game and isinstance(new_games, list):
+        update_checkin(record_id, {"payment_expected": len(new_games) * per_game})
+
+    # 6. Broadcast SSE
+    await sse_manager.broadcast("update", {
+        "type": "recheck_startgg",
+        "record_id": record_id,
+        "name": player_name,
+        "tag": tag,
+        "startgg": is_registered,
+        "status": final_status,
+        "timestamp": time.time(),
+    })
+
+    return {
+        "success": True,
+        "record_id": record_id,
+        "player_name": player_name,
+        "startgg": is_registered,
+        "events": events,
+        "status": final_status,
+        "previous_startgg": prev_startgg,
+        "previous_games": prev_games,
+    }
+
+
 @app.post("/api/startgg/registered-count", tags=["Integrations"])
 async def update_startgg_registered_count(request: Request):
     """
