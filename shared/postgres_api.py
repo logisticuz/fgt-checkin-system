@@ -74,14 +74,37 @@ def _run_migrations(pool):
                 cur.execute(
                     "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS player_uuid TEXT"
                 )
-                # Index for efficient lookups
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_active_player_uuid
                     ON active_event_data(player_uuid)
                     """
                 )
-        logger.info("✅ Schema migrations checked (no-show + player_uuid columns)")
+
+                # Merge log table (added 2026-03-11)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS merge_log (
+                        id                      SERIAL PRIMARY KEY,
+                        merged_at               TIMESTAMPTZ DEFAULT now(),
+                        keep_uuid               TEXT NOT NULL,
+                        remove_uuid             TEXT NOT NULL,
+                        user_id                 TEXT,
+                        user_name               TEXT,
+                        reason                  TEXT,
+                        removed_player_snapshot  JSONB NOT NULL,
+                        archive_rows_updated    INTEGER DEFAULT 0,
+                        active_rows_updated     INTEGER DEFAULT 0,
+                        undone                  BOOLEAN DEFAULT false,
+                        undone_at               TIMESTAMPTZ
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_merge_log_keep ON merge_log(keep_uuid)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_merge_log_remove ON merge_log(remove_uuid)"
+                )
+        logger.info("✅ Schema migrations checked (no-show + player_uuid + merge_log)")
     except Exception as e:
         logger.warning(f"⚠️ Migration check failed (non-fatal): {e}")
 
@@ -2181,4 +2204,558 @@ def get_audit_log(
         )
 
     logger.info(f"📋 Retrieved {len(result)} audit log entries")
+    return result
+
+
+# =============================================
+# Player Merge Engine
+# =============================================
+
+
+def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Detect potential duplicate player pairs.
+
+    Matching signals (ordered by confidence):
+    1. Same telephone number (highest confidence — V1 auto-merge threshold)
+    2. Similar tag  (Levenshtein distance <= 2, case-insensitive)
+    3. Similar name (Levenshtein distance <= 2, case-insensitive)
+
+    Returns list of candidate pairs with match reason and confidence level.
+    """
+    candidates: List[Dict[str, Any]] = []
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            # Load all players
+            cur.execute("""
+                SELECT uuid, name, tag, email, telephone, total_events
+                FROM players
+                ORDER BY total_events DESC, name
+            """)
+            players = cur.fetchall()
+
+    # Build lookup structures
+    player_list = []
+    for row in players:
+        p_uuid, name, tag, email, telephone, total_events = row
+        player_list.append({
+            "uuid": p_uuid,
+            "name": (name or "").strip(),
+            "tag": (tag or "").strip(),
+            "email": (email or "").strip(),
+            "telephone": (telephone or "").strip(),
+            "total_events": total_events or 0,
+        })
+
+    seen_pairs = set()
+
+    for i, a in enumerate(player_list):
+        for b in player_list[i + 1:]:
+            pair_key = tuple(sorted([a["uuid"], b["uuid"]]))
+            if pair_key in seen_pairs:
+                continue
+
+            reasons = []
+            confidence = "low"
+
+            # 1. Phone match (strongest signal)
+            if a["telephone"] and b["telephone"] and a["telephone"] == b["telephone"]:
+                reasons.append("same_phone")
+                confidence = "high"
+
+            # 2. Tag similarity (case-insensitive)
+            if a["tag"] and b["tag"]:
+                tag_a = a["tag"].lower()
+                tag_b = b["tag"].lower()
+                if tag_a == tag_b:
+                    # Exact case-insensitive match — should have been caught by _match_or_create
+                    reasons.append("exact_tag")
+                    confidence = "high"
+                elif _levenshtein(tag_a, tag_b) <= 2:
+                    reasons.append("similar_tag")
+                    if confidence != "high":
+                        confidence = "medium"
+
+            # 3. Name similarity (case-insensitive)
+            if a["name"] and b["name"]:
+                name_a = a["name"].lower()
+                name_b = b["name"].lower()
+                if name_a == name_b:
+                    reasons.append("exact_name")
+                    if confidence != "high":
+                        confidence = "medium"
+                elif _levenshtein(name_a, name_b) <= 2:
+                    reasons.append("similar_name")
+
+            if reasons:
+                seen_pairs.add(pair_key)
+                candidates.append({
+                    "player_a": a,
+                    "player_b": b,
+                    "reasons": reasons,
+                    "confidence": confidence,
+                })
+
+            if len(candidates) >= limit:
+                break
+        if len(candidates) >= limit:
+            break
+
+    # Sort by confidence (high first), then by number of reasons
+    conf_order = {"high": 0, "medium": 1, "low": 2}
+    candidates.sort(key=lambda c: (conf_order.get(c["confidence"], 3), -len(c["reasons"])))
+
+    logger.info(f"🔍 Found {len(candidates)} duplicate candidates")
+    return candidates
+
+
+def _levenshtein(s1: str, s2: str) -> int:
+    """Simple Levenshtein distance for short strings (player names/tags)."""
+    if len(s1) < len(s2):
+        return _levenshtein(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+
+    prev_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = prev_row[j + 1] + 1
+            deletions = curr_row[j] + 1
+            substitutions = prev_row[j] + (c1 != c2)
+            curr_row.append(min(insertions, deletions, substitutions))
+        prev_row = curr_row
+
+    return prev_row[-1]
+
+
+def merge_players(
+    keep_uuid: str,
+    remove_uuid: str,
+    *,
+    reason: str = "",
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Merge two player profiles: keep one, absorb the other.
+
+    What happens:
+    1. Snapshot the removed player (for undo)
+    2. Re-point all event_archive rows from remove_uuid → keep_uuid
+    3. Re-point all active_event_data rows from remove_uuid → keep_uuid
+    4. Merge stats into keep player (events_list, games, totals)
+    5. Delete the removed player profile
+    6. Log to merge_log (undo-capable) + audit_log
+
+    Returns merge summary dict.
+    """
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    if not keep_uuid or not remove_uuid:
+        raise ValueError("Both keep_uuid and remove_uuid are required")
+    if keep_uuid == remove_uuid:
+        raise ValueError("Cannot merge a player with itself")
+
+    merge_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                # 1. Load both players
+                cur.execute("SELECT * FROM players WHERE uuid = %s", (keep_uuid,))
+                keep_row = cur.fetchone()
+                if not keep_row:
+                    raise ValueError(f"Keep player not found: {keep_uuid}")
+                keep_cols = [desc[0] for desc in cur.description]
+                keep_player = _row_to_dict(keep_cols, keep_row)
+
+                cur.execute("SELECT * FROM players WHERE uuid = %s", (remove_uuid,))
+                remove_row = cur.fetchone()
+                if not remove_row:
+                    raise ValueError(f"Remove player not found: {remove_uuid}")
+                remove_player = _row_to_dict(keep_cols, remove_row)
+
+                # 2. Snapshot removed player (for undo)
+                # Convert non-serializable types
+                snapshot = {}
+                for k, v in remove_player.items():
+                    if isinstance(v, Decimal):
+                        snapshot[k] = float(v)
+                    elif isinstance(v, datetime):
+                        snapshot[k] = v.isoformat()
+                    elif hasattr(v, "isoformat"):
+                        snapshot[k] = v.isoformat()
+                    else:
+                        snapshot[k] = v
+
+                # 3. Re-point event_archive rows
+                cur.execute(
+                    "UPDATE event_archive SET player_uuid = %s WHERE player_uuid = %s",
+                    (keep_uuid, remove_uuid),
+                )
+                archive_updated = cur.rowcount or 0
+
+                # 4. Re-point active_event_data rows
+                cur.execute(
+                    "UPDATE active_event_data SET player_uuid = %s WHERE player_uuid = %s",
+                    (keep_uuid, remove_uuid),
+                )
+                active_updated = cur.rowcount or 0
+
+                # 5. Merge stats into keep player
+                keep_events = keep_player.get("events_list") or []
+                if not isinstance(keep_events, list):
+                    keep_events = []
+                remove_events = remove_player.get("events_list") or []
+                if not isinstance(remove_events, list):
+                    remove_events = []
+                merged_events = list(dict.fromkeys(keep_events + remove_events))
+
+                keep_games = keep_player.get("games_played") or []
+                remove_games = remove_player.get("games_played") or []
+                merged_games = list(set(keep_games) | set(remove_games))
+
+                keep_game_counts = keep_player.get("game_counts") or {}
+                if not isinstance(keep_game_counts, dict):
+                    keep_game_counts = {}
+                remove_game_counts = remove_player.get("game_counts") or {}
+                if not isinstance(remove_game_counts, dict):
+                    remove_game_counts = {}
+                merged_game_counts = dict(keep_game_counts)
+                for g, cnt in remove_game_counts.items():
+                    merged_game_counts[g] = merged_game_counts.get(g, 0) + (cnt or 0)
+                merged_favorite = (
+                    max(merged_game_counts, key=merged_game_counts.get)
+                    if merged_game_counts
+                    else keep_player.get("favorite_game")
+                )
+
+                merged_total_events = len(merged_events)
+                merged_total_paid = Decimal(str(keep_player.get("total_paid") or 0)) + Decimal(
+                    str(remove_player.get("total_paid") or 0)
+                )
+
+                # Use earliest first_seen, latest last_seen
+                keep_first = keep_player.get("first_seen")
+                remove_first = remove_player.get("first_seen")
+                if keep_first and remove_first:
+                    merged_first = min(keep_first, remove_first)
+                else:
+                    merged_first = keep_first or remove_first
+
+                keep_last = keep_player.get("last_seen")
+                remove_last = remove_player.get("last_seen")
+                if keep_last and remove_last:
+                    merged_last = max(keep_last, remove_last)
+                else:
+                    merged_last = keep_last or remove_last
+
+                # Prefer keep player's identity fields, fill gaps from removed
+                merged_name = keep_player.get("name") or remove_player.get("name")
+                merged_tag = keep_player.get("tag") or remove_player.get("tag")
+                merged_email = keep_player.get("email") or remove_player.get("email")
+                merged_phone = keep_player.get("telephone") or remove_player.get("telephone")
+                merged_member = (keep_player.get("is_member") or False) or (
+                    remove_player.get("is_member") or False
+                )
+
+                now = datetime.now(timezone.utc)
+                cur.execute(
+                    """
+                    UPDATE players SET
+                        name = %s,
+                        tag = %s,
+                        email = %s,
+                        telephone = %s,
+                        games_played = %s,
+                        game_counts = %s,
+                        favorite_game = %s,
+                        total_events = %s,
+                        total_paid = %s,
+                        first_seen = %s,
+                        last_seen = %s,
+                        first_event = %s,
+                        last_event = %s,
+                        events_list = %s,
+                        is_member = %s,
+                        updated_at = %s
+                    WHERE uuid = %s
+                    """,
+                    (
+                        merged_name,
+                        merged_tag,
+                        merged_email,
+                        merged_phone,
+                        merged_games,
+                        _Json(merged_game_counts),
+                        merged_favorite,
+                        merged_total_events,
+                        merged_total_paid,
+                        merged_first,
+                        merged_last,
+                        merged_events[0] if merged_events else keep_player.get("first_event"),
+                        merged_events[-1] if merged_events else keep_player.get("last_event"),
+                        _Json(merged_events),
+                        merged_member,
+                        now,
+                        keep_uuid,
+                    ),
+                )
+
+                # 6. Delete the removed player
+                cur.execute("DELETE FROM players WHERE uuid = %s", (remove_uuid,))
+
+                # 7. Write to merge_log
+                cur.execute(
+                    """
+                    INSERT INTO merge_log (
+                        keep_uuid, remove_uuid,
+                        user_id, user_name, reason,
+                        removed_player_snapshot,
+                        archive_rows_updated, active_rows_updated
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        keep_uuid,
+                        remove_uuid,
+                        merge_user.get("user_id", ""),
+                        merge_user.get("user_name", "system"),
+                        reason,
+                        _Json(snapshot),
+                        archive_updated,
+                        active_updated,
+                    ),
+                )
+                merge_id = cur.fetchone()[0]
+
+    # Audit log (outside transaction — non-critical)
+    log_action(
+        merge_user,
+        "player_merged",
+        "players",
+        target_player=keep_uuid,
+        reason=reason,
+        details=json.dumps({
+            "merge_id": merge_id,
+            "keep_uuid": keep_uuid,
+            "remove_uuid": remove_uuid,
+            "archive_rows_updated": archive_updated,
+            "active_rows_updated": active_updated,
+        }),
+    )
+
+    logger.info(
+        f"🔀 Merged player {remove_uuid[:8]}… into {keep_uuid[:8]}… "
+        f"(archive={archive_updated}, active={active_updated}, merge_id={merge_id})"
+    )
+
+    return {
+        "merge_id": merge_id,
+        "keep_uuid": keep_uuid,
+        "remove_uuid": remove_uuid,
+        "archive_rows_updated": archive_updated,
+        "active_rows_updated": active_updated,
+        "keep_player_name": merged_name,
+        "keep_player_tag": merged_tag,
+        "removed_player_name": remove_player.get("name"),
+        "removed_player_tag": remove_player.get("tag"),
+    }
+
+
+def undo_merge(
+    merge_id: int,
+    *,
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Undo a player merge by restoring the removed player and reverting UUID pointers.
+
+    1. Reads the merge_log entry to get the removed player snapshot
+    2. Re-creates the removed player from snapshot
+    3. Reverts event_archive rows back to the removed UUID
+    4. Reverts active_event_data rows back to the removed UUID
+    5. Marks the merge_log entry as undone
+    """
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    undo_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                # 1. Load merge log entry
+                cur.execute(
+                    "SELECT * FROM merge_log WHERE id = %s",
+                    (merge_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"Merge log entry not found: {merge_id}")
+                cols = [desc[0] for desc in cur.description]
+                entry = _row_to_dict(cols, row)
+
+                if entry.get("undone"):
+                    raise ValueError(f"Merge {merge_id} has already been undone")
+
+                keep_uuid = entry["keep_uuid"]
+                remove_uuid = entry["remove_uuid"]
+                snapshot = entry["removed_player_snapshot"]
+
+                if not isinstance(snapshot, dict):
+                    raise ValueError(f"Invalid snapshot for merge {merge_id}")
+
+                # 2. Re-create the removed player from snapshot
+                cur.execute(
+                    """
+                    INSERT INTO players (
+                        uuid, name, tag, email, telephone,
+                        games_played, game_counts, favorite_game,
+                        total_events, total_paid,
+                        first_seen, last_seen, first_event, last_event,
+                        events_list, is_member, created_at, updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, now()
+                    )
+                    """,
+                    (
+                        remove_uuid,
+                        snapshot.get("name"),
+                        snapshot.get("tag"),
+                        snapshot.get("email"),
+                        snapshot.get("telephone"),
+                        snapshot.get("games_played") or [],
+                        _Json(snapshot.get("game_counts") or {}),
+                        snapshot.get("favorite_game"),
+                        snapshot.get("total_events") or 0,
+                        snapshot.get("total_paid") or 0,
+                        snapshot.get("first_seen"),
+                        snapshot.get("last_seen"),
+                        snapshot.get("first_event"),
+                        snapshot.get("last_event"),
+                        _Json(snapshot.get("events_list") or []),
+                        snapshot.get("is_member") or False,
+                        snapshot.get("created_at"),
+                    ),
+                )
+
+                # 3. Figure out which archive rows belonged to the removed player
+                # Use the removed player's events_list to identify which rows to revert
+                remove_events = snapshot.get("events_list") or []
+                archive_reverted = 0
+                if remove_events:
+                    cur.execute(
+                        """
+                        UPDATE event_archive
+                        SET player_uuid = %s
+                        WHERE player_uuid = %s
+                          AND event_slug = ANY(%s)
+                        """,
+                        (remove_uuid, keep_uuid, remove_events),
+                    )
+                    archive_reverted = cur.rowcount or 0
+
+                # 4. Revert active_event_data (use tag match as heuristic)
+                active_reverted = 0
+                remove_tag = snapshot.get("tag")
+                if remove_tag:
+                    cur.execute(
+                        """
+                        UPDATE active_event_data
+                        SET player_uuid = %s
+                        WHERE player_uuid = %s AND LOWER(tag) = LOWER(%s)
+                        """,
+                        (remove_uuid, keep_uuid, remove_tag),
+                    )
+                    active_reverted = cur.rowcount or 0
+
+                # 5. Mark as undone
+                cur.execute(
+                    "UPDATE merge_log SET undone = true, undone_at = now() WHERE id = %s",
+                    (merge_id,),
+                )
+
+    # Audit
+    log_action(
+        undo_user,
+        "player_merge_undone",
+        "players",
+        target_player=remove_uuid,
+        details=json.dumps({
+            "merge_id": merge_id,
+            "keep_uuid": keep_uuid,
+            "remove_uuid": remove_uuid,
+            "archive_reverted": archive_reverted,
+            "active_reverted": active_reverted,
+        }),
+    )
+
+    logger.info(
+        f"↩️ Undid merge #{merge_id}: restored {remove_uuid[:8]}… "
+        f"(archive={archive_reverted}, active={active_reverted})"
+    )
+
+    return {
+        "merge_id": merge_id,
+        "undone": True,
+        "restored_uuid": remove_uuid,
+        "restored_name": snapshot.get("name"),
+        "restored_tag": snapshot.get("tag"),
+        "archive_reverted": archive_reverted,
+        "active_reverted": active_reverted,
+    }
+
+
+def get_merge_history(limit: int = 50) -> List[Dict[str, Any]]:
+    """Return recent merge log entries, newest first."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, merged_at, keep_uuid, remove_uuid,
+                       user_name, reason,
+                       removed_player_snapshot,
+                       archive_rows_updated, active_rows_updated,
+                       undone, undone_at
+                FROM merge_log
+                ORDER BY merged_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        (
+            mid, merged_at, keep_uuid, remove_uuid,
+            user_name, reason, snapshot,
+            archive_updated, active_updated,
+            undone, undone_at,
+        ) = row
+
+        # Extract display names from snapshot
+        removed_name = snapshot.get("name", "") if isinstance(snapshot, dict) else ""
+        removed_tag = snapshot.get("tag", "") if isinstance(snapshot, dict) else ""
+
+        result.append({
+            "id": mid,
+            "merged_at": merged_at.isoformat() if merged_at else None,
+            "keep_uuid": keep_uuid,
+            "remove_uuid": remove_uuid,
+            "user_name": user_name,
+            "reason": reason,
+            "removed_name": removed_name,
+            "removed_tag": removed_tag,
+            "archive_rows_updated": archive_updated or 0,
+            "active_rows_updated": active_updated or 0,
+            "undone": undone or False,
+            "undone_at": undone_at.isoformat() if undone_at else None,
+        })
+
     return result

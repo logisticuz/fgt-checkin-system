@@ -213,3 +213,26 @@ CREATE TABLE audit_log (
 CREATE INDEX idx_audit_timestamp ON audit_log(timestamp);
 CREATE INDEX idx_audit_action ON audit_log(action);
 CREATE INDEX idx_audit_user ON audit_log(user_id);
+
+-- =============================================
+-- merge_log - Player merge history (undo-capable)
+-- =============================================
+CREATE TABLE merge_log (
+    id                  SERIAL PRIMARY KEY,
+    merged_at           TIMESTAMPTZ DEFAULT now(),
+    keep_uuid           TEXT NOT NULL,
+    remove_uuid         TEXT NOT NULL,
+    user_id             TEXT,
+    user_name           TEXT,
+    reason              TEXT,
+    -- Snapshot of removed player before deletion (enables undo)
+    removed_player_snapshot JSONB NOT NULL,
+    -- Which tables/rows were updated
+    archive_rows_updated    INTEGER DEFAULT 0,
+    active_rows_updated     INTEGER DEFAULT 0,
+    undone                  BOOLEAN DEFAULT false,
+    undone_at               TIMESTAMPTZ
+);
+
+CREATE INDEX idx_merge_log_keep ON merge_log(keep_uuid);
+CREATE INDEX idx_merge_log_remove ON merge_log(remove_uuid);
