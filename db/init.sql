@@ -55,12 +55,14 @@ CREATE TABLE active_event_data (
     checkin_uuid                    TEXT,            -- maps to Airtable "UUID"
     startgg_event_id                TEXT,
     is_guest                        BOOLEAN DEFAULT false,
+    player_uuid                     TEXT,
     created                         TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX idx_active_event_slug ON active_event_data(event_slug);
 CREATE INDEX idx_active_tag ON active_event_data(LOWER(tag));
 CREATE INDEX idx_active_name ON active_event_data(LOWER(name));
+CREATE INDEX idx_active_player_uuid ON active_event_data(player_uuid);
 
 -- =============================================
 -- event_archive - Archived check-ins per event

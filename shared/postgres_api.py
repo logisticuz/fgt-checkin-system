@@ -19,6 +19,12 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# --- Feature flags ---
+CANONICAL_PLAYER_ID_ENABLED = os.getenv("CANONICAL_PLAYER_ID_ENABLED", "true").lower() in (
+    "true", "1", "yes",
+)
+logger.info(f"🔑 Feature flag CANONICAL_PLAYER_ID_ENABLED={CANONICAL_PLAYER_ID_ENABLED}")
+
 # --- Database connection ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -64,7 +70,18 @@ def _run_migrations(pool):
                     cur.execute(
                         f"ALTER TABLE event_stats ADD COLUMN IF NOT EXISTS {col} {typ}"
                     )
-        logger.info("✅ Schema migrations checked (no-show columns)")
+                # Canonical player ID column on active_event_data (added 2026-03-10)
+                cur.execute(
+                    "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS player_uuid TEXT"
+                )
+                # Index for efficient lookups
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_active_player_uuid
+                    ON active_event_data(player_uuid)
+                    """
+                )
+        logger.info("✅ Schema migrations checked (no-show + player_uuid columns)")
     except Exception as e:
         logger.warning(f"⚠️ Migration check failed (non-fatal): {e}")
 
@@ -610,6 +627,14 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(games, list):
         games = []
 
+    # Resolve player_uuid early (match-only, no creation)
+    matched_player_uuid = None
+    if CANONICAL_PLAYER_ID_ENABLED:
+        try:
+            matched_player_uuid = _find_player_uuid(tag, payload.get("email"))
+        except Exception as exc:
+            logger.warning(f"⚠️ Player UUID lookup failed (non-blocking): {exc}")
+
     fields: Dict[str, Any] = {
         "event_slug": event_slug,
         "name": payload.get("name"),
@@ -627,6 +652,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
         "startgg_event_id": payload.get("startgg_event_id"),
         "external_id": payload.get("external_id"),
+        "player_uuid": matched_player_uuid,
     }
 
     if existing and existing.get("record_id"):
@@ -639,6 +665,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             "record_id": checkin_id,
             "event_slug": event_slug,
             "created": False,
+            "player_uuid": matched_player_uuid,
         }
 
     with _get_pool().connection() as conn:
@@ -651,14 +678,14 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     status, member, startgg, payment_valid,
                     payment_amount, payment_expected,
                     tournament_games_registered, checkin_uuid,
-                    startgg_event_id, is_guest
+                    startgg_event_id, is_guest, player_uuid
                 ) VALUES (
                     %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s,
                     %s, %s,
-                    %s, %s
+                    %s, %s, %s
                 )
                 RETURNING record_id
                 """,
@@ -679,6 +706,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     fields.get("checkin_uuid") or fields.get("UUID"),
                     fields["startgg_event_id"],
                     fields["is_guest"],
+                    matched_player_uuid,
                 ),
             )
             checkin_id = cur.fetchone()[0]
@@ -688,6 +716,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "record_id": checkin_id,
         "event_slug": event_slug,
         "created": True,
+        "player_uuid": matched_player_uuid,
     }
 
 
@@ -945,12 +974,13 @@ def get_top_players_history(
 
     query = f"""
         SELECT
-            COALESCE(NULLIF(tag, ''), NULLIF(name, ''), 'Unknown') AS display_tag,
-            COALESCE(NULLIF(name, ''), NULLIF(tag, ''), 'Unknown') AS display_name,
+            MAX(COALESCE(NULLIF(tag, ''), NULLIF(name, ''), 'Unknown')) AS display_tag,
+            MAX(COALESCE(NULLIF(name, ''), NULLIF(tag, ''), 'Unknown')) AS display_name,
             COUNT(DISTINCT event_slug) AS events_attended
         FROM event_archive
         {where_sql}
-        GROUP BY 1, 2
+        GROUP BY LOWER(COALESCE(NULLIF(tag, ''), NULLIF(name, ''), 'unknown')),
+                 LOWER(COALESCE(NULLIF(name, ''), NULLIF(tag, ''), 'unknown'))
         ORDER BY events_attended DESC, display_name ASC
         LIMIT %s
     """
@@ -1043,6 +1073,41 @@ def compute_event_stats(checkins: List[Dict[str, Any]]) -> Dict[str, Any]:
         "most_popular_game": most_popular,
         "status_breakdown": statuses,
     }
+
+
+def _find_player_uuid(tag: Optional[str], email: Optional[str]) -> Optional[str]:
+    """
+    Lightweight player lookup — match only, no creation or stat updates.
+
+    Used during active check-in (begin_checkin) to link a check-in to an
+    existing player profile.  Returns the player UUID if found, else None.
+
+    Match priority: tag (case-insensitive) > email (case-insensitive).
+    """
+    if not tag and not email:
+        return None
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if tag:
+                cur.execute(
+                    "SELECT uuid FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
+                    (tag,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+
+            if email:
+                cur.execute(
+                    "SELECT uuid FROM players WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+                    (email,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+
+    return None
 
 
 def _match_or_create_player(
@@ -1722,7 +1787,8 @@ def reopen_event(
                                 status, member, startgg, payment_valid,
                                 payment_amount, payment_expected,
                                 tournament_games_registered, checkin_uuid,
-                                startgg_event_id, is_guest, created
+                                startgg_event_id, is_guest, player_uuid,
+                                created
                             )
                             SELECT
                                 gen_random_uuid()::text,
@@ -1742,6 +1808,7 @@ def reopen_event(
                                 checkin_uuid,
                                 startgg_event_id,
                                 is_guest,
+                                player_uuid,
                                 %s
                             FROM event_archive
                             WHERE event_slug = %s
