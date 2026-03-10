@@ -199,14 +199,24 @@ def register_callbacks(app):
             try:
                 settings = get_active_settings() or {}
                 events_json = settings.get("events_json")
-                registered_count = 0
+                registered_players = 0
+                registered_slots = 0
                 if isinstance(events_json, dict):
-                    registered_count = int(events_json.get("tournament_entrants") or 0)
+                    registered_players = int(events_json.get("tournament_entrants_players") or 0)
+                    registered_slots = int(events_json.get("tournament_entrants") or 0)
+                    # Fallback: old snapshots without player count
+                    if not registered_players:
+                        registered_players = registered_slots
                 elif isinstance(settings.get("startgg_registered_count"), (int, float, str)):
-                    registered_count = int(settings.get("startgg_registered_count") or 0)
-                if registered_count > 0:
-                    coverage_rate = (total_count / registered_count) * 100
-                    coverage_text = f"Start.gg coverage: {total_count}/{registered_count} ({coverage_rate:.0f}%)"
+                    registered_players = int(settings.get("startgg_registered_count") or 0)
+                    registered_slots = registered_players
+                if registered_players > 0:
+                    coverage_rate = (total_count / registered_players) * 100
+                    coverage_text = (
+                        f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
+                    )
+                    if registered_slots != registered_players:
+                        coverage_text += f" | {registered_slots} event slots"
             except Exception:
                 coverage_text = ""
 
@@ -627,8 +637,11 @@ def register_callbacks(app):
                   name
                   slug
                   startAt
-                  entrants(query: {page: 1, perPage: 1}) {
-                    pageInfo { total }
+                  entrants(query: {page: 1, perPage: 100}) {
+                    pageInfo { total totalPages }
+                    nodes {
+                      participants { id }
+                    }
                   }
                 }
               }
@@ -671,17 +684,35 @@ def register_callbacks(app):
             except Exception:
                 start_iso = None
 
-        # Build compact events array
+        # Build compact events array + collect unique participant IDs
         events = tournament.get("events") or []
         events_compact = []
+        all_participant_ids = set()
+        partial_participant_data = False
         for e in events:
             if not isinstance(e, dict):
                 continue
             entrant_total = 0
+            entrants_data = e.get("entrants") or {}
             try:
-                entrant_total = e["entrants"]["pageInfo"]["total"]
+                entrant_total = entrants_data["pageInfo"]["total"]
             except (KeyError, TypeError):
                 pass
+            # Collect participant IDs for unique player count
+            nodes = entrants_data.get("nodes") or []
+            for node in nodes:
+                for p in (node.get("participants") or []):
+                    pid = p.get("id")
+                    if pid:
+                        all_participant_ids.add(pid)
+            # Check if we got all entrants (pagination)
+            total_pages = (entrants_data.get("pageInfo") or {}).get("totalPages", 1)
+            if total_pages > 1:
+                partial_participant_data = True
+                logger.warning(
+                    f"Event {e.get('name')}: {total_pages} pages of entrants, "
+                    f"only fetched page 1. Unique player count may be approximate."
+                )
             events_compact.append({
                 "id": e.get("id"),
                 "name": e.get("name"),
@@ -689,8 +720,13 @@ def register_callbacks(app):
                 "startAt": e.get("startAt"),
                 "numEntrants": entrant_total,
             })
-        tournament_entrants = sum(ev.get("numEntrants", 0) for ev in events_compact)
-        logger.info(f"Entrant count from events: {tournament_entrants} (across {len(events_compact)} events)")
+        tournament_entrants_slots = sum(ev.get("numEntrants", 0) for ev in events_compact)
+        tournament_entrants_players = len(all_participant_ids)
+        logger.info(
+            f"Entrant counts: {tournament_entrants_players} unique players, "
+            f"{tournament_entrants_slots} event slots (across {len(events_compact)} events)"
+            f"{' [partial data]' if partial_participant_data else ''}"
+        )
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
         # 3) Find active settings row using storage backend
@@ -734,10 +770,12 @@ def register_callbacks(app):
             new_selected = keep + [n for n in new_candidates if n not in seen]
 
         # 5) Update settings using storage backend
-        # Wrap events_json as {tournament_entrants, events} for no-show tracking.
-        # Readers already handle both list and dict formats (backward compatible).
+        # Wrap events_json with both slot and player counts for accurate no-show tracking.
+        # tournament_entrants = slot total (backward compat for old snapshots)
+        # tournament_entrants_players = unique players (used for no-show)
         events_json_value = {
-            "tournament_entrants": tournament_entrants,
+            "tournament_entrants": tournament_entrants_slots,
+            "tournament_entrants_players": tournament_entrants_players,
             "events": events_compact,
         }
         patch_fields = {
@@ -1328,8 +1366,10 @@ def register_callbacks(app):
                 if top_game:
                     top_game_counts[top_game] = top_game_counts.get(top_game, 0) + 1
 
-                # No-show aggregation
-                startgg_registered_total += _as_int(ev.get("startgg_registered_count"))
+                # No-show aggregation (prefer player count, fall back to slot count)
+                reg_players = _as_int(ev.get("startgg_registered_players"))
+                reg_slots = _as_int(ev.get("startgg_registered_count"))
+                startgg_registered_total += reg_players or reg_slots
                 checked_in_total += _as_int(ev.get("checked_in_count"))
                 no_show_total += _as_int(ev.get("no_show_count"))
 
@@ -1379,8 +1419,9 @@ def register_callbacks(app):
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
                     "checked_in_vs_registered": (
-                        f"{_as_int(ev.get('checked_in_count'))}/{_as_int(ev.get('startgg_registered_count'))}"
-                        if _as_int(ev.get("startgg_registered_count")) > 0
+                        f"{_as_int(ev.get('checked_in_count'))}"
+                        f"/{_as_int(ev.get('startgg_registered_players')) or _as_int(ev.get('startgg_registered_count'))}"
+                        if (_as_int(ev.get("startgg_registered_players")) or _as_int(ev.get("startgg_registered_count"))) > 0
                         else "-"
                     ),
                     "total_revenue": f"{ev_revenue:.0f} kr",
@@ -1538,18 +1579,18 @@ def register_callbacks(app):
         if reg_total > 0:
             checked_rate = (checked_in_total / reg_total) * 100
             heads_up_text = (
-                f"Checked-in coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
+                f"Player coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
             )
             if reg_total >= 10:
                 if no_show_rate >= 30:
                     heads_up_text += (
                         f" Heads-up: no-show is {no_show_rate:.0f}% "
-                        f"({no_show_total} of {reg_total} Start.gg registrations) in this scope."
+                        f"({no_show_total} of {reg_total} registered players) in this scope."
                     )
                 elif no_show_rate >= 15:
                     heads_up_text += (
                         f" Heads-up: no-show is {no_show_rate:.0f}% "
-                        f"({no_show_total} of {reg_total}) in this scope."
+                        f"({no_show_total} of {reg_total} players) in this scope."
                     )
 
         # Top attendees leaderboard for selected scope

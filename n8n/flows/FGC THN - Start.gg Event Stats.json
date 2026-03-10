@@ -33,7 +33,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ query: 'query T($slug: String!) { tournament(slug: $slug) { id name events { id name entrants(query: {page: 1, perPage: 1}) { pageInfo { total } } } } }', variables: { slug: $json.slug } }) }}",
+        "jsonBody": "={{ JSON.stringify({ query: 'query T($slug: String!) { tournament(slug: $slug) { id name events { id name entrants(query: {page: 1, perPage: 100}) { pageInfo { total totalPages } nodes { participants { id } } } } } }', variables: { slug: $json.slug } }) }}",
         "options": {}
       },
       "id": "startgg-query",
@@ -45,7 +45,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst tournament = input?.data?.tournament;\nconst slug = $('Webhook').first().json.slug || '';\n\nif (!tournament) {\n  return [{ json: { error: 'Tournament not found', slug } }];\n}\n\nconst events = (tournament.events || []).map(e => ({\n  id: e.id,\n  name: e.name,\n  numEntrants: (e.entrants?.pageInfo?.total) || 0\n}));\nconst totalEntrants = events.reduce((sum, e) => sum + e.numEntrants, 0);\n\nreturn [{\n  json: {\n    event_slug: slug,\n    startgg_registered_count: totalEntrants,\n    tournament_name: tournament.name || '',\n    events: events\n  }\n}];"
+        "jsCode": "const input = $input.first().json;\nconst tournament = input?.data?.tournament;\nconst slug = $('Webhook').first().json.slug || '';\n\nif (!tournament) {\n  return [{ json: { error: 'Tournament not found', slug } }];\n}\n\nconst allParticipantIds = new Set();\nconst events = (tournament.events || []).map(e => {\n  const nodes = e.entrants?.nodes || [];\n  nodes.forEach(n => (n.participants || []).forEach(p => { if (p.id) allParticipantIds.add(p.id); }));\n  return { id: e.id, name: e.name, numEntrants: (e.entrants?.pageInfo?.total) || 0 };\n});\nconst totalSlots = events.reduce((sum, e) => sum + e.numEntrants, 0);\nconst totalPlayers = allParticipantIds.size;\n\nreturn [{\n  json: {\n    event_slug: slug,\n    startgg_registered_count: totalSlots,\n    startgg_registered_players: totalPlayers,\n    tournament_name: tournament.name || '',\n    events: events\n  }\n}];"
       },
       "id": "transform",
       "name": "Transform",

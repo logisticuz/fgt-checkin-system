@@ -56,6 +56,7 @@ def _run_migrations(pool):
                 # No-show tracking columns (added 2026-02-24)
                 for col, typ in [
                     ("startgg_registered_count", "INTEGER DEFAULT 0"),
+                    ("startgg_registered_players", "INTEGER DEFAULT 0"),
                     ("checked_in_count", "INTEGER DEFAULT 0"),
                     ("no_show_count", "INTEGER DEFAULT 0"),
                     ("no_show_rate", "NUMERIC(5,2) DEFAULT 0"),
@@ -1447,12 +1448,18 @@ def archive_event(
                     else Decimal("0")
                 )
 
-                # 4b. No-show computation
+                # 4b. No-show computation (person-based when available)
                 checked_in_count = total
-                startgg_registered_count = 0
+                startgg_registered_count = 0  # slot total (backward compat)
+                startgg_registered_players = 0  # unique players
                 if startgg_snapshot:
-                    if isinstance(startgg_snapshot, dict) and "tournament_entrants" in startgg_snapshot:
-                        startgg_registered_count = int(startgg_snapshot.get("tournament_entrants") or 0)
+                    if isinstance(startgg_snapshot, dict):
+                        startgg_registered_count = int(
+                            startgg_snapshot.get("tournament_entrants") or 0
+                        )
+                        startgg_registered_players = int(
+                            startgg_snapshot.get("tournament_entrants_players") or 0
+                        )
                     elif isinstance(startgg_snapshot, list):
                         # Legacy format: sum per-event numEntrants
                         startgg_registered_count = sum(
@@ -1460,14 +1467,21 @@ def archive_event(
                             for e in startgg_snapshot
                             if isinstance(e, dict)
                         )
-                no_show_count = max(startgg_registered_count - checked_in_count, 0)
+                # Use player count for no-show; fall back to slot count for old data
+                no_show_base = startgg_registered_players or startgg_registered_count
+                no_show_count = max(no_show_base - checked_in_count, 0)
                 no_show_rate = (
-                    (Decimal(no_show_count) / Decimal(startgg_registered_count) * 100).quantize(
+                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(
                         Decimal("0.01")
                     )
-                    if startgg_registered_count > 0
+                    if no_show_base > 0
                     else Decimal("0")
                 )
+                if no_show_base > 0:
+                    logger.info(
+                        f"No-show: {no_show_count}/{no_show_base} "
+                        f"({'players' if startgg_registered_players else 'slots (legacy)'})"
+                    )
 
                 # 5. Upsert event_stats (including startgg_snapshot + no-show)
                 cur.execute(
@@ -1479,7 +1493,8 @@ def archive_event(
                         new_players, returning_players, retention_rate,
                         games_breakdown, most_popular_game, status_breakdown,
                         startgg_snapshot,
-                        startgg_registered_count, checked_in_count,
+                        startgg_registered_count, startgg_registered_players,
+                        checked_in_count,
                         no_show_count, no_show_rate
                     ) VALUES (
                         %s, %s, %s, %s,
@@ -1489,6 +1504,7 @@ def archive_event(
                         %s, %s, %s,
                         %s,
                         %s, %s,
+                        %s,
                         %s, %s
                     )
                     ON CONFLICT (event_slug) DO UPDATE SET
@@ -1510,6 +1526,7 @@ def archive_event(
                         status_breakdown = EXCLUDED.status_breakdown,
                         startgg_snapshot = EXCLUDED.startgg_snapshot,
                         startgg_registered_count = EXCLUDED.startgg_registered_count,
+                        startgg_registered_players = EXCLUDED.startgg_registered_players,
                         checked_in_count = EXCLUDED.checked_in_count,
                         no_show_count = EXCLUDED.no_show_count,
                         no_show_rate = EXCLUDED.no_show_rate
@@ -1531,6 +1548,7 @@ def archive_event(
                         Json(stats["status_breakdown"]),
                         Json(startgg_snapshot) if startgg_snapshot else None,
                         startgg_registered_count,
+                        startgg_registered_players,
                         checked_in_count,
                         no_show_count,
                         no_show_rate,
