@@ -104,6 +104,7 @@ def register_callbacks(app):
         Output("checkins-table", "columns"),
         Output("player-count", "children"),
         Output("active-event-coverage", "children"),
+        Output("active-event-coverage-source", "children"),
         Output("game-filter", "options"),
         Output("duplicate-warning", "style"),
         Output("duplicate-warning-text", "children"),
@@ -142,6 +143,7 @@ def register_callbacks(app):
                 [],
                 [{"name": "No event selected", "id": "info"}],
                 "Select an event",
+                "",
                 "",
                 [],
                 {"display": "none"},
@@ -187,6 +189,7 @@ def register_callbacks(app):
                     [{"name": "No participants", "id": "info"}],
                     "0 players",
                     "",
+                    "",
                     [],
                     {"display": "none"},
                     "",
@@ -196,6 +199,7 @@ def register_callbacks(app):
             df = pd.DataFrame(data)
             total_count = len(df)
             coverage_text = ""
+            coverage_source = ""
 
             try:
                 settings = get_active_settings() or {}
@@ -228,6 +232,7 @@ def register_callbacks(app):
                             coverage_text = (
                                 f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
                             )
+                            coverage_source = "Source: Active snapshot"
                             if registered_slots and registered_slots != registered_players:
                                 coverage_text += f" | {registered_slots} event slots"
                         elif registered_slots > 0:
@@ -235,11 +240,13 @@ def register_callbacks(app):
                             coverage_text = (
                                 f"Coverage (slots): {total_count}/{registered_slots} ({coverage_rate:.0f}%)"
                             )
+                            coverage_source = "Source: Active snapshot (slot fallback)"
                     else:
                         coverage_text = (
                             "Coverage unavailable: Start.gg snapshot belongs to another event. "
                             "Run Fetch Event Data for the selected event."
                         )
+                        coverage_source = "Source: Guarded mismatch"
 
                 # For non-active/archived events: use event_stats by slug.
                 elif selected_slug and selected_slug != "__ALL__":
@@ -265,6 +272,7 @@ def register_callbacks(app):
                                 coverage_text = (
                                     f"Coverage: {checked_in}/{registered_players} players ({coverage_rate:.0f}%)"
                                 )
+                                coverage_source = "Source: Archived stats"
                                 if registered_slots and registered_slots != registered_players:
                                     coverage_text += f" | {registered_slots} event slots"
                             elif registered_slots > 0:
@@ -273,10 +281,13 @@ def register_callbacks(app):
                                     f"Coverage (slots): {checked_in}/{registered_slots} ({coverage_rate:.0f}%)"
                                     " | player coverage unavailable for this archived snapshot"
                                 )
+                                coverage_source = "Source: Archived stats (slot fallback)"
                             else:
                                 coverage_text = "Coverage unavailable for this archived event"
+                                coverage_source = "Source: Archived stats"
             except Exception:
                 coverage_text = ""
+                coverage_source = ""
 
             def _normalize_text(v):
                 if v is None:
@@ -492,6 +503,7 @@ def register_callbacks(app):
                 cols,
                 count_text,
                 coverage_text,
+                coverage_source,
                 game_options,
                 duplicate_warning_style,
                 duplicate_warning_text,
@@ -504,6 +516,7 @@ def register_callbacks(app):
                 [],
                 [{"name": "Error fetching data", "id": "error"}],
                 "Error",
+                "",
                 "",
                 [],
                 {"display": "none"},
@@ -709,6 +722,11 @@ def register_callbacks(app):
         State("event-dropdown", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (Output("btn-clear-current-event", "disabled"), True, False),
+            (Output("btn-archive-event-quick", "disabled"), True, False),
+            (Output("btn-archive-event", "disabled"), True, False),
+        ],
     )
     def clear_current_event(submit_n_clicks, selected_slug, auth_state):
         if not submit_n_clicks:
@@ -717,11 +735,8 @@ def register_callbacks(app):
             return no_update, html.Span("⚠️ No specific event selected.", style={"color": "#f59e0b"})
 
         try:
-            # Actually clear active_event_slug in the database
-            settings_data = get_active_settings_with_id() or {}
-            record_id = settings_data.get("record_id")
-            if record_id:
-                update_settings(record_id, {"active_event_slug": None})
+            # Clear only local dropdown selection in dashboard;
+            # keep global active event to avoid auth redirect kicks.
 
             try:
                 storage_api.log_action(
@@ -738,10 +753,7 @@ def register_callbacks(app):
             except Exception as e:
                 logger.warning(f"Failed to write audit log for clear current event: {e}")
 
-            return None, html.Span(
-                f"✅ Cleared '{selected_slug}' from active event.",
-                style={"color": "#10b981"},
-            )
+            return None, html.Span("✅ Cleared event selection (dashboard only).", style={"color": "#10b981"})
         except Exception as e:
             logger.exception(f"Failed to clear current event: {e}")
             return no_update, html.Span(f"❌ Failed to clear current event: {e}", style={"color": "#ef4444"})
@@ -1481,8 +1493,8 @@ def register_callbacks(app):
             if not slug:
                 continue
             name = ev.get("event_display_name") or slug.replace("-", " ").title()
-            date = ev.get("event_date") or ""
-            label = f"{name} ({date})" if date else name
+            ev_date_str = ev.get("event_date") or ""
+            label = f"{name} ({ev_date_str})" if ev_date_str else name
             options.append({"label": label, "value": slug})
 
         if not options:
@@ -3120,6 +3132,11 @@ def register_callbacks(app):
         State("archive-clear-active-toggle", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (Output("btn-archive-event-quick", "disabled"), True, False),
+            (Output("btn-archive-event", "disabled"), True, False),
+            (Output("btn-clear-current-event", "disabled"), True, False),
+        ],
     )
     def archive_current_event(n_clicks_quick, n_clicks, selected_slug, clear_flags, auth_state):
         if not n_clicks and not n_clicks_quick:

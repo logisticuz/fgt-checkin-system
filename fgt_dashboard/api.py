@@ -21,7 +21,13 @@ from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from starlette.middleware.wsgi import WSGIMiddleware
 
 from app import app as dash_app
-from auth import build_authorize_url, exchange_code_for_token, get_startgg_user, is_event_admin
+from auth import (
+    build_authorize_url,
+    exchange_code_for_token,
+    get_startgg_user,
+    is_event_admin,
+    check_event_admin,
+)
 from urllib.parse import urlparse
 import re
 from shared.storage import (
@@ -526,12 +532,20 @@ async def auth_select_event(request: Request):
 
     access_token = session_data.get("access_token", "")
     candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
-    allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
+    allowed = []
+    verify_unavailable = []
+    for slug in candidate_slugs:
+        ok, reason = check_event_admin(access_token, slug)
+        if ok is True:
+            allowed.append(slug)
+        elif ok is None:
+            verify_unavailable.append((slug, reason))
 
     logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
     save_path = "/auth/select-event/save" if IS_PROD else "/admin/auth/select-event/save"
 
     # Build HTML-safe option lists
+    source_slugs = allowed if allowed else candidate_slugs
     options = "".join(
         [
             (
@@ -541,15 +555,24 @@ async def auth_select_event(request: Request):
                 else f"<option value='{html_mod.escape(slug)}'>"
                 f"{html_mod.escape(slug)}</option>"
             )
-            for idx, slug in enumerate(allowed)
+            for idx, slug in enumerate(source_slugs)
         ]
     )
     datalist = "".join(
-        [f"<option value='{html_mod.escape(slug)}'></option>" for slug in allowed]
+        [f"<option value='{html_mod.escape(slug)}'></option>" for slug in source_slugs]
     )
 
     # Adapt UI when no known events exist (e.g. after archive + clear)
-    has_known_events = bool(allowed)
+    has_known_events = bool(source_slugs)
+    verify_notice = ""
+    if verify_unavailable:
+        verify_notice = (
+            "<div style='margin:.5rem 0 .75rem 0;padding:.55rem .7rem;border:1px solid #f59e0b55;"
+            "border-radius:10px;color:#f59e0b;background:#0b1227;'>"
+            "Could not verify TO access for some events right now (Start.gg timeout/API issue). "
+            "You can still try selecting and submitting again."
+            "</div>"
+        )
     if has_known_events:
         subtitle = "Pick one from the list or type a slug manually."
         slug_label = "Manual slug (optional)"
@@ -636,6 +659,7 @@ async def auth_select_event(request: Request):
           <div class='card'>
             <h1>Select Active Event</h1>
             <p>{subtitle}</p>
+            {verify_notice}
             <form method='post' action='{save_path}'>
               <div class='row'>
                 {dropdown_html}
@@ -706,7 +730,14 @@ async def auth_select_event_save(request: Request):
 
     access_token = session_data.get("access_token", "")
     candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
-    allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
+    allowed = []
+    verify_unavailable = False
+    for slug in candidate_slugs:
+        ok, reason = check_event_admin(access_token, slug)
+        if ok is True:
+            allowed.append(slug)
+        elif ok is None:
+            verify_unavailable = True
 
     has_access = False
     if event_slug:
@@ -714,7 +745,24 @@ async def auth_select_event_save(request: Request):
             has_access = True
         else:
             # Fallback for manual slug not present in local candidate list.
-            has_access = is_event_admin(access_token, event_slug)
+            manual_ok, manual_reason = check_event_admin(access_token, event_slug)
+            if manual_ok is None:
+                return HTMLResponse(
+                    _render_error_page(
+                        "Could not verify Start.gg access right now (temporary API issue). "
+                        "Please try again shortly."
+                    ),
+                    status_code=503,
+                )
+            has_access = manual_ok is True
+
+    if not allowed and verify_unavailable and event_slug:
+        return HTMLResponse(
+            _render_error_page(
+                "Could not verify TO access right now due to Start.gg/API timeout. Please retry."
+            ),
+            status_code=503,
+        )
 
     if not event_slug or not has_access:
         return HTMLResponse(

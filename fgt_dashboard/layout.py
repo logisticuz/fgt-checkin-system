@@ -850,6 +850,14 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.Span(
+                                                                id="active-event-coverage-source",
+                                                                children="",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.74rem",
+                                                                },
+                                                            ),
+                                                            html.Span(
                                                                 id="player-count",
                                                                 children=f"{len(data)} players",
                                                                 style={

@@ -10,6 +10,7 @@ Uses httpx for Start.gg API calls (sync Client for simplicity).
 import os
 import logging
 from urllib.parse import urlencode
+from typing import Optional, Tuple
 
 import httpx
 
@@ -186,10 +187,23 @@ def is_event_admin(access_token: str, event_slug: str) -> bool:
     Note: For Phase 1 this is informational. The primary auth gate is
     having a valid Start.gg account. TO-level checks can be tightened later.
     """
+    allowed, _reason = check_event_admin(access_token, event_slug)
+    return allowed is True
+
+
+def check_event_admin(access_token: str, event_slug: str) -> Tuple[Optional[bool], str]:
+    """
+    Check tournament admin access with explicit verification status.
+
+    Returns:
+        (True, "ok")               -> verified TO/Admin
+        (False, <reason>)          -> verified not admin / invalid slug
+        (None, <reason>)           -> could not verify now (timeout/network/API)
+    """
     # First get the current user's ID
     user = get_startgg_user(access_token)
     if not user.get("id"):
-        return False
+        return False, "user_lookup_failed"
 
     query = {
         "query": """
@@ -219,15 +233,19 @@ def is_event_admin(access_token: str, event_slug: str) -> bool:
         data = resp.json()
         if "errors" in data:
             logger.warning(f"Start.gg admin check errors: {data['errors']}")
-            return False
+            return None, "graphql_error"
 
         tournament = data.get("data", {}).get("tournament")
         if not tournament:
-            return False
+            return False, "tournament_not_found"
 
         admin_ids = {str(a.get("id")) for a in (tournament.get("admins") or [])}
-        return user["id"] in admin_ids
+        return (user["id"] in admin_ids), "ok"
+
+    except httpx.TimeoutException as e:
+        logger.warning(f"Timeout during Start.gg admin check: {e}")
+        return None, "timeout"
 
     except httpx.HTTPError as e:
         logger.error(f"Failed to check tournament admin status: {e}")
-        return False
+        return None, "http_error"
