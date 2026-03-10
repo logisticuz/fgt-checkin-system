@@ -1541,6 +1541,12 @@ def create_layout():
                                                         className="insights-subtab",
                                                         selected_className="insights-subtab--selected",
                                                     ),
+                                                    dcc.Tab(
+                                                        label="Duplicates",
+                                                        value="duplicates",
+                                                        className="insights-subtab",
+                                                        selected_className="insights-subtab--selected",
+                                                    ),
                                                 ],
                                             ),
                                             html.Div(
@@ -2088,6 +2094,92 @@ def create_layout():
                                                                 ],
                                                             },
                                                         ],
+                                                    ),
+                                                ],
+                                            ),
+                                            # -- Duplicates view --
+                                            html.Div(
+                                                id="insights-view-duplicates",
+                                                style={"display": "none"},
+                                                children=[
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "marginBottom": "0.8rem",
+                                                        },
+                                                        children=[
+                                                            html.Div(
+                                                                id="duplicates-title",
+                                                                children="Potential duplicates",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Scan for duplicates",
+                                                                id="btn-scan-duplicates",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    "backgroundColor": COLORS["accent_blue"],
+                                                                    "color": "#fff",
+                                                                    "border": "none",
+                                                                    "padding": "0.4rem 0.9rem",
+                                                                    "borderRadius": "6px",
+                                                                    "cursor": "pointer",
+                                                                    "fontSize": "0.78rem",
+                                                                    "fontWeight": "500",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="duplicates-feedback",
+                                                        style={
+                                                            "color": COLORS["text_secondary"],
+                                                            "fontSize": "0.8rem",
+                                                            "marginBottom": "0.6rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="duplicates-list",
+                                                        children=[],
+                                                    ),
+                                                    # Merge history section
+                                                    html.Hr(
+                                                        style={
+                                                            "borderColor": COLORS["border"],
+                                                            "margin": "1.5rem 0 1rem",
+                                                        }
+                                                    ),
+                                                    html.Div(
+                                                        "Merge history",
+                                                        style={
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "marginBottom": "0.6rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="merge-history-list",
+                                                        children=[
+                                                            html.Span(
+                                                                "No merges yet.",
+                                                                style={
+                                                                    "color": COLORS["text_secondary"],
+                                                                    "fontSize": "0.8rem",
+                                                                },
+                                                            )
+                                                        ],
+                                                    ),
+                                                    # Hidden stores for merge confirmation
+                                                    dcc.Store(id="merge-keep-uuid"),
+                                                    dcc.Store(id="merge-remove-uuid"),
+                                                    dcc.ConfirmDialog(
+                                                        id="merge-confirm-dialog",
+                                                        message="",
                                                     ),
                                                 ],
                                             ),

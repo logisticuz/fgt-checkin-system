@@ -1,5 +1,5 @@
 # callbacks.py
-from dash.dependencies import Input, Output, State
+from dash.dependencies import Input, Output, State, ALL
 from dash import no_update, html, ctx, dcc
 from shared.storage import (
     get_checkins,
@@ -1867,6 +1867,7 @@ def register_callbacks(app):
         Output("insights-view-games", "style"),
         Output("insights-view-events", "style"),
         Output("insights-view-earnings", "style"),
+        Output("insights-view-duplicates", "style"),
         Output("insights-top-game", "style"),
         Input("insights-subtabs", "value"),
     )
@@ -1877,14 +1878,16 @@ def register_callbacks(app):
         mode = (view_mode or "").strip().lower()
 
         if mode == "players":
-            return base_visible, hidden, hidden, hidden, hidden
+            return base_visible, hidden, hidden, hidden, hidden, hidden
         if mode == "games":
-            return hidden, base_visible, hidden, hidden, top_game_visible
+            return hidden, base_visible, hidden, hidden, hidden, top_game_visible
         if mode == "events":
-            return hidden, hidden, base_visible, hidden, top_game_visible
+            return hidden, hidden, base_visible, hidden, hidden, top_game_visible
         if mode == "earnings":
-            return hidden, hidden, hidden, base_visible, hidden
-        return base_visible, hidden, hidden, hidden, hidden
+            return hidden, hidden, hidden, base_visible, hidden, hidden
+        if mode == "duplicates":
+            return hidden, hidden, hidden, hidden, base_visible, hidden
+        return base_visible, hidden, hidden, hidden, hidden, hidden
 
     @app.callback(
         Output("insights-kpi-help", "children"),
@@ -1939,6 +1942,437 @@ def register_callbacks(app):
         df = pd.DataFrame(rows)
         filename = f"insights_{mode}.csv"
         return dcc.send_data_frame(df.to_csv, filename, index=False)
+
+    # -------------------------------------------------------------------------
+    # Duplicates - scan, merge, undo
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("duplicates-list", "children"),
+        Output("duplicates-feedback", "children"),
+        Output("duplicates-title", "children"),
+        Input("btn-scan-duplicates", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def scan_duplicates(n_clicks):
+        if not n_clicks:
+            return no_update, no_update, no_update
+
+        try:
+            candidates_fn = getattr(storage_api, "find_duplicate_candidates", None)
+            if not candidates_fn:
+                return [], "Duplicate detection not available.", "Potential duplicates"
+
+            candidates = candidates_fn(limit=30) or []
+        except Exception as e:
+            logger.exception(f"Failed to scan duplicates: {e}")
+            return [], f"Error scanning: {e}", "Potential duplicates"
+
+        if not candidates:
+            return (
+                [html.Div(
+                    "No potential duplicates found.",
+                    style={"color": COLORS["accent_green"], "padding": "1rem 0"},
+                )],
+                "",
+                "Potential duplicates (0)",
+            )
+
+        cards = []
+        for c in candidates:
+            a = c["player_a"]
+            b = c["player_b"]
+            conf = c["confidence"]
+            reasons = c["reasons"]
+
+            conf_color = {
+                "high": COLORS["accent_green"],
+                "medium": COLORS["accent_yellow"],
+                "low": COLORS["text_secondary"],
+            }.get(conf, COLORS["text_secondary"])
+
+            reason_text = ", ".join(r.replace("_", " ") for r in reasons)
+
+            card = html.Div(
+                style={
+                    "backgroundColor": COLORS["bg_card"],
+                    "border": f"1px solid {COLORS['border']}",
+                    "borderRadius": "8px",
+                    "padding": "0.8rem 1rem",
+                    "marginBottom": "0.6rem",
+                },
+                children=[
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "justifyContent": "space-between",
+                            "alignItems": "flex-start",
+                            "gap": "1rem",
+                        },
+                        children=[
+                            # Player A
+                            html.Div(
+                                style={"flex": "1"},
+                                children=[
+                                    html.Div(
+                                        a.get("name", "?"),
+                                        style={
+                                            "color": COLORS["text_primary"],
+                                            "fontWeight": "600",
+                                            "fontSize": "0.85rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Tag: {a.get('tag', '-')}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.75rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Phone: {a.get('telephone', '-') or '-'}  |  Events: {a.get('total_events', 0)}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.72rem",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            # Arrow + confidence
+                            html.Div(
+                                style={
+                                    "display": "flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "minWidth": "80px",
+                                },
+                                children=[
+                                    html.Div(
+                                        "\u2194",
+                                        style={
+                                            "fontSize": "1.2rem",
+                                            "color": COLORS["text_secondary"],
+                                        },
+                                    ),
+                                    html.Div(
+                                        conf.upper(),
+                                        style={
+                                            "color": conf_color,
+                                            "fontSize": "0.65rem",
+                                            "fontWeight": "700",
+                                            "letterSpacing": "0.05em",
+                                        },
+                                    ),
+                                    html.Div(
+                                        reason_text,
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.65rem",
+                                            "textAlign": "center",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            # Player B
+                            html.Div(
+                                style={"flex": "1", "textAlign": "right"},
+                                children=[
+                                    html.Div(
+                                        b.get("name", "?"),
+                                        style={
+                                            "color": COLORS["text_primary"],
+                                            "fontWeight": "600",
+                                            "fontSize": "0.85rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Tag: {b.get('tag', '-')}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.75rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Phone: {b.get('telephone', '-') or '-'}  |  Events: {b.get('total_events', 0)}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.72rem",
+                                        },
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                    # Action buttons
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "gap": "0.5rem",
+                            "marginTop": "0.6rem",
+                            "justifyContent": "flex-end",
+                        },
+                        children=[
+                            html.Button(
+                                f"Keep {a.get('tag', '?')}",
+                                id={"type": "btn-merge", "keep": a["uuid"], "remove": b["uuid"]},
+                                style={
+                                    "backgroundColor": COLORS["accent_green"],
+                                    "color": "#fff",
+                                    "border": "none",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
+                                    "fontWeight": "500",
+                                },
+                            ),
+                            html.Button(
+                                f"Keep {b.get('tag', '?')}",
+                                id={"type": "btn-merge", "keep": b["uuid"], "remove": a["uuid"]},
+                                style={
+                                    "backgroundColor": COLORS["accent_blue"],
+                                    "color": "#fff",
+                                    "border": "none",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
+                                    "fontWeight": "500",
+                                },
+                            ),
+                            html.Button(
+                                "Not same",
+                                id={"type": "btn-not-same", "a": a["uuid"], "b": b["uuid"]},
+                                style={
+                                    "backgroundColor": "transparent",
+                                    "color": COLORS["text_secondary"],
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
+                                },
+                            ),
+                        ],
+                    ),
+                ],
+            )
+            cards.append(card)
+
+        return (
+            cards,
+            "",
+            f"Potential duplicates ({len(candidates)})",
+        )
+
+    @app.callback(
+        Output("merge-confirm-dialog", "displayed"),
+        Output("merge-confirm-dialog", "message"),
+        Output("merge-keep-uuid", "data"),
+        Output("merge-remove-uuid", "data"),
+        Input({"type": "btn-merge", "keep": ALL, "remove": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def prompt_merge_confirm(n_clicks_list):
+        if not n_clicks_list or not any(n_clicks_list):
+            return False, "", None, None
+
+        triggered = ctx.triggered_id
+        if not triggered:
+            return False, "", None, None
+
+        keep_uuid = triggered.get("keep", "")
+        remove_uuid = triggered.get("remove", "")
+
+        msg = (
+            f"Merge players?\n\n"
+            f"KEEP: {keep_uuid[:12]}...\n"
+            f"REMOVE: {remove_uuid[:12]}...\n\n"
+            f"The removed player's history will be absorbed into the kept player. "
+            f"This can be undone from the merge history."
+        )
+
+        return True, msg, keep_uuid, remove_uuid
+
+    @app.callback(
+        Output("duplicates-feedback", "children", allow_duplicate=True),
+        Output("merge-history-list", "children", allow_duplicate=True),
+        Input("merge-confirm-dialog", "submit_n_clicks"),
+        State("merge-keep-uuid", "data"),
+        State("merge-remove-uuid", "data"),
+        prevent_initial_call=True,
+    )
+    def execute_merge(submit_clicks, keep_uuid, remove_uuid):
+        if not submit_clicks or not keep_uuid or not remove_uuid:
+            return no_update, no_update
+
+        try:
+            merge_fn = getattr(storage_api, "merge_players", None)
+            if not merge_fn:
+                return "Merge not available.", no_update
+
+            result = merge_fn(
+                keep_uuid,
+                remove_uuid,
+                reason="Manual merge via dashboard",
+            )
+            feedback = html.Div(
+                [
+                    html.Span(
+                        f"Merged! ",
+                        style={"color": COLORS["accent_green"], "fontWeight": "600"},
+                    ),
+                    html.Span(
+                        f"Kept {result.get('keep_player_tag', '?')}, "
+                        f"removed {result.get('removed_player_tag', '?')}. "
+                        f"Archive rows updated: {result.get('archive_rows_updated', 0)}. ",
+                    ),
+                    html.Span(
+                        "Re-scan to refresh the list.",
+                        style={"fontStyle": "italic"},
+                    ),
+                ],
+                style={"fontSize": "0.8rem"},
+            )
+        except Exception as e:
+            logger.exception(f"Merge failed: {e}")
+            feedback = html.Div(
+                f"Merge failed: {e}",
+                style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
+            )
+
+        # Refresh merge history
+        history_children = _build_merge_history_list()
+
+        return feedback, history_children
+
+    @app.callback(
+        Output("duplicates-feedback", "children", allow_duplicate=True),
+        Output("merge-history-list", "children", allow_duplicate=True),
+        Input({"type": "btn-undo-merge", "merge_id": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def undo_merge_callback(n_clicks_list):
+        if not n_clicks_list or not any(n_clicks_list):
+            return no_update, no_update
+
+        triggered = ctx.triggered_id
+        if not triggered:
+            return no_update, no_update
+
+        merge_id = triggered.get("merge_id")
+        if not merge_id:
+            return no_update, no_update
+
+        try:
+            undo_fn = getattr(storage_api, "undo_merge", None)
+            if not undo_fn:
+                return "Undo not available.", no_update
+
+            result = undo_fn(int(merge_id))
+            feedback = html.Div(
+                [
+                    html.Span(
+                        "Undo complete! ",
+                        style={"color": COLORS["accent_yellow"], "fontWeight": "600"},
+                    ),
+                    html.Span(
+                        f"Restored {result.get('restored_tag', '?')} ({result.get('restored_name', '?')}). "
+                        f"Archive rows reverted: {result.get('archive_reverted', 0)}.",
+                    ),
+                ],
+                style={"fontSize": "0.8rem"},
+            )
+        except Exception as e:
+            logger.exception(f"Undo merge failed: {e}")
+            feedback = html.Div(
+                f"Undo failed: {e}",
+                style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
+            )
+
+        history_children = _build_merge_history_list()
+        return feedback, history_children
+
+    def _build_merge_history_list():
+        """Build merge history UI from merge_log."""
+        try:
+            history_fn = getattr(storage_api, "get_merge_history", None)
+            if not history_fn:
+                return [html.Span("Not available.", style={"color": COLORS["text_secondary"]})]
+            history = history_fn(limit=20) or []
+        except Exception:
+            return [html.Span("Failed to load.", style={"color": COLORS["text_secondary"]})]
+
+        if not history:
+            return [html.Span(
+                "No merges yet.",
+                style={"color": COLORS["text_secondary"], "fontSize": "0.8rem"},
+            )]
+
+        items = []
+        for entry in history:
+            is_undone = entry.get("undone", False)
+            merged_at = (entry.get("merged_at") or "")[:16].replace("T", " ")
+
+            text = (
+                f"{merged_at}  —  "
+                f"Removed {entry.get('removed_tag', '?')} ({entry.get('removed_name', '?')}) "
+                f"into {entry.get('keep_uuid', '?')[:8]}... "
+                f"({entry.get('archive_rows_updated', 0)} rows)"
+            )
+
+            row_children = [
+                html.Span(
+                    text,
+                    style={
+                        "fontSize": "0.75rem",
+                        "color": COLORS["text_secondary"] if is_undone else COLORS["text_primary"],
+                        "textDecoration": "line-through" if is_undone else "none",
+                    },
+                ),
+            ]
+
+            if is_undone:
+                row_children.append(
+                    html.Span(
+                        "  (undone)",
+                        style={
+                            "color": COLORS["accent_yellow"],
+                            "fontSize": "0.7rem",
+                            "fontStyle": "italic",
+                        },
+                    )
+                )
+            else:
+                row_children.append(
+                    html.Button(
+                        "Undo",
+                        id={"type": "btn-undo-merge", "merge_id": entry["id"]},
+                        style={
+                            "backgroundColor": "transparent",
+                            "color": COLORS["accent_yellow"],
+                            "border": f"1px solid {COLORS['accent_yellow']}",
+                            "padding": "0.15rem 0.5rem",
+                            "borderRadius": "4px",
+                            "cursor": "pointer",
+                            "fontSize": "0.68rem",
+                            "marginLeft": "0.5rem",
+                        },
+                    )
+                )
+
+            items.append(
+                html.Div(
+                    row_children,
+                    style={
+                        "padding": "0.3rem 0",
+                        "borderBottom": f"1px solid {COLORS['border']}",
+                        "display": "flex",
+                        "alignItems": "center",
+                    },
+                )
+            )
+
+        return items
 
     # -------------------------------------------------------------------------
     # Reactive Stats - update stat cards when table data changes
