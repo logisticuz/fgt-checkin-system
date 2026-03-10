@@ -14,12 +14,16 @@ import os
 import logging
 import json
 
+import html as html_mod
+
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from starlette.middleware.wsgi import WSGIMiddleware
 
 from app import app as dash_app
 from auth import build_authorize_url, exchange_code_for_token, get_startgg_user, is_event_admin
+from urllib.parse import urlparse
+import re
 from shared.storage import (
     create_session,
     get_session,
@@ -32,6 +36,7 @@ from shared.storage import (
     update_settings,
     log_action,
 )
+from shared.postgres_api import reopen_event
 
 logger = logging.getLogger(__name__)
 
@@ -286,8 +291,14 @@ async def require_dashboard_auth(request: Request, call_next):
             return HTMLResponse(_render_dashboard_landing_page(login_path), status_code=200)
         return RedirectResponse(url=login_path, status_code=302)
 
-    # If no active event is configured, force event selection flow first.
-    if not get_active_slug() and path != "/auth/select-event" and path != "/auth/select-event/save":
+    # No active event? Redirect browser navigation to select-event page.
+    # Skip Dash internal paths (/_dash-*) to avoid redirect loops — Dash
+    # AJAX callbacks must be allowed through even without an active slug.
+    if (
+        not get_active_slug()
+        and not path.startswith("/_dash-")
+        and path not in {"/auth/select-event", "/auth/select-event/save", "/auth/logout", "/auth/me", "/_favicon.ico"}
+    ):
         select_path = "/auth/select-event" if IS_PROD else "/admin/auth/select-event"
         return RedirectResponse(url=select_path, status_code=302)
 
@@ -338,7 +349,10 @@ async def auth_callback(code: str = ""):
             logger.error("Could not retrieve user info from Start.gg")
             return JSONResponse({"error": "Could not retrieve user info"}, status_code=500)
 
-        # Step 2.5: Authorize only users with TO permissions
+        # Step 2.5: Authorize — if an active event exists, verify TO access.
+        # If no active event (e.g. after archive + clear), let the user
+        # through — they'll set one up via Settings > Fetch Event Data,
+        # which verifies TO access at that point.
         active_slug = get_active_slug()
         if active_slug:
             if not is_event_admin(access_token, active_slug):
@@ -366,35 +380,13 @@ async def auth_callback(code: str = ""):
                     ),
                     active_slug,
                 )
-                return JSONResponse(
-                    {"error": f"Not authorized for active event: {active_slug}"},
-                    status_code=403,
-                )
-        else:
-            candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
-            allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
-            if not allowed:
-                _audit_safe(
-                    {
-                        "user_id": user_info.get("id", ""),
-                        "user_name": _display_name(
-                            user_info.get("name", ""),
-                            user_info.get("email", ""),
-                            str(user_info.get("id", "")),
-                        ),
-                        "user_email": user_info.get("email", ""),
-                    },
-                    "auth_login_denied",
-                    "dashboard_auth",
-                    reason="no_admin_access_for_known_events",
-                    details=json.dumps({"candidate_slugs": candidate_slugs}),
-                )
+                logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
                 return HTMLResponse(
-                    """
-                    <h2>No TO Access Yet</h2>
-                    <p>You are signed in, but your Start.gg account is not approved as TO/Admin for any known event.</p>
-                    <p>Please contact Head TO to grant permissions, then try again.</p>
-                    <p><a href='/admin/auth/logout'>Back to login</a></p>
+                    f"""
+                    <h2>Not Authorized</h2>
+                    <p>You are not TO/Admin for the active event: <strong>{html_mod.escape(active_slug)}</strong></p>
+                    <p>Please contact Head TO to grant permissions.</p>
+                    <p><a href='{logout_path}'>Back to login</a></p>
                     """,
                     status_code=403,
                 )
@@ -536,30 +528,135 @@ async def auth_select_event(request: Request):
     candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
     allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
 
-    if not allowed:
-        return HTMLResponse(
-            """
-            <h2>No TO Access Yet</h2>
-            <p>You are signed in, but your Start.gg account is not approved as TO/Admin for any known event.</p>
-            <p>Please contact Head TO to grant permissions, then try again.</p>
-            <p><a href='/admin/auth/logout'>Back to login</a></p>
-            """,
-            status_code=403,
-        )
+    logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
+    save_path = "/auth/select-event/save" if IS_PROD else "/admin/auth/select-event/save"
 
-    options = "".join([f"<option value='{slug}'>{slug}</option>" for slug in allowed])
-    html = f"""
-    <html><body style='font-family:Arial,sans-serif;padding:2rem;'>
-    <h2>Select Active Event</h2>
-    <p>No active event is configured yet. Choose one you are approved to manage.</p>
-    <form method='post' action='/auth/select-event/save'>
-      <select name='event_slug' required style='min-width:320px;padding:0.5rem;'>{options}</select>
-      <div style='margin-top:1rem;'><button type='submit'>Set Active Event</button></div>
-    </form>
-    <p style='margin-top:1rem;'><a href='/admin/auth/logout'>Logout</a></p>
-    </body></html>
-    """
-    return HTMLResponse(html)
+    # Build HTML-safe option lists
+    options = "".join(
+        [
+            (
+                f"<option value='{html_mod.escape(slug)}' selected>"
+                f"{html_mod.escape(slug)}</option>"
+                if idx == 0
+                else f"<option value='{html_mod.escape(slug)}'>"
+                f"{html_mod.escape(slug)}</option>"
+            )
+            for idx, slug in enumerate(allowed)
+        ]
+    )
+    datalist = "".join(
+        [f"<option value='{html_mod.escape(slug)}'></option>" for slug in allowed]
+    )
+
+    # Adapt UI when no known events exist (e.g. after archive + clear)
+    has_known_events = bool(allowed)
+    if has_known_events:
+        subtitle = "Pick one from the list or type a slug manually."
+        slug_label = "Manual slug (optional)"
+    else:
+        subtitle = (
+            "No active events found. Enter your Start.gg tournament slug or paste the full URL."
+        )
+        slug_label = "Tournament slug or Start.gg URL"
+
+    # Hide the dropdown entirely when empty
+    dropdown_html = f"""
+                <div class='field'>
+                  <label>Approved events</label>
+                  <select name='event_slug'>
+                    {options}
+                  </select>
+                </div>""" if has_known_events else ""
+
+    page = f"""
+        <html>
+        <head>
+          <meta charset='utf-8' />
+          <meta name='viewport' content='width=device-width, initial-scale=1' />
+          <title>Select Active Event</title>
+          <style>
+            :root {{
+              --bg:#070b1a;
+              --bg-card:#0f172a;
+              --border:#1e293b;
+              --text:#e2e8f0;
+              --muted:#94a3b8;
+              --accent:#00d4ff;
+              --accent2:#f59e0b;
+            }}
+            * {{ box-sizing:border-box; }}
+            body {{
+              margin:0;
+              min-height:100vh;
+              font-family:'Segoe UI',Tahoma,sans-serif;
+              background: radial-gradient(circle at 20% 0%, #121b3b 0%, var(--bg) 42%, #050814 100%);
+              color:var(--text);
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              padding:1.25rem;
+            }}
+            .card {{
+              width:min(680px,96vw);
+              background:linear-gradient(180deg, #0f172a, #0b1328);
+              border:1px solid var(--border);
+              border-radius:14px;
+              padding:1.25rem;
+              box-shadow:0 20px 48px rgba(0,0,0,.38);
+            }}
+            h1 {{ margin:0 0 .5rem 0; font-size:1.45rem; }}
+            p {{ margin:.25rem 0 .85rem 0; color:var(--muted); }}
+            .row {{ display:flex; gap:.7rem; flex-wrap:wrap; margin-top:.5rem; }}
+            .field {{ flex:1 1 260px; }}
+            label {{ display:block; margin-bottom:.3rem; color:var(--muted); font-size:.8rem; }}
+            select,input {{
+              width:100%;
+              background:#0b1227;
+              color:var(--text);
+              border:1px solid #334155;
+              border-radius:10px;
+              padding:.64rem .7rem;
+              font-size:.95rem;
+            }}
+            button {{
+              margin-top:.9rem;
+              background:linear-gradient(135deg, var(--accent), #22d3ee);
+              color:#03111f;
+              border:0;
+              border-radius:10px;
+              padding:.62rem .9rem;
+              font-weight:700;
+              cursor:pointer;
+            }}
+            .logout {{ margin-top:.9rem; display:inline-block; color:var(--muted); }}
+            .help {{ font-size:.8rem; color:var(--muted); margin-top:.4rem; }}
+          </style>
+        </head>
+        <body>
+          <div class='card'>
+            <h1>Select Active Event</h1>
+            <p>{subtitle}</p>
+            <form method='post' action='{save_path}'>
+              <div class='row'>
+                {dropdown_html}
+                <div class='field'>
+                  <label>{slug_label}</label>
+                  <input name='event_slug_manual' list='allowed-event-slugs'
+                         placeholder='fightbox-3 or https://www.start.gg/tournament/...'
+                         autocomplete='off' />
+                  <datalist id='allowed-event-slugs'>{datalist}</datalist>
+                </div>
+              </div>
+              <div class='help'>Enter the slug from the Start.gg URL (e.g. &quot;fightbox-3&quot;) or paste the full URL. You must be TO/Admin for the tournament.</div>
+              <button type='submit'>Set Active Event</button>
+            </form>
+            <a class='logout' href='{logout_path}'>Logout</a>
+          </div>
+        </body>
+        </html>
+        """
+
+    return HTMLResponse(page)
 
 
 @app.post("/auth/select-event/save")
@@ -573,40 +670,104 @@ async def auth_select_event_save(request: Request):
 
     try:
         form = await request.form()
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to parse form data in select-event/save: %s", exc)
         form = {}
-    event_slug = str(form.get("event_slug", "")).strip()
+    selected_slug = str(form.get("event_slug", "")).strip()
+    manual_slug = str(form.get("event_slug_manual", "")).strip()
+
+    raw_input = (manual_slug or selected_slug).strip()
+    event_slug = raw_input.lower()
+
+    # Accept full Start.gg URLs in manual field, e.g.
+    # https://www.start.gg/tournament/fightbox-2/events
+    if raw_input.startswith("http://") or raw_input.startswith("https://"):
+        try:
+            parsed = urlparse(raw_input)
+            match = re.search(r"/tournament/([^/]+)", parsed.path or "")
+            if match:
+                event_slug = match.group(1).strip().lower()
+        except Exception:
+            pass
+
+    def _render_error_page(message: str) -> str:
+        logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
+        select_path = "/auth/select-event" if IS_PROD else "/admin/auth/select-event"
+        return f"""
+        <html><body style='font-family:Segoe UI,Tahoma,sans-serif;background:#070b1a;color:#e2e8f0;padding:1.25rem;'>
+          <div style='max-width:620px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:1rem;'>
+            <h3 style='margin:0 0 .5rem 0;'>Could not set active event</h3>
+            <p style='color:#f59e0b;margin:0 0 .75rem 0;'>{message}</p>
+            <p><a href='{select_path}' style='color:#00d4ff;'>Back to Select Event</a></p>
+            <p><a href='{logout_path}' style='color:#94a3b8;'>Logout</a></p>
+          </div>
+        </body></html>
+        """
 
     access_token = session_data.get("access_token", "")
-    if not event_slug or not is_event_admin(access_token, event_slug):
-        return HTMLResponse("<h3>Invalid event selection.</h3>", status_code=403)
+    candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
+    allowed = [s for s in candidate_slugs if is_event_admin(access_token, s)]
+
+    has_access = False
+    if event_slug:
+        if event_slug in allowed:
+            has_access = True
+        else:
+            # Fallback for manual slug not present in local candidate list.
+            has_access = is_event_admin(access_token, event_slug)
+
+    if not event_slug or not has_access:
+        return HTMLResponse(
+            _render_error_page(
+                "Invalid event selection or missing TO access. "
+                f"Requested: '{event_slug or '-'}'."
+            ),
+            status_code=403,
+        )
 
     settings_with_id = get_active_settings_with_id() or {}
     record_id = settings_with_id.get("record_id")
     if not record_id:
-        return HTMLResponse("<h3>Could not find settings record.</h3>", status_code=500)
+        return HTMLResponse(_render_error_page("Could not find settings record."), status_code=500)
 
-    ok = update_settings(record_id, {"active_event_slug": event_slug})
-    if not ok:
-        return HTMLResponse("<h3>Failed to set active event.</h3>", status_code=500)
+    old_slug = (settings_with_id.get("fields") or {}).get("active_event_slug", "")
+    user_ctx = {
+        "user_id": session_data.get("user_id", ""),
+        "user_name": _display_name(
+            session_data.get("user_name", ""),
+            session_data.get("user_email", ""),
+            str(session_data.get("user_id", "")),
+        ),
+        "user_email": session_data.get("user_email", ""),
+    }
+
+    # Try to reopen archived event (restores players to active_event_data).
+    # If no archived data exists (new event), fall back to just setting the slug.
+    reopened = False
+    try:
+        result = reopen_event(event_slug, restore_active=True, user=user_ctx)
+        reopened = True
+        logger.info(
+            "Auto-reopened archived event '%s' (%d rows restored)",
+            event_slug,
+            result.get("restored_rows", 0),
+        )
+    except ValueError:
+        # No archived data — new event, just set the slug.
+        ok = update_settings(record_id, {"active_event_slug": event_slug})
+        if not ok:
+            return HTMLResponse(_render_error_page("Failed to set active event."), status_code=500)
 
     _audit_safe(
-        {
-            "user_id": session_data.get("user_id", ""),
-            "user_name": _display_name(
-                session_data.get("user_name", ""),
-                session_data.get("user_email", ""),
-                str(session_data.get("user_id", "")),
-            ),
-            "user_email": session_data.get("user_email", ""),
-        },
+        user_ctx,
         "auth_select_active_event",
         "settings",
         target_event=event_slug,
         details=json.dumps(
             {
-                "old_active_event_slug": (settings_with_id.get("fields") or {}).get("active_event_slug", ""),
+                "old_active_event_slug": old_slug,
                 "new_active_event_slug": event_slug,
+                "auto_reopened": reopened,
             }
         ),
     )

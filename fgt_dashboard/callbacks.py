@@ -45,6 +45,7 @@ ACTION_META = {
     "admin_delete_checkin": ("Check-ins", "Delete Player"),
     "integration_result": ("Integrations", "Result"),
     "event_archived": ("Archive", "Event Archived"),
+    "admin_clear_active_event": ("Archive", "Clear Active Event"),
     "event_rearchived": ("Archive", "Event Re-Archived"),
     "event_reopened": ("Archive", "Event Reopened"),
     "event_deleted_from_history": ("Archive", "Deleted From History"),
@@ -136,16 +137,16 @@ def register_callbacks(app):
         - filter or search changes
         """
         if not selected_slug:
-            logger.warning("No event slug selected – skipping table update.")
+            logger.info("No event slug selected – clearing table.")
             return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
+                [],
+                [{"name": "No event selected", "id": "info"}],
+                "Select an event",
+                "",
+                [],
+                {"display": "none"},
+                "",
+                [],
             )
 
         # Default columns if none specified
@@ -198,25 +199,82 @@ def register_callbacks(app):
 
             try:
                 settings = get_active_settings() or {}
+                active_slug = (settings.get("active_event_slug") or "").strip()
                 events_json = settings.get("events_json")
                 registered_players = 0
                 registered_slots = 0
-                if isinstance(events_json, dict):
-                    registered_players = int(events_json.get("tournament_entrants_players") or 0)
-                    registered_slots = int(events_json.get("tournament_entrants") or 0)
-                    # Fallback: old snapshots without player count
-                    if not registered_players:
-                        registered_players = registered_slots
-                elif isinstance(settings.get("startgg_registered_count"), (int, float, str)):
-                    registered_players = int(settings.get("startgg_registered_count") or 0)
-                    registered_slots = registered_players
-                if registered_players > 0:
-                    coverage_rate = (total_count / registered_players) * 100
-                    coverage_text = (
-                        f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
-                    )
-                    if registered_slots != registered_players:
-                        coverage_text += f" | {registered_slots} event slots"
+
+                snapshot_slug = ""
+                startgg_url = (settings.get("startgg_event_url") or "").strip()
+                if startgg_url:
+                    m = re.search(r"/tournament/([^/]+)", startgg_url)
+                    if m:
+                        snapshot_slug = (m.group(1) or "").strip()
+
+                # For active event: use live settings snapshot.
+                if selected_slug == active_slug:
+                    # Guard against stale/mismatched settings snapshot.
+                    snapshot_matches_selected = (not snapshot_slug) or (snapshot_slug == selected_slug)
+
+                    if snapshot_matches_selected:
+                        if isinstance(events_json, dict):
+                            registered_players = int(events_json.get("tournament_entrants_players") or 0)
+                            registered_slots = int(events_json.get("tournament_entrants") or 0)
+                        elif isinstance(settings.get("startgg_registered_count"), (int, float, str)):
+                            registered_slots = int(settings.get("startgg_registered_count") or 0)
+
+                        if registered_players > 0:
+                            coverage_rate = (total_count / registered_players) * 100
+                            coverage_text = (
+                                f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
+                            )
+                            if registered_slots and registered_slots != registered_players:
+                                coverage_text += f" | {registered_slots} event slots"
+                        elif registered_slots > 0:
+                            coverage_rate = (total_count / registered_slots) * 100
+                            coverage_text = (
+                                f"Coverage (slots): {total_count}/{registered_slots} ({coverage_rate:.0f}%)"
+                            )
+                    else:
+                        coverage_text = (
+                            "Coverage unavailable: Start.gg snapshot belongs to another event. "
+                            "Run Fetch Event Data for the selected event."
+                        )
+
+                # For non-active/archived events: use event_stats by slug.
+                elif selected_slug and selected_slug != "__ALL__":
+                    history_fn = getattr(storage_api, "get_event_history_dashboard", None)
+                    if callable(history_fn):
+                        history_raw = history_fn() or []
+                        history_rows = history_raw if isinstance(history_raw, list) else []
+                        stat_row = next(
+                            (r for r in history_rows if (r.get("event_slug") or "") == selected_slug),
+                            None,
+                        )
+                        if stat_row:
+                            checked_in = int(
+                                stat_row.get("checked_in_count")
+                                or stat_row.get("total_participants")
+                                or total_count
+                            )
+                            registered_players = int(stat_row.get("startgg_registered_players") or 0)
+                            registered_slots = int(stat_row.get("startgg_registered_count") or 0)
+
+                            if registered_players > 0:
+                                coverage_rate = (checked_in / registered_players) * 100
+                                coverage_text = (
+                                    f"Coverage: {checked_in}/{registered_players} players ({coverage_rate:.0f}%)"
+                                )
+                                if registered_slots and registered_slots != registered_players:
+                                    coverage_text += f" | {registered_slots} event slots"
+                            elif registered_slots > 0:
+                                coverage_rate = (checked_in / registered_slots) * 100
+                                coverage_text = (
+                                    f"Coverage (slots): {checked_in}/{registered_slots} ({coverage_rate:.0f}%)"
+                                    " | player coverage unavailable for this archived snapshot"
+                                )
+                            else:
+                                coverage_text = "Coverage unavailable for this archived event"
             except Exception:
                 coverage_text = ""
 
@@ -577,6 +635,116 @@ def register_callbacks(app):
         if expanded:
             return {"display": "block", "marginTop": "0.6rem"}, "Manual Tools ▴"
         return {"display": "none", "marginTop": "0.6rem"}, "Manual Tools ▾"
+
+    @app.callback(
+        Output("checkins-table", "row_selectable"),
+        Output("checkins-table", "selected_rows"),
+        Output("btn-toggle-multiselect", "children"),
+        Output("btn-toggle-multiselect", "style"),
+        Input("btn-toggle-multiselect", "n_clicks"),
+        State("checkins-table", "selected_rows"),
+        State("checkins-table", "row_selectable"),
+        prevent_initial_call=False,
+    )
+    def toggle_multiselect_mode(n_clicks, selected_rows, current_mode):
+        enabled_style = {
+            "backgroundColor": "transparent",
+            "color": "#00d4ff",
+            "border": "1px solid #00d4ff",
+            "borderRadius": "8px",
+            "padding": "0.45rem 0.75rem",
+            "fontSize": "0.8rem",
+            "fontWeight": "600",
+            "cursor": "pointer",
+        }
+        disabled_style = {
+            "backgroundColor": "transparent",
+            "color": "#94a3b8",
+            "border": "1px solid #334155",
+            "borderRadius": "8px",
+            "padding": "0.45rem 0.75rem",
+            "fontSize": "0.8rem",
+            "fontWeight": "600",
+            "cursor": "pointer",
+        }
+
+        # If user already has selected rows, this button works as quick "clear selection".
+        if selected_rows:
+            is_enabled = current_mode == "multi"
+            return (
+                "multi" if is_enabled else False,
+                [],
+                "Multi-select: ON" if is_enabled else "Multi-select: OFF",
+                enabled_style if is_enabled else disabled_style,
+            )
+
+        enabled = not bool(n_clicks and n_clicks % 2 == 1)
+        if enabled:
+            return "multi", [], "Multi-select: ON", enabled_style
+        return (
+            False,
+            [],
+            "Multi-select: OFF",
+            disabled_style,
+        )
+
+    @app.callback(
+        Output("confirm-clear-event-dialog", "displayed"),
+        Output("confirm-clear-event-dialog", "message"),
+        Input("btn-clear-current-event", "n_clicks"),
+        State("event-dropdown", "value"),
+        prevent_initial_call=True,
+    )
+    def show_clear_event_confirmation(n_clicks, selected_slug):
+        if not n_clicks:
+            return False, no_update
+        if not selected_slug or selected_slug == "__ALL__":
+            return False, no_update
+        return True, f"Clear current event '{selected_slug}' without archiving?"
+
+    @app.callback(
+        Output("event-dropdown", "value", allow_duplicate=True),
+        Output("archive-feedback", "children", allow_duplicate=True),
+        Input("confirm-clear-event-dialog", "submit_n_clicks"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def clear_current_event(submit_n_clicks, selected_slug, auth_state):
+        if not submit_n_clicks:
+            return no_update, no_update
+        if not selected_slug or selected_slug == "__ALL__":
+            return no_update, html.Span("⚠️ No specific event selected.", style={"color": "#f59e0b"})
+
+        try:
+            # Actually clear active_event_slug in the database
+            settings_data = get_active_settings_with_id() or {}
+            record_id = settings_data.get("record_id")
+            if record_id:
+                update_settings(record_id, {"active_event_slug": None})
+
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_clear_active_event",
+                    "settings",
+                    target_event=selected_slug,
+                    details=json.dumps({"cleared_via": "manual_clear_button"}),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for clear current event: {e}")
+
+            return None, html.Span(
+                f"✅ Cleared '{selected_slug}' from active event.",
+                style={"color": "#10b981"},
+            )
+        except Exception as e:
+            logger.exception(f"Failed to clear current event: {e}")
+            return no_update, html.Span(f"❌ Failed to clear current event: {e}", style={"color": "#ef4444"})
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update settings
@@ -2943,7 +3111,9 @@ def register_callbacks(app):
     # Archive current event to event_archive + event_stats
     # -------------------------------------------------------------------------
     @app.callback(
-        Output("archive-feedback", "children"),
+        Output("archive-feedback", "children", allow_duplicate=True),
+        Output("event-dropdown", "value", allow_duplicate=True),
+        Output("reopen-event-selector", "options"),
         Input("btn-archive-event-quick", "n_clicks"),
         Input("btn-archive-event", "n_clicks"),
         State("event-dropdown", "value"),
@@ -2953,11 +3123,13 @@ def register_callbacks(app):
     )
     def archive_current_event(n_clicks_quick, n_clicks, selected_slug, clear_flags, auth_state):
         if not n_clicks and not n_clicks_quick:
-            return no_update
+            return no_update, no_update, no_update
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span(
-                "❌ Select a specific event before archiving.", style={"color": "#ef4444"}
+            return (
+                html.Span("❌ Select a specific event before archiving.", style={"color": "#ef4444"}),
+                no_update,
+                no_update,
             )
 
         clear_active = "clear" in (clear_flags or [])
@@ -2983,7 +3155,7 @@ def register_callbacks(app):
                 result = archive_fn(**payload)
             except Exception as e:
                 logger.exception(f"Archive failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Archive failed: {e}", style={"color": "#ef4444"})
+                return html.Span(f"❌ Archive failed: {e}", style={"color": "#ef4444"}), no_update, no_update
         else:
             try:
                 resp = requests.post(
@@ -2992,14 +3164,24 @@ def register_callbacks(app):
                     timeout=30,
                 )
                 if not resp.ok:
-                    return html.Span(
-                        f"❌ Archive failed ({resp.status_code}): {resp.text}",
-                        style={"color": "#ef4444"},
+                    return (
+                        html.Span(
+                            f"❌ Archive failed ({resp.status_code}): {resp.text}",
+                            style={"color": "#ef4444"},
+                        ),
+                        no_update,
+                        no_update,
                     )
                 result = resp.json()
             except Exception as e:
                 logger.exception(f"Archive API call failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"})
+                return html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"}), no_update, no_update
+
+        clear_dropdown = no_update
+        if clear_active:
+            # Clear only dashboard selection; keep global active event in settings/auth
+            # so users are not redirected out of admin.
+            clear_dropdown = None
 
         try:
             storage_api.log_action(
@@ -3024,20 +3206,43 @@ def register_callbacks(app):
         except Exception as e:
             logger.warning(f"Failed to write audit log for archive: {e}")
 
-        return html.Div(
-            style={"color": "#10b981", "lineHeight": "1.5"},
-            children=[
-                html.Div(f"✅ Archived event: {result.get('event_slug', selected_slug)}"),
-                html.Div(
-                    f"Participants: {result.get('archived', 0)} | "
-                    f"Revenue: {result.get('total_revenue', 0)} | "
-                    f"New: {result.get('new_players', 0)} | Returning: {result.get('returning_players', 0)}"
-                ),
-                html.Div(
-                    f"Replaced rows: {result.get('replaced_rows', 0)} | "
-                    f"Cleared active: {result.get('cleared_active', 0)}"
-                ),
-            ],
+        # Rebuild reopen dropdown options with fresh data from event_history
+        try:
+            history = storage_api.get_event_history() or []
+        except Exception:
+            history = []
+        reopen_options = []
+        for ev in history:
+            slug = ev.get("event_slug") if isinstance(ev, dict) else None
+            if slug:
+                name = ev.get("event_display_name") or slug.replace("-", " ").title()
+                date = ev.get("event_date") or ""
+                players = ev.get("total_participants", 0)
+                label = f"{name}"
+                if date:
+                    label += f"  ({date})"
+                if players:
+                    label += f"  — {players} players"
+                reopen_options.append({"label": label, "value": slug})
+
+        return (
+            html.Div(
+                style={"color": "#10b981", "lineHeight": "1.5"},
+                children=[
+                    html.Div(f"✅ Archived event: {result.get('event_slug', selected_slug)}"),
+                    html.Div(
+                        f"Participants: {result.get('archived', 0)} | "
+                        f"Revenue: {result.get('total_revenue', 0)} | "
+                        f"New: {result.get('new_players', 0)} | Returning: {result.get('returning_players', 0)}"
+                    ),
+                    html.Div(
+                        f"Replaced rows: {result.get('replaced_rows', 0)} | "
+                        f"Cleared active: {result.get('cleared_active', 0)}"
+                    ),
+                ],
+            ),
+            clear_dropdown,
+            reopen_options,
         )
 
     # -------------------------------------------------------------------------
@@ -3045,19 +3250,27 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     @app.callback(
         Output("reopen-feedback", "children"),
+        Output("event-dropdown", "options", allow_duplicate=True),
+        Output("event-dropdown", "value", allow_duplicate=True),
+        Output("reopen-event-selector", "value"),
         Input("btn-reopen-event", "n_clicks"),
-        State("event-dropdown", "value"),
+        State("reopen-event-selector", "value"),
         State("reopen-restore-active-toggle", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def reopen_current_event(n_clicks, selected_slug, restore_flags, auth_state):
+    def reopen_archived_event(n_clicks, selected_slug, restore_flags, auth_state):
         if not n_clicks:
-            return no_update
+            return no_update, no_update, no_update, no_update
 
-        if not selected_slug or selected_slug == "__ALL__":
-            return html.Span(
-                "❌ Select a specific event before reopening.", style={"color": "#ef4444"}
+        if not selected_slug:
+            return (
+                html.Span(
+                    "⚠️ Select an archived event from the dropdown first.", style={"color": "#f59e0b"}
+                ),
+                no_update,
+                no_update,
+                no_update,
             )
 
         restore_active = "restore" in (restore_flags or [])
@@ -3077,7 +3290,7 @@ def register_callbacks(app):
                 result = reopen_fn(**payload)
             except Exception as e:
                 logger.exception(f"Reopen failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Reopen failed: {e}", style={"color": "#ef4444"})
+                return html.Span(f"❌ Reopen failed: {e}", style={"color": "#ef4444"}), no_update, no_update, no_update
         else:
             try:
                 resp = requests.post(
@@ -3086,14 +3299,19 @@ def register_callbacks(app):
                     timeout=30,
                 )
                 if not resp.ok:
-                    return html.Span(
-                        f"❌ Reopen failed ({resp.status_code}): {resp.text}",
-                        style={"color": "#ef4444"},
+                    return (
+                        html.Span(
+                            f"❌ Reopen failed ({resp.status_code}): {resp.text}",
+                            style={"color": "#ef4444"},
+                        ),
+                        no_update,
+                        no_update,
+                        no_update,
                     )
                 result = resp.json()
             except Exception as e:
                 logger.exception(f"Reopen API call failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"})
+                return html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"}), no_update, no_update, no_update
 
         try:
             storage_api.log_action(
@@ -3115,15 +3333,28 @@ def register_callbacks(app):
         except Exception as e:
             logger.warning(f"Failed to write audit log for reopen: {e}")
 
-        return html.Div(
-            style={"color": "#10b981", "lineHeight": "1.5"},
-            children=[
-                html.Div(f"✅ Reopened event: {result.get('event_slug', selected_slug)}"),
-                html.Div(
-                    f"Restore active: {result.get('restore_active', restore_active)} | "
-                    f"Restored rows: {result.get('restored_rows', 0)}"
-                ),
-            ],
+        # Update main event dropdown with the reopened slug
+        from shared.storage import get_all_event_slugs
+        all_slugs = get_all_event_slugs() or []
+        if selected_slug not in all_slugs:
+            all_slugs = [selected_slug] + all_slugs
+        dropdown_options = [
+            {"label": s.replace("-", " ").title(), "value": s} for s in all_slugs
+        ]
+
+        return (
+            html.Div(
+                style={"color": "#10b981", "lineHeight": "1.5"},
+                children=[
+                    html.Div(f"✅ Reopened event: {result.get('event_slug', selected_slug)}"),
+                    html.Div(
+                        f"Restored rows: {result.get('restored_rows', 0)}"
+                    ),
+                ],
+            ),
+            dropdown_options,
+            selected_slug,
+            None,  # Clear the reopen selector
         )
 
     # -------------------------------------------------------------------------

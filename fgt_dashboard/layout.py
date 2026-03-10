@@ -274,10 +274,20 @@ def create_layout():
         archived_events = []
 
     archived_slugs = []
+    reopen_dropdown_options = []
     for ev in archived_events:
         slug = ev.get("event_slug") if isinstance(ev, dict) else None
         if slug:
             archived_slugs.append(slug)
+            display_name = ev.get("event_display_name") or slug.replace("-", " ").title()
+            event_date = ev.get("event_date") or ""
+            participants = ev.get("total_participants", 0)
+            label = f"{display_name}"
+            if event_date:
+                label += f"  ({event_date})"
+            if participants:
+                label += f"  — {participants} players"
+            reopen_dropdown_options.append({"label": label, "value": slug})
     archived_slugs = sorted(set(archived_slugs))
 
     if active_slug and active_slug not in event_slugs:
@@ -504,6 +514,7 @@ def create_layout():
                                                     dcc.Dropdown(
                                                         id="event-dropdown",
                                                         className="fgc-dropdown",
+                                                        placeholder="Insert slug in Settings (Fetch Event Data)",
                                                         options=[
                                                             {
                                                                 "label": "🔍 All Events (Debug)",
@@ -532,7 +543,7 @@ def create_layout():
                                                                 else None
                                                             )
                                                         ),
-                                                        clearable=False,
+                                                        clearable=True,
                                                         style={
                                                             "backgroundColor": COLORS["bg_dark"]
                                                         },
@@ -557,6 +568,17 @@ def create_layout():
                                                     "height": "38px",
                                                     "backgroundColor": COLORS["accent_yellow"],
                                                     "color": "#111827",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Clear Event",
+                                                id="btn-clear-current-event",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_secondary"],
+                                                    "height": "38px",
+                                                    "borderColor": COLORS["accent_red"],
+                                                    "color": COLORS["accent_red"],
                                                 },
                                             ),
                                         ],
@@ -1085,6 +1107,21 @@ def create_layout():
                                         },
                                         children=[
                                             html.Button(
+                                                "Multi-select: ON",
+                                                id="btn-toggle-multiselect",
+                                                n_clicks=0,
+                                                style={
+                                                    "backgroundColor": "transparent",
+                                                    "color": COLORS["accent_blue"],
+                                                    "border": f"1px solid {COLORS['accent_blue']}",
+                                                    "borderRadius": "8px",
+                                                    "padding": "0.45rem 0.75rem",
+                                                    "fontSize": "0.8rem",
+                                                    "fontWeight": "600",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                            html.Button(
                                                 "Delete Selected",
                                                 id="btn-delete-selected",
                                                 n_clicks=0,
@@ -1258,6 +1295,10 @@ def create_layout():
                                     dcc.ConfirmDialog(
                                         id="confirm-delete-dialog",
                                         message="Are you sure you want to delete this player?",
+                                    ),
+                                    dcc.ConfirmDialog(
+                                        id="confirm-clear-event-dialog",
+                                        message="Clear current event selection?",
                                     ),
                                 ],
                             ),
@@ -2458,11 +2499,32 @@ def create_layout():
                                             ),
                                             html.H3("Reopen Event", style=STYLES["section_title"]),
                                             html.P(
-                                                "Reopen archived event and optionally restore active check-ins from archive snapshot.",
+                                                "Reopen an archived event to restore check-in data.",
                                                 style={
                                                     "color": COLORS["text_secondary"],
                                                     "marginBottom": "1rem",
                                                 },
+                                            ),
+                                            html.Label(
+                                                "Archived events",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "fontSize": "0.85rem",
+                                                    "marginBottom": "0.3rem",
+                                                    "display": "block",
+                                                },
+                                            ),
+                                            dcc.Dropdown(
+                                                id="reopen-event-selector",
+                                                options=reopen_dropdown_options,
+                                                placeholder="Search archived events...",
+                                                searchable=True,
+                                                clearable=True,
+                                                style={
+                                                    "marginBottom": "0.75rem",
+                                                    "backgroundColor": COLORS["bg_card"],
+                                                },
+                                                className="dash-dropdown-dark",
                                             ),
                                             dcc.Checklist(
                                                 id="reopen-restore-active-toggle",
@@ -2480,7 +2542,7 @@ def create_layout():
                                                 inputStyle={"marginRight": "0.5rem"},
                                             ),
                                             html.Button(
-                                                "Reopen Current Event",
+                                                "Reopen Selected Event",
                                                 id="btn-reopen-event",
                                                 n_clicks=0,
                                                 style=STYLES["button_secondary"],

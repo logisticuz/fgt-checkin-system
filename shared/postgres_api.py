@@ -363,7 +363,13 @@ def get_checkins(
 
 
 def get_all_event_slugs() -> List[str]:
-    """Collect unique event_slug values from active_event_data + settings."""
+    """Collect unique event_slug values from active_event_data only.
+
+    Only returns slugs that have actual participant data.  Cleared/archived
+    events (no rows left in active_event_data) are intentionally excluded
+    so the select-event dropdown stays clean.  Reopened events re-appear
+    automatically because their data is restored to active_event_data.
+    """
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT event_slug FROM active_event_data WHERE event_slug IS NOT NULL")
@@ -371,12 +377,8 @@ def get_all_event_slugs() -> List[str]:
 
     slugs = {row[0] for row in rows if row and row[0]}
 
-    active = get_active_slug()
-    if active:
-        slugs.add(active)
-
     out = sorted(slugs)
-    logger.info(f"📚 Retrieved {len(out)} unique event slugs (including active fallback).")
+    logger.info(f"📚 Retrieved {len(out)} unique event slugs from active data.")
     return out
 
 
@@ -1563,6 +1565,19 @@ def archive_event(
                         (event_slug,),
                     )
                     deleted_count = cur.rowcount
+
+                    # Also reset active_event_slug in settings so the cleared
+                    # event no longer appears as "active" in the select-event
+                    # dropdown or forces stale dashboard state.
+                    cur.execute(
+                        """
+                        UPDATE settings
+                        SET active_event_slug = NULL
+                        WHERE is_active = true
+                          AND active_event_slug = %s
+                        """,
+                        (event_slug,),
+                    )
 
     # 7. Audit log (after commit, best-effort)
     archive_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
