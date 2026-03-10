@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
 
+# Local color tokens used by duplicates UI callbacks.
+COLORS = {
+    "bg_card": "#0f172a",
+    "border": "#1e293b",
+    "text_primary": "#e2e8f0",
+    "text_secondary": "#94a3b8",
+    "accent_blue": "#00d4ff",
+    "accent_green": "#34d399",
+    "accent_yellow": "#f59e0b",
+    "accent_red": "#ef4444",
+}
+
 ACTION_META = {
     "auth_login_success": ("Auth", "Login Success"),
     "auth_login_denied": ("Auth", "Login Denied"),
