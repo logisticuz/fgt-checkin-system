@@ -772,6 +772,8 @@ def apply_integration_result(
             update_fields["tournament_games_registered"] = data.get("events")
         if data.get("startgg_event_id"):
             update_fields["startgg_event_id"] = str(data.get("startgg_event_id"))
+        if data.get("email"):
+            update_fields["email"] = data["email"]
     elif src == "ebas":
         update_fields["member"] = bool(ok and data.get("member", True))
     elif src in ("swish", "stripe"):
@@ -1002,8 +1004,8 @@ def get_top_players_history(
             COUNT(DISTINCT event_slug) AS events_attended
         FROM event_archive
         {where_sql}
-        GROUP BY LOWER(COALESCE(NULLIF(tag, ''), NULLIF(name, ''), 'unknown')),
-                 LOWER(COALESCE(NULLIF(name, ''), NULLIF(tag, ''), 'unknown'))
+        GROUP BY player_uuid
+        HAVING player_uuid IS NOT NULL
         ORDER BY events_attended DESC, display_name ASC
         LIMIT %s
     """
@@ -1027,6 +1029,37 @@ def get_top_players_history(
         )
 
     return result
+
+
+def get_unique_attendee_count(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    """Return the number of distinct players (by player_uuid) in the given scope."""
+    conditions: List[str] = ["player_uuid IS NOT NULL"]
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}"
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(DISTINCT player_uuid) FROM event_archive {where_sql}",
+                params,
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 # =============================================
@@ -1783,6 +1816,8 @@ def reopen_event(
                         active_event_slug = %s,
                         event_display_name = COALESCE(NULLIF(%s, ''), event_display_name),
                         event_date = COALESCE(%s::date, event_date),
+                        startgg_event_url = NULL,
+                        events_json = NULL,
                         updated_at = now()
                     WHERE id = %s
                     """,

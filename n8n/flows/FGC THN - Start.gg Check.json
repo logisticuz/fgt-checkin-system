@@ -52,7 +52,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
+        "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
         "options": {}
       },
       "name": "Query Start.gg",
@@ -268,7 +268,7 @@
           },
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
+          "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
           "options": {}
         },
         "name": "Query Start.gg",
