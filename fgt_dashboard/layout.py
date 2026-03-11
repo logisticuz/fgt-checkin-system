@@ -1172,7 +1172,7 @@ def create_layout():
                                         style={"marginTop": "0.75rem"},
                                         children=[
                                             html.Button(
-                                                "Manual Tools ▾",
+                                                "Manual Checkin Tools ▾",
                                                 id="btn-toggle-manual-checkin",
                                                 n_clicks=0,
                                                 style={
@@ -1222,6 +1222,17 @@ def create_layout():
                                                                     "lineHeight": "1.2",
                                                                 },
                                                             ),
+                                                            dcc.Dropdown(
+                                                                id="input-manual-games",
+                                                                className="fgc-dropdown",
+                                                                placeholder="Games...",
+                                                                multi=True,
+                                                                style={
+                                                                    "minWidth": "180px",
+                                                                    "maxWidth": "320px",
+                                                                    "fontSize": "0.8rem",
+                                                                },
+                                                            ),
                                                             html.Button(
                                                                 "Add Manual Check-in",
                                                                 id="btn-manual-checkin",
@@ -1248,40 +1259,195 @@ def create_layout():
                                                             ),
                                                         ],
                                                     ),
+                                                    html.Hr(
+                                                        style={
+                                                            "borderColor": COLORS["border"],
+                                                            "margin": "0.7rem 0",
+                                                            "opacity": "0.4",
+                                                        }
+                                                    ),
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "gap": "0.6rem",
+                                                            "flexWrap": "wrap",
+                                                            "alignItems": "center",
+                                                        },
+                                                        children=[
+                                                            html.Button(
+                                                                "Re-check Start.gg",
+                                                                id="btn-recheck-startgg",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    "backgroundColor": "#a78bfa",
+                                                                    "color": "#fff",
+                                                                    "border": "none",
+                                                                    "borderRadius": "8px",
+                                                                    "padding": "0.5rem 0.9rem",
+                                                                    "fontSize": "0.8rem",
+                                                                    "fontWeight": "600",
+                                                                    "cursor": "pointer",
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Bulk Re-check All",
+                                                                id="btn-bulk-recheck-startgg",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    "backgroundColor": "#7c3aed",
+                                                                    "color": "#fff",
+                                                                    "border": "none",
+                                                                    "borderRadius": "8px",
+                                                                    "padding": "0.5rem 0.9rem",
+                                                                    "fontSize": "0.8rem",
+                                                                    "fontWeight": "600",
+                                                                    "cursor": "pointer",
+                                                                },
+                                                            ),
+                                                            html.Span(
+                                                                "Select row + Re-check, or Bulk all.",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.75rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Hr(
+                                                        style={
+                                                            "borderColor": COLORS["border"],
+                                                            "margin": "0.7rem 0",
+                                                            "opacity": "0.4",
+                                                        }
+                                                    ),
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "gap": "0.5rem",
+                                                            "flexWrap": "wrap",
+                                                            "alignItems": "center",
+                                                        },
+                                                        children=[
+                                                            html.Span(
+                                                                "Columns:",
+                                                                style={
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                    "fontSize": "0.75rem",
+                                                                    "fontWeight": "600",
+                                                                    "marginRight": "0.2rem",
+                                                                },
+                                                            ),
+                                                            dcc.Checklist(
+                                                                id="quick-column-toggle",
+                                                                className="quick-col-toggle",
+                                                                options=[
+                                                                    opt
+                                                                    for opt in [
+                                                                        {
+                                                                            "label": "Name",
+                                                                            "value": "name",
+                                                                        },
+                                                                        {
+                                                                            "label": "Tag",
+                                                                            "value": "tag",
+                                                                        },
+                                                                        {
+                                                                            "label": "Status",
+                                                                            "value": "status",
+                                                                        },
+                                                                        (
+                                                                            {
+                                                                                "label": "Pay",
+                                                                                "value": "payment_valid",
+                                                                            }
+                                                                            if settings.get(
+                                                                                "require_payment"
+                                                                            )
+                                                                            is True
+                                                                            else None
+                                                                        ),
+                                                                        {
+                                                                            "label": "Phone",
+                                                                            "value": "telephone",
+                                                                        },
+                                                                        (
+                                                                            {
+                                                                                "label": "Member",
+                                                                                "value": "member",
+                                                                            }
+                                                                            if settings.get(
+                                                                                "require_membership"
+                                                                            )
+                                                                            is True
+                                                                            else None
+                                                                        ),
+                                                                        {
+                                                                            "label": "Sgg",
+                                                                            "value": "startgg",
+                                                                        },
+                                                                        {
+                                                                            "label": "Guest",
+                                                                            "value": "is_guest",
+                                                                        },
+                                                                        {
+                                                                            "label": "Games",
+                                                                            "value": "tournament_games_registered",
+                                                                        },
+                                                                        {
+                                                                            "label": "Email",
+                                                                            "value": "email",
+                                                                        },
+                                                                    ]
+                                                                    if opt is not None
+                                                                ],
+                                                                value=[
+                                                                    c
+                                                                    for c in [
+                                                                        "name",
+                                                                        "tag",
+                                                                        "status",
+                                                                        "payment_valid",
+                                                                        "telephone",
+                                                                        "member",
+                                                                        "startgg",
+                                                                        "is_guest",
+                                                                        "tournament_games_registered",
+                                                                    ]
+                                                                    if not (
+                                                                        c == "payment_valid"
+                                                                        and settings.get(
+                                                                            "require_payment"
+                                                                        )
+                                                                        is not True
+                                                                    )
+                                                                    and not (
+                                                                        c == "member"
+                                                                        and settings.get(
+                                                                            "require_membership"
+                                                                        )
+                                                                        is not True
+                                                                    )
+                                                                ],
+                                                                inline=True,
+                                                                style={
+                                                                    "fontSize": "0.72rem",
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
+                                                                },
+                                                                inputStyle={
+                                                                    "marginRight": "3px",
+                                                                },
+                                                                labelStyle={
+                                                                    "marginRight": "0.6rem",
+                                                                    "cursor": "pointer",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
                                                 ],
-                                            ),
-                                        ],
-                                    ),
-                                    html.Div(
-                                        style={
-                                            "display": "flex",
-                                            "gap": "0.6rem",
-                                            "flexWrap": "wrap",
-                                            "marginTop": "0.75rem",
-                                            "alignItems": "center",
-                                        },
-                                        children=[
-                                            html.Button(
-                                                "Re-check Start.gg",
-                                                id="btn-recheck-startgg",
-                                                n_clicks=0,
-                                                style={
-                                                    "backgroundColor": "#a78bfa",
-                                                    "color": "#fff",
-                                                    "border": "none",
-                                                    "borderRadius": "8px",
-                                                    "padding": "0.5rem 0.9rem",
-                                                    "fontSize": "0.8rem",
-                                                    "fontWeight": "600",
-                                                    "cursor": "pointer",
-                                                },
-                                            ),
-                                            html.Span(
-                                                "Select a player row first. Re-validates Start.gg registration and syncs games.",
-                                                style={
-                                                    "color": COLORS["text_muted"],
-                                                    "fontSize": "0.75rem",
-                                                },
                                             ),
                                         ],
                                     ),
@@ -1575,7 +1741,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Participants",
+                                                                "Entries",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -1585,6 +1751,16 @@ def create_layout():
                                                                     "color": COLORS["text_muted"],
                                                                     "fontSize": "0.72rem",
                                                                     "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-unique",
+                                                                style={
+                                                                    "color": "#a78bfa",
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.15rem",
+                                                                    "fontWeight": "600",
                                                                 },
                                                             ),
                                                         ],
@@ -1723,7 +1899,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Start.gg Rate",
+                                                                "Start.gg Account Rate",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -1823,12 +1999,38 @@ def create_layout():
                                                 id="insights-view-players",
                                                 children=[
                                                     html.Div(
-                                                        id="insights-top-players-title",
                                                         style={
-                                                            "color": COLORS["text_primary"],
-                                                            "fontWeight": "600",
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "gap": "0.75rem",
                                                             "marginBottom": "0.6rem",
+                                                            "flexWrap": "wrap",
                                                         },
+                                                        children=[
+                                                            html.Div(
+                                                                id="insights-top-players-title",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                            dcc.Dropdown(
+                                                                id="insights-top-players-limit",
+                                                                options=[
+                                                                    {"label": "15", "value": 15},
+                                                                    {"label": "30", "value": 30},
+                                                                    {"label": "50", "value": 50},
+                                                                    {"label": "All", "value": "all"},
+                                                                ],
+                                                                value=15,
+                                                                clearable=False,
+                                                                style={
+                                                                    "minWidth": "120px",
+                                                                    "fontSize": "0.78rem",
+                                                                },
+                                                            ),
+                                                        ],
                                                     ),
                                                     dash_table.DataTable(
                                                         id="insights-top-players-table",
@@ -1986,9 +2188,9 @@ def create_layout():
                                                                 "id": "member_rate",
                                                             },
                                                             {
-                                                                "name": "Start.gg %",
-                                                                "id": "startgg_rate",
-                                                            },
+                                                            "name": "Start.gg Accounts %",
+                                                            "id": "startgg_rate",
+                                                        },
                                                             {
                                                                 "name": "Retention %",
                                                                 "id": "retention_rate",

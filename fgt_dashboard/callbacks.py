@@ -547,18 +547,26 @@ def register_callbacks(app):
         return no_update
 
     # ---------------------------------------------------------------------
-    # Sync column visibility dropdown to store
+    # Sync column visibility: dropdown (Settings) ↔ checklist (Manual Tools)
     # ---------------------------------------------------------------------
     @app.callback(
         Output("visible-columns-store", "data"),
+        Output("column-visibility-dropdown", "value"),
+        Output("quick-column-toggle", "value"),
         Input("column-visibility-dropdown", "value"),
+        Input("quick-column-toggle", "value"),
         prevent_initial_call=True,
     )
-    def update_column_visibility(selected_columns):
-        """Store the selected columns when TO changes visibility settings."""
-        if not selected_columns:
-            return ["name", "tag", "telephone", "member", "startgg", "payment_valid", "status"]
-        return selected_columns
+    def update_column_visibility(dropdown_val, checklist_val):
+        """Keep both column selectors and the store in sync."""
+        default = ["name", "tag", "telephone", "member", "startgg", "payment_valid", "status"]
+        trigger = ctx.triggered_id
+        if trigger == "quick-column-toggle":
+            val = checklist_val or default
+            return val, val, no_update
+        else:
+            val = dropdown_val or default
+            return val, no_update, val
 
     # ---------------------------------------------------------------------
     # Quick filter buttons - update active filter store
@@ -658,8 +666,8 @@ def register_callbacks(app):
     def toggle_manual_checkin_panel(n_clicks):
         expanded = bool(n_clicks and n_clicks % 2 == 1)
         if expanded:
-            return {"display": "block", "marginTop": "0.6rem"}, "Manual Tools ▴"
-        return {"display": "none", "marginTop": "0.6rem"}, "Manual Tools ▾"
+            return {"display": "block", "marginTop": "0.6rem"}, "Manual Checkin Tools ▴"
+        return {"display": "none", "marginTop": "0.6rem"}, "Manual Checkin Tools ▾"
 
     @app.callback(
         Output("checkins-table", "row_selectable"),
@@ -1045,6 +1053,7 @@ def register_callbacks(app):
         Output("game-dropdown", "value"),
         Output("game-help", "children"),
         Output("events-map-store", "data"),
+        Output("input-manual-games", "options"),
         Input("btn-fetch-event", "n_clicks"),
         Input("interval-refresh", "n_intervals"),
         Input("event-dropdown", "value"),
@@ -1057,7 +1066,7 @@ def register_callbacks(app):
         """
         fields = _get_active_settings_fields()
         if not fields:
-            return [], None, "⚠️ Could not read active settings.", []
+            return [], None, "⚠️ Could not read active settings.", [], []
 
         # 1) Options from default_game (multi-select)
         names = fields.get("default_game") or []  # list[str]
@@ -1085,7 +1094,7 @@ def register_callbacks(app):
         # 4) Help text
         help_text = "Games populated from settings (default_game)."
 
-        return options, value, help_text, mapping
+        return options, value, help_text, mapping, options
 
     # -------------------------------------------------------------------------
     # Populate "Needs Attention" section with players missing requirements
@@ -1308,6 +1317,7 @@ def register_callbacks(app):
         Output("insights-kpi-guestrate", "children"),
         Output("insights-kpi-startggrate", "children"),
         Output("insights-kpi-retention", "children"),
+        Output("insights-kpi-unique", "children"),
         Output("insights-kpi-total-delta", "children"),
         Output("insights-kpi-revenue-delta", "children"),
         Output("insights-kpi-readyrate-delta", "children"),
@@ -1327,6 +1337,7 @@ def register_callbacks(app):
         Input("insights-event-dropdown", "value"),
         Input("insights-period-dropdown", "value"),
         Input("insights-series-dropdown", "value"),
+        Input("insights-top-players-limit", "value"),
         Input("insights-date-range", "start_date"),
         Input("insights-date-range", "end_date"),
     )
@@ -1336,11 +1347,12 @@ def register_callbacks(app):
         selected_event_slugs,
         selected_period,
         selected_series,
+        top_players_limit,
         custom_start_date,
         custom_end_date,
     ):
         if selected_tab != "tab-insights":
-            return (no_update,) * 27
+            return (no_update,) * 28
 
         def _empty_response(hint: str = "", summary: str = "Insights overview"):
             return (
@@ -1357,6 +1369,7 @@ def register_callbacks(app):
                 "0%",
                 "0%",
                 "0%",
+                "",
                 "—",
                 "—",
                 "—",
@@ -1529,6 +1542,7 @@ def register_callbacks(app):
             member_count = 0
             guest_count = 0
             startgg_count = 0
+            startgg_account_count = 0
             ready_count = 0
             weighted_retention_sum = 0.0
             weighted_retention_den = 0
@@ -1544,6 +1558,10 @@ def register_callbacks(app):
                 member_count += _as_int(ev.get("member_count"))
                 guest_count += _as_int(ev.get("guest_count"))
                 startgg_count += _as_int(ev.get("startgg_count"))
+                startgg_account_count += max(
+                    _as_int(ev.get("startgg_count")) - _as_int(ev.get("guest_count")),
+                    0,
+                )
 
                 status_breakdown = ev.get("status_breakdown")
                 if isinstance(status_breakdown, dict):
@@ -1577,6 +1595,7 @@ def register_callbacks(app):
                 "member_count": member_count,
                 "guest_count": guest_count,
                 "startgg_count": startgg_count,
+                "startgg_account_count": startgg_account_count,
                 "ready_count": ready_count,
                 "retention": (
                     (weighted_retention_sum / weighted_retention_den)
@@ -1598,7 +1617,13 @@ def register_callbacks(app):
                 (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
             )
             ev_startgg_rate = (
-                (_as_int(ev.get("startgg_count")) / ev_total * 100) if ev_total > 0 else 0.0
+                (
+                    max(_as_int(ev.get("startgg_count")) - _as_int(ev.get("guest_count")), 0)
+                    / ev_total
+                    * 100
+                )
+                if ev_total > 0
+                else 0.0
             )
             ev_revenue = _as_float(ev.get("total_revenue"))
             revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
@@ -1650,7 +1675,9 @@ def register_callbacks(app):
             (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
         )
         startgg_rate = (
-            (metrics["startgg_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+            (metrics["startgg_account_count"] / metrics["total"] * 100)
+            if metrics["total"] > 0
+            else 0.0
         )
         retention = metrics["retention"]
 
@@ -1734,7 +1761,7 @@ def register_callbacks(app):
         startgg_delta = _fmt_delta(
             startgg_rate,
             (
-                (prev_metrics["startgg_count"] / prev_metrics["total"] * 100)
+                (prev_metrics["startgg_account_count"] / prev_metrics["total"] * 100)
                 if prev_metrics and prev_metrics["total"] > 0
                 else None
             ),
@@ -1788,24 +1815,43 @@ def register_callbacks(app):
         # Top attendees leaderboard for selected scope
         top_players_rows = []
         top_players_title = "Top attendees"
+        selected_scope_slugs = [
+            ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
+        ]
         try:
             top_players_fn = getattr(storage_api, "get_top_players_history", None)
             if top_players_fn:
-                selected_scope_slugs = [
-                    ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
-                ]
+                if top_players_limit == "all":
+                    players_limit = 10000
+                else:
+                    players_limit = _as_int(top_players_limit) or 15
                 top_players_rows = (
                     top_players_fn(
                         event_slugs=selected_scope_slugs,
                         start_date=range_start.isoformat() if range_start else None,
                         end_date=range_end.isoformat() if range_end else None,
-                        limit=15,
+                        limit=players_limit,
                     )
                     or []
                 )
-                top_players_title = f"Top attendees ({len(top_players_rows)} shown)"
+                shown_label = "all" if top_players_limit == "all" else str(players_limit)
+                top_players_title = f"Top attendees ({len(top_players_rows)} shown, target: {shown_label})"
         except Exception as e:
             logger.warning(f"Failed to load top players leaderboard: {e}")
+
+        # Unique attendee count (distinct player_uuid) for selected scope
+        unique_count = 0
+        try:
+            unique_fn = getattr(storage_api, "get_unique_attendee_count", None)
+            if unique_fn:
+                unique_count = unique_fn(
+                    event_slugs=selected_scope_slugs or None,
+                    start_date=range_start.isoformat() if range_start else None,
+                    end_date=range_end.isoformat() if range_end else None,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to load unique attendee count: {e}")
+        unique_text = f"{unique_count} unique attendees" if unique_count > 0 else ""
 
         # Game popularity leaderboard for selected scope
         game_counts = {}
@@ -1849,6 +1895,7 @@ def register_callbacks(app):
             f"{guest_rate:.0f}%",
             f"{startgg_rate:.0f}%",
             f"{retention:.0f}%",
+            unique_text,
             total_delta,
             revenue_delta,
             ready_delta,
@@ -1968,213 +2015,7 @@ def register_callbacks(app):
     def scan_duplicates(n_clicks):
         if not n_clicks:
             return no_update, no_update, no_update
-
-        try:
-            candidates_fn = getattr(storage_api, "find_duplicate_candidates", None)
-            if not candidates_fn:
-                return [], "Duplicate detection not available.", "Potential duplicates"
-
-            candidates = candidates_fn(limit=30) or []
-        except Exception as e:
-            logger.exception(f"Failed to scan duplicates: {e}")
-            return [], f"Error scanning: {e}", "Potential duplicates"
-
-        if not candidates:
-            return (
-                [html.Div(
-                    "No potential duplicates found.",
-                    style={"color": COLORS["accent_green"], "padding": "1rem 0"},
-                )],
-                "",
-                "Potential duplicates (0)",
-            )
-
-        cards = []
-        for c in candidates:
-            a = c["player_a"]
-            b = c["player_b"]
-            conf = c["confidence"]
-            reasons = c["reasons"]
-
-            conf_color = {
-                "high": COLORS["accent_green"],
-                "medium": COLORS["accent_yellow"],
-                "low": COLORS["text_secondary"],
-            }.get(conf, COLORS["text_secondary"])
-
-            reason_text = ", ".join(r.replace("_", " ") for r in reasons)
-
-            card = html.Div(
-                style={
-                    "backgroundColor": COLORS["bg_card"],
-                    "border": f"1px solid {COLORS['border']}",
-                    "borderRadius": "8px",
-                    "padding": "0.8rem 1rem",
-                    "marginBottom": "0.6rem",
-                },
-                children=[
-                    html.Div(
-                        style={
-                            "display": "flex",
-                            "justifyContent": "space-between",
-                            "alignItems": "flex-start",
-                            "gap": "1rem",
-                        },
-                        children=[
-                            # Player A
-                            html.Div(
-                                style={"flex": "1"},
-                                children=[
-                                    html.Div(
-                                        a.get("name", "?"),
-                                        style={
-                                            "color": COLORS["text_primary"],
-                                            "fontWeight": "600",
-                                            "fontSize": "0.85rem",
-                                        },
-                                    ),
-                                    html.Div(
-                                        f"Tag: {a.get('tag', '-')}",
-                                        style={
-                                            "color": COLORS["text_secondary"],
-                                            "fontSize": "0.75rem",
-                                        },
-                                    ),
-                                    html.Div(
-                                        f"Phone: {a.get('telephone', '-') or '-'}  |  Events: {a.get('total_events', 0)}",
-                                        style={
-                                            "color": COLORS["text_secondary"],
-                                            "fontSize": "0.72rem",
-                                        },
-                                    ),
-                                ],
-                            ),
-                            # Arrow + confidence
-                            html.Div(
-                                style={
-                                    "display": "flex",
-                                    "flexDirection": "column",
-                                    "alignItems": "center",
-                                    "minWidth": "80px",
-                                },
-                                children=[
-                                    html.Div(
-                                        "\u2194",
-                                        style={
-                                            "fontSize": "1.2rem",
-                                            "color": COLORS["text_secondary"],
-                                        },
-                                    ),
-                                    html.Div(
-                                        conf.upper(),
-                                        style={
-                                            "color": conf_color,
-                                            "fontSize": "0.65rem",
-                                            "fontWeight": "700",
-                                            "letterSpacing": "0.05em",
-                                        },
-                                    ),
-                                    html.Div(
-                                        reason_text,
-                                        style={
-                                            "color": COLORS["text_secondary"],
-                                            "fontSize": "0.65rem",
-                                            "textAlign": "center",
-                                        },
-                                    ),
-                                ],
-                            ),
-                            # Player B
-                            html.Div(
-                                style={"flex": "1", "textAlign": "right"},
-                                children=[
-                                    html.Div(
-                                        b.get("name", "?"),
-                                        style={
-                                            "color": COLORS["text_primary"],
-                                            "fontWeight": "600",
-                                            "fontSize": "0.85rem",
-                                        },
-                                    ),
-                                    html.Div(
-                                        f"Tag: {b.get('tag', '-')}",
-                                        style={
-                                            "color": COLORS["text_secondary"],
-                                            "fontSize": "0.75rem",
-                                        },
-                                    ),
-                                    html.Div(
-                                        f"Phone: {b.get('telephone', '-') or '-'}  |  Events: {b.get('total_events', 0)}",
-                                        style={
-                                            "color": COLORS["text_secondary"],
-                                            "fontSize": "0.72rem",
-                                        },
-                                    ),
-                                ],
-                            ),
-                        ],
-                    ),
-                    # Action buttons
-                    html.Div(
-                        style={
-                            "display": "flex",
-                            "gap": "0.5rem",
-                            "marginTop": "0.6rem",
-                            "justifyContent": "flex-end",
-                        },
-                        children=[
-                            html.Button(
-                                f"Keep {a.get('tag', '?')}",
-                                id={"type": "btn-merge", "keep": a["uuid"], "remove": b["uuid"]},
-                                style={
-                                    "backgroundColor": COLORS["accent_green"],
-                                    "color": "#fff",
-                                    "border": "none",
-                                    "padding": "0.3rem 0.7rem",
-                                    "borderRadius": "5px",
-                                    "cursor": "pointer",
-                                    "fontSize": "0.72rem",
-                                    "fontWeight": "500",
-                                },
-                            ),
-                            html.Button(
-                                f"Keep {b.get('tag', '?')}",
-                                id={"type": "btn-merge", "keep": b["uuid"], "remove": a["uuid"]},
-                                style={
-                                    "backgroundColor": COLORS["accent_blue"],
-                                    "color": "#fff",
-                                    "border": "none",
-                                    "padding": "0.3rem 0.7rem",
-                                    "borderRadius": "5px",
-                                    "cursor": "pointer",
-                                    "fontSize": "0.72rem",
-                                    "fontWeight": "500",
-                                },
-                            ),
-                            html.Button(
-                                "Not same",
-                                id={"type": "btn-not-same", "a": a["uuid"], "b": b["uuid"]},
-                                style={
-                                    "backgroundColor": "transparent",
-                                    "color": COLORS["text_secondary"],
-                                    "border": f"1px solid {COLORS['border']}",
-                                    "padding": "0.3rem 0.7rem",
-                                    "borderRadius": "5px",
-                                    "cursor": "pointer",
-                                    "fontSize": "0.72rem",
-                                },
-                            ),
-                        ],
-                    ),
-                ],
-            )
-            cards.append(card)
-
-        return (
-            cards,
-            "",
-            f"Potential duplicates ({len(candidates)})",
-        )
+        return _build_candidates_list()
 
     @app.callback(
         Output("merge-confirm-dialog", "displayed"),
@@ -2208,6 +2049,8 @@ def register_callbacks(app):
     @app.callback(
         Output("duplicates-feedback", "children", allow_duplicate=True),
         Output("merge-history-list", "children", allow_duplicate=True),
+        Output("duplicates-list", "children", allow_duplicate=True),
+        Output("duplicates-title", "children", allow_duplicate=True),
         Input("merge-confirm-dialog", "submit_n_clicks"),
         State("merge-keep-uuid", "data"),
         State("merge-remove-uuid", "data"),
@@ -2215,12 +2058,12 @@ def register_callbacks(app):
     )
     def execute_merge(submit_clicks, keep_uuid, remove_uuid):
         if not submit_clicks or not keep_uuid or not remove_uuid:
-            return no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         try:
             merge_fn = getattr(storage_api, "merge_players", None)
             if not merge_fn:
-                return "Merge not available.", no_update
+                return "Merge not available.", no_update, no_update, no_update
 
             result = merge_fn(
                 keep_uuid,
@@ -2230,20 +2073,22 @@ def register_callbacks(app):
             feedback = html.Div(
                 [
                     html.Span(
-                        f"Merged! ",
+                        "Merged! ",
                         style={"color": COLORS["accent_green"], "fontWeight": "600"},
                     ),
                     html.Span(
                         f"Kept {result.get('keep_player_tag', '?')}, "
                         f"removed {result.get('removed_player_tag', '?')}. "
-                        f"Archive rows updated: {result.get('archive_rows_updated', 0)}. ",
-                    ),
-                    html.Span(
-                        "Re-scan to refresh the list.",
-                        style={"fontStyle": "italic"},
+                        f"Archive rows updated: {result.get('archive_rows_updated', 0)}.",
                     ),
                 ],
                 style={"fontSize": "0.8rem"},
+            )
+        except ValueError as e:
+            # Player already merged/removed — not a crash, just stale UI
+            feedback = html.Div(
+                f"Already handled: {e}",
+                style={"color": COLORS["accent_yellow"], "fontSize": "0.8rem"},
             )
         except Exception as e:
             logger.exception(f"Merge failed: {e}")
@@ -2252,33 +2097,36 @@ def register_callbacks(app):
                 style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
             )
 
-        # Refresh merge history
+        # Auto-refresh both history and candidate list
         history_children = _build_merge_history_list()
+        candidates_list, _, candidates_title = _build_candidates_list()
 
-        return feedback, history_children
+        return feedback, history_children, candidates_list, candidates_title
 
     @app.callback(
         Output("duplicates-feedback", "children", allow_duplicate=True),
         Output("merge-history-list", "children", allow_duplicate=True),
+        Output("duplicates-list", "children", allow_duplicate=True),
+        Output("duplicates-title", "children", allow_duplicate=True),
         Input({"type": "btn-undo-merge", "merge_id": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
     def undo_merge_callback(n_clicks_list):
         if not n_clicks_list or not any(n_clicks_list):
-            return no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         triggered = ctx.triggered_id
         if not triggered:
-            return no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         merge_id = triggered.get("merge_id")
         if not merge_id:
-            return no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         try:
             undo_fn = getattr(storage_api, "undo_merge", None)
             if not undo_fn:
-                return "Undo not available.", no_update
+                return "Undo not available.", no_update, no_update, no_update
 
             result = undo_fn(int(merge_id))
             feedback = html.Div(
@@ -2302,7 +2150,8 @@ def register_callbacks(app):
             )
 
         history_children = _build_merge_history_list()
-        return feedback, history_children
+        candidates_list, _, candidates_title = _build_candidates_list()
+        return feedback, history_children, candidates_list, candidates_title
 
     def _build_merge_history_list():
         """Build merge history UI from merge_log."""
@@ -2385,6 +2234,207 @@ def register_callbacks(app):
             )
 
         return items
+
+    def _build_candidates_list():
+        """Re-scan and build the candidates card list. Returns (cards, feedback, title)."""
+        try:
+            candidates_fn = getattr(storage_api, "find_duplicate_candidates", None)
+            if not candidates_fn:
+                return [], "", "Potential duplicates"
+            candidates = candidates_fn(limit=30) or []
+        except Exception:
+            return [], "", "Potential duplicates"
+
+        if not candidates:
+            return (
+                [html.Div(
+                    "No potential duplicates found.",
+                    style={"color": COLORS["accent_green"], "padding": "1rem 0"},
+                )],
+                "",
+                "Potential duplicates (0)",
+            )
+
+        cards = []
+        for c in candidates:
+            a = c["player_a"]
+            b = c["player_b"]
+            conf = c["confidence"]
+            reasons = c["reasons"]
+
+            conf_color = {
+                "high": COLORS["accent_green"],
+                "medium": COLORS["accent_yellow"],
+                "low": COLORS["text_secondary"],
+            }.get(conf, COLORS["text_secondary"])
+
+            reason_text = ", ".join(r.replace("_", " ") for r in reasons)
+
+            card = html.Div(
+                style={
+                    "backgroundColor": COLORS["bg_card"],
+                    "border": f"1px solid {COLORS['border']}",
+                    "borderRadius": "8px",
+                    "padding": "0.8rem 1rem",
+                    "marginBottom": "0.6rem",
+                },
+                children=[
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "justifyContent": "space-between",
+                            "alignItems": "flex-start",
+                            "gap": "1rem",
+                        },
+                        children=[
+                            html.Div(
+                                style={"flex": "1"},
+                                children=[
+                                    html.Div(a.get("name", "?"), style={
+                                        "color": COLORS["text_primary"],
+                                        "fontWeight": "600", "fontSize": "0.85rem",
+                                    }),
+                                    html.Div(f"Tag: {a.get('tag', '-')}", style={
+                                        "color": COLORS["text_secondary"], "fontSize": "0.75rem",
+                                    }),
+                                    html.Div(
+                                        f"Phone: {a.get('telephone', '-') or '-'}  |  "
+                                        f"Events: {a.get('total_events', 0)}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.72rem",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={
+                                    "display": "flex", "flexDirection": "column",
+                                    "alignItems": "center", "minWidth": "80px",
+                                },
+                                children=[
+                                    html.Div("\u2194", style={
+                                        "fontSize": "1.2rem",
+                                        "color": COLORS["text_secondary"],
+                                    }),
+                                    html.Div(conf.upper(), style={
+                                        "color": conf_color, "fontSize": "0.65rem",
+                                        "fontWeight": "700", "letterSpacing": "0.05em",
+                                    }),
+                                    html.Div(reason_text, style={
+                                        "color": COLORS["text_secondary"],
+                                        "fontSize": "0.65rem", "textAlign": "center",
+                                    }),
+                                ],
+                            ),
+                            html.Div(
+                                style={"flex": "1", "textAlign": "right"},
+                                children=[
+                                    html.Div(b.get("name", "?"), style={
+                                        "color": COLORS["text_primary"],
+                                        "fontWeight": "600", "fontSize": "0.85rem",
+                                    }),
+                                    html.Div(f"Tag: {b.get('tag', '-')}", style={
+                                        "color": COLORS["text_secondary"], "fontSize": "0.75rem",
+                                    }),
+                                    html.Div(
+                                        f"Phone: {b.get('telephone', '-') or '-'}  |  "
+                                        f"Events: {b.get('total_events', 0)}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.72rem",
+                                        },
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        style={
+                            "display": "flex", "gap": "0.5rem",
+                            "marginTop": "0.6rem", "justifyContent": "flex-end",
+                        },
+                        children=[
+                            html.Button(
+                                f"Keep {a.get('tag', '?')}",
+                                id={"type": "btn-merge", "keep": a["uuid"], "remove": b["uuid"]},
+                                style={
+                                    "backgroundColor": COLORS["accent_green"], "color": "#fff",
+                                    "border": "none", "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px", "cursor": "pointer",
+                                    "fontSize": "0.72rem", "fontWeight": "500",
+                                },
+                            ),
+                            html.Button(
+                                f"Keep {b.get('tag', '?')}",
+                                id={"type": "btn-merge", "keep": b["uuid"], "remove": a["uuid"]},
+                                style={
+                                    "backgroundColor": COLORS["accent_blue"], "color": "#fff",
+                                    "border": "none", "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px", "cursor": "pointer",
+                                    "fontSize": "0.72rem", "fontWeight": "500",
+                                },
+                            ),
+                            html.Button(
+                                "Not same",
+                                id={"type": "btn-not-same", "a": a["uuid"], "b": b["uuid"]},
+                                style={
+                                    "backgroundColor": "transparent",
+                                    "color": COLORS["text_secondary"],
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "padding": "0.3rem 0.7rem", "borderRadius": "5px",
+                                    "cursor": "pointer", "fontSize": "0.72rem",
+                                },
+                            ),
+                        ],
+                    ),
+                ],
+            )
+            cards.append(card)
+
+        return cards, "", f"Potential duplicates ({len(candidates)})"
+
+    @app.callback(
+        Output("duplicates-feedback", "children", allow_duplicate=True),
+        Output("duplicates-list", "children", allow_duplicate=True),
+        Output("duplicates-title", "children", allow_duplicate=True),
+        Input({"type": "btn-not-same", "a": ALL, "b": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def dismiss_not_same(n_clicks_list):
+        if not n_clicks_list or not any(n_clicks_list):
+            return no_update, no_update, no_update
+
+        triggered = ctx.triggered_id
+        if not triggered:
+            return no_update, no_update, no_update
+
+        a_uuid = triggered.get("a", "")
+        b_uuid = triggered.get("b", "")
+
+        # Log the dismissal to audit_log for traceability
+        try:
+            log_fn = getattr(storage_api, "log_action", None)
+            if log_fn:
+                log_fn(
+                    {"user_id": "", "user_name": "TO", "user_email": ""},
+                    "duplicate_dismissed",
+                    "players",
+                    target_player=a_uuid,
+                    details=json.dumps({"pair": [a_uuid, b_uuid]}),
+                    reason="TO marked as not same player",
+                )
+        except Exception:
+            pass  # non-critical
+
+        feedback = html.Div(
+            "Dismissed pair. They will reappear on next scan (dismiss state is not persisted yet).",
+            style={"color": COLORS["text_secondary"], "fontSize": "0.8rem", "fontStyle": "italic"},
+        )
+
+        # Re-scan (pair still shows since we don't persist dismissals yet)
+        candidates_list, _, candidates_title = _build_candidates_list()
+        return feedback, candidates_list, candidates_title
 
     # -------------------------------------------------------------------------
     # Reactive Stats - update stat cards when table data changes
@@ -2819,21 +2869,24 @@ def register_callbacks(app):
         Output("manual-checkin-feedback", "children"),
         Output("input-manual-name", "value"),
         Output("input-manual-tag", "value"),
+        Output("input-manual-games", "value"),
         Input("btn-manual-checkin", "n_clicks"),
         State("input-manual-name", "value"),
         State("input-manual-tag", "value"),
+        State("input-manual-games", "value"),
         State("event-dropdown", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def add_manual_checkin(n_clicks, input_name, input_tag, selected_slug, auth_state):
+    def add_manual_checkin(n_clicks, input_name, input_tag, input_games, selected_slug, auth_state):
         """Manually add a missing Start.gg participant to active check-ins."""
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         if not selected_slug or selected_slug == "__ALL__":
             return (
                 html.Span("⚠️ Select a specific event first.", style={"color": "#f59e0b"}),
+                no_update,
                 no_update,
                 no_update,
             )
@@ -2845,6 +2898,7 @@ def register_callbacks(app):
                 html.Span("⚠️ Enter at least name or tag.", style={"color": "#f59e0b"}),
                 no_update,
                 no_update,
+                no_update,
             )
 
         if not name:
@@ -2854,6 +2908,8 @@ def register_callbacks(app):
         require_membership = settings.get("require_membership") is True
         require_payment = settings.get("require_payment") is True
 
+        selected_games = input_games or []
+
         payload = {
             "name": name,
             "tag": tag,
@@ -2861,6 +2917,7 @@ def register_callbacks(app):
             "is_guest": False,
             "member": require_membership,
             "payment_valid": require_payment,
+            "tournament_games_registered": selected_games,
         }
 
         payment_ok = (not require_payment) or bool(payload["payment_valid"])
@@ -2875,6 +2932,7 @@ def register_callbacks(app):
                     "❌ Manual check-in is not available in current backend.",
                     style={"color": "#ef4444"},
                 ),
+                no_update,
                 no_update,
                 no_update,
             )
@@ -2909,18 +2967,23 @@ def register_callbacks(app):
                     target_event=selected_slug,
                     target_record=record_id,
                     target_player=name,
-                    details=json.dumps({"tag": tag, "created": created}),
+                    details=json.dumps({"tag": tag, "created": created, "games": selected_games}),
                 )
             except Exception as e:
                 logger.warning(f"Failed to write audit log for manual check-in: {e}")
 
+            games_label = f" ({', '.join(selected_games)})" if selected_games else ""
             label = "added" if created else "updated"
-            feedback = html.Span(f"✅ Manual check-in {label}: {name}", style={"color": "#10b981"})
-            return feedback, "", ""
+            feedback = html.Span(
+                f"✅ Manual check-in {label}: {name}{games_label}",
+                style={"color": "#10b981"},
+            )
+            return feedback, "", "", []
         except Exception as e:
             logger.exception(f"Manual check-in failed for '{name}': {e}")
             return (
                 html.Span(f"❌ Manual check-in failed: {e}", style={"color": "#ef4444"}),
+                no_update,
                 no_update,
                 no_update,
             )
@@ -2929,7 +2992,7 @@ def register_callbacks(app):
     # Re-check Start.gg - re-validate registration + sync games for selected player
     # -------------------------------------------------------------------------
     @app.callback(
-        Output("recheck-startgg-feedback", "children"),
+        Output("recheck-startgg-feedback", "children", allow_duplicate=True),
         Input("btn-recheck-startgg", "n_clicks"),
         State("checkins-table", "selected_rows"),
         State("checkins-table", "data"),
@@ -3047,6 +3110,81 @@ def register_callbacks(app):
             logger.exception(f"Re-check Start.gg failed for '{player_name}': {e}")
             return html.Span(
                 f"Re-check failed: {e}",
+                style={"color": "#ef4444"},
+            )
+
+    # -------------------------------------------------------------------------
+    # Bulk Re-check Start.gg for all players
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("recheck-startgg-feedback", "children", allow_duplicate=True),
+        Input("btn-bulk-recheck-startgg", "n_clicks"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def bulk_recheck_startgg(n_clicks, selected_slug, auth_state):
+        if not n_clicks:
+            return no_update
+
+        try:
+            resp = requests.post(
+                "http://backend:8000/api/admin/bulk-recheck-startgg",
+                json={},
+                timeout=120,
+            )
+
+            if resp.status_code >= 400:
+                error_detail = resp.text[:200]
+                return html.Span(
+                    f"Bulk re-check failed: {error_detail}",
+                    style={"color": "#ef4444"},
+                )
+
+            data = resp.json()
+            total = data.get("total", 0)
+            checked = data.get("checked", 0)
+            emails_found = data.get("emails_found", 0)
+            errors = data.get("errors", [])
+
+            parts = [
+                f"Bulk re-check done: {checked}/{total} players checked, "
+                f"{emails_found} emails found."
+            ]
+            if errors:
+                parts.append(f" ({len(errors)} errors)")
+
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_bulk_recheck_startgg",
+                    "active_event_data",
+                    target_event=selected_slug or "",
+                    details=json.dumps(
+                        {"total": total, "checked": checked, "emails_found": emails_found}
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for bulk recheck: {e}")
+
+            return html.Span(
+                "".join(parts),
+                style={"color": "#22c55e", "fontWeight": "600"},
+            )
+
+        except requests.exceptions.Timeout:
+            return html.Span(
+                "Bulk re-check timed out — too many players or Start.gg is slow.",
+                style={"color": "#f59e0b"},
+            )
+        except Exception as e:
+            logger.exception(f"Bulk re-check Start.gg failed: {e}")
+            return html.Span(
+                f"Bulk re-check failed: {e}",
                 style={"color": "#ef4444"},
             )
 

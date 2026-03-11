@@ -151,12 +151,11 @@ def _render_dashboard_landing_page(login_url: str) -> str:
             padding: 2.5rem 2.5rem 2rem;
             box-shadow: 0 18px 60px rgba(0,0,0,0.42), 0 0 60px rgba(0, 212, 255, 0.07);
             backdrop-filter: blur(6px);
-            animation: cardGlow 4s ease-in-out infinite;
+            animation: fadeIn 260ms ease-out 1;
           }}
-          @keyframes cardGlow {{
-            0%   {{ box-shadow: 0 18px 60px rgba(0,0,0,0.42), 0 0 40px rgba(0, 212, 255, 0.06), 0 0 80px rgba(0, 212, 255, 0.03); }}
-            50%  {{ box-shadow: 0 18px 60px rgba(0,0,0,0.42), 0 0 60px rgba(0, 212, 255, 0.13), 0 0 120px rgba(0, 212, 255, 0.06); }}
-            100% {{ box-shadow: 0 18px 60px rgba(0,0,0,0.42), 0 0 40px rgba(0, 212, 255, 0.06), 0 0 80px rgba(0, 212, 255, 0.03); }}
+          @keyframes fadeIn {{
+            from {{ opacity: 0.85; transform: translateY(4px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
           }}
           .card-head {{
             display: grid;
@@ -215,18 +214,12 @@ def _render_dashboard_landing_page(login_url: str) -> str:
             padding: 0.85rem 2rem;
             box-shadow: 0 10px 24px rgba(0, 195, 255, 0.22);
             transform-origin: center;
-            animation: softPulse 2.2s ease-in-out infinite;
             transition: filter 0.2s, transform 0.2s;
           }}
           .btn:hover {{
             animation-play-state: paused;
             filter: brightness(1.12);
             transform: scale(1.04);
-          }}
-          @keyframes softPulse {{
-            0% {{ transform: scale(1); box-shadow: 0 10px 24px rgba(0, 195, 255, 0.20); }}
-            50% {{ transform: scale(1.03); box-shadow: 0 14px 30px rgba(0, 195, 255, 0.30); }}
-            100% {{ transform: scale(1); box-shadow: 0 10px 24px rgba(0, 195, 255, 0.20); }}
           }}
           .note {{ margin-top: 1.3rem; font-size: 0.82rem; color: #88a2b9; text-align: center; }}
           .imlo-stamp {{
@@ -274,7 +267,7 @@ async def require_dashboard_auth(request: Request, call_next):
     path = request.url.path
 
     # Public routes
-    if path in {"/auth/login", "/auth/callback", "/health"} or path.startswith("/assets/"):
+    if path in {"/auth/login", "/auth/callback", "/auth/callback/finalize", "/health"} or path.startswith("/assets/"):
         return await call_next(request)
 
     # Selection route requires session but no active event yet
@@ -334,10 +327,33 @@ async def auth_login():
 @app.get("/auth/callback")
 async def auth_callback(code: str = ""):
     """
-    Handle OAuth callback from Start.gg.
+    OAuth callback bridge shown immediately after Start.gg approve.
 
-    Flow: exchange code -> fetch user info -> create session -> set cookie -> redirect
+    This avoids a blank/uncertain wait while token exchange and auth checks run.
     """
+    if not code:
+        return JSONResponse({"error": "Missing authorization code"}, status_code=400)
+
+    # Show instant waiting page, then finalize in a second request.
+    finalize_path = (
+        f"/auth/callback/finalize?code={code}"
+        if IS_PROD
+        else f"/admin/auth/callback/finalize?code={code}"
+    )
+    return HTMLResponse(
+        _render_waiting_redirect_page(
+            "Start.gg approval received",
+            "Finalizing sign-in... please wait.",
+            finalize_path,
+            delay_ms=80,
+        ),
+        status_code=200,
+    )
+
+
+@app.get("/auth/callback/finalize")
+async def auth_callback_finalize(code: str = ""):
+    """Finalize OAuth callback from Start.gg."""
     if not code:
         return JSONResponse({"error": "Missing authorization code"}, status_code=400)
 

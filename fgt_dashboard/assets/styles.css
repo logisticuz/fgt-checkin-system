@@ -173,6 +173,13 @@
     color: #cbd5e1 !important;
 }
 
+/* Quick column toggle - compact checklist in Manual Tools */
+.quick-col-toggle label {
+    color: #cbd5e1 !important;
+    font-size: 0.72rem !important;
+    cursor: pointer !important;
+}
+
 /* Base dropdown container */
 .Select-control,
 .Select-menu-outer {
