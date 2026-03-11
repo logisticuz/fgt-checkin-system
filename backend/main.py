@@ -48,9 +48,6 @@ logger = logging.getLogger(__name__)
 
 # === Config ===
 DATA_BACKEND = os.getenv("DATA_BACKEND", "postgres").lower().strip()
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE = "active_event_data"  # Only used if DATA_BACKEND=airtable
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
 STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET")
 STARTGG_REDIRECT_URI = os.getenv(
@@ -69,10 +66,6 @@ STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # 
 # If n8n is protected with Basic Auth, set these for proxy + health
 N8N_BASIC_AUTH_USER = os.getenv("N8N_BASIC_AUTH_USER")
 N8N_BASIC_AUTH_PASSWORD = os.getenv("N8N_BASIC_AUTH_PASSWORD")
-
-if DATA_BACKEND == "airtable":
-    assert AIRTABLE_API_KEY, "❌ Missing AIRTABLE_API_KEY in environment!"
-    assert AIRTABLE_BASE_ID, "❌ Missing AIRTABLE_BASE_ID in environment!"
 
 # === SSE (Server-Sent Events) for real-time dashboard updates ===
 class SSEManager:
@@ -556,12 +549,7 @@ async def _integration_engine_health() -> bool:
 
 
 def _data_backend_health() -> bool:
-    """Check data backend status with lightweight calls."""
-    if DATA_BACKEND == "airtable":
-        headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-        test_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}?maxRecords=1"
-        return bool(safe_get(test_url, headers=headers))
-
+    """Check data backend status with lightweight call."""
     try:
         storage_get_active_settings()
         return True
