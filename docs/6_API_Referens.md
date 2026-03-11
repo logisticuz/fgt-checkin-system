@@ -10,8 +10,8 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
 
 ### 1.1 Incheckning & Status
 
-#### `POST /n8n/webhook/checkin/validate`
-*   **Beskrivning:** Huvudsaklig endpoint för deltagare att skicka in sin incheckningsdata. Detta är en proxy som validerar och sanerar datan innan den skickas vidare till `n8n`-workflowet för verifiering mot eBas, Start.gg etc.
+#### `POST /api/checkin/orchestrate`
+*   **Beskrivning:** Huvudsaklig endpoint för deltagare att checka in. Backend orkestrerar hela flödet: validering, Postgres UPSERT (deduplikering), anrop till n8n v5 för externa kontroller (Start.gg + eBas), statusberäkning, och SSE-broadcast.
 *   **Metod:** `POST`
 *   **Request Body (JSON):**
     ```json
@@ -26,7 +26,7 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
     *   Payloaden valideras av `backend/validation.py`.
     *   Fält saneras (t.ex. `personnummer` normaliseras till bara siffror).
     *   Om valideringen misslyckas returneras `HTTP 400` med en lista av fel.
-*   **Svar (JSON):** Svaret kommer från `n8n`-workflowet och indikerar resultatet.
+*   **Svar (JSON):**
     *   **Om deltagaren redan är incheckad:**
         ```json
         {
@@ -45,8 +45,20 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
         }
         ```
 
+#### `POST /api/ebas/register`
+*   **Beskrivning:** Registrerar en ny Sverok-medlem via n8n eBas Register v2. Resultatet rapporteras tillbaka asynkront via `/api/checkin/{id}/member-status`.
+*   **Metod:** `POST`
+*   **Request Body (JSON):**
+    ```json
+    {
+      "personnummer": "YYYYMMDDXXXX",
+      "checkin_id": "...",
+      "name": "Deltagarens Namn"
+    }
+    ```
+
 #### `GET /api/participant/{name}/status`
-*   **Beskrivning:** Hämtar en deltagares aktuella incheckningsstatus från aktiv storage-backend (`DATA_BACKEND=airtable|postgres`). Används av `status_pending.html` för att polla efter uppdateringar (t.ex. efter att en TO manuellt godkänt en betalning).
+*   **Beskrivning:** Hämtar en deltagares aktuella incheckningsstatus från Postgres. Används av `status_pending.html` för att polla efter uppdateringar (t.ex. efter att en TO manuellt godkänt en betalning).
 *   **Metod:** `GET`
 *   **URL-parametrar:**
     *   `name` (str): Deltagarens namn eller tag.
@@ -89,13 +101,17 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
     }
     ```
 
+#### `PATCH /api/player/member`
+*   **Beskrivning:** Uppdaterar en spelares medlemsstatus manuellt.
+*   **Metod:** `PATCH`
+
 ### 1.2 Dashboard & Administration
 
 #### `PATCH /players/{record_id}/payment`
 *   **Beskrivning:** Används av TO-dashboarden för att manuellt markera en spelares betalning som godkänd eller icke-godkänd. **Triggar ett SSE-event** via `/api/notify/update` för att omedelbart uppdatera anslutna klienter (som spelarens statussida).
 *   **Metod:** `PATCH`
 *   **URL-parametrar:**
-    *   `record_id` (str): Airtable record ID för spelaren.
+    *   `record_id` (str): Postgres record ID för spelaren.
 *   **Request Body (JSON):**
     ```json
     { "payment_valid": true }
@@ -104,25 +120,62 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
     ```json
     {
       "success": true,
-      "record_id": "recXXXXXXXXXXXXXX",
+      "record_id": "...",
       "payment_valid": true
     }
     ```
 
 #### `GET /players`
-*   **Beskrivning:** Hämtar en lista på alla spelare via `shared.storage` (Airtable eller Postgres).
+*   **Beskrivning:** Hämtar en lista på alla spelare via `shared.storage` (Postgres eller Airtable beroende på `DATA_BACKEND`).
 *   **Metod:** `GET`
 
 #### `GET /event-history`
-*   **Beskrivning:** Hämtar historiska eventdata via `shared.storage` (Airtable eller Postgres).
+*   **Beskrivning:** Hämtar historiska eventdata via `shared.storage`.
 *   **Metod:** `GET`
 
-### 1.3 Integration Engine (n8n/external)
+### 1.3 Admin-verktyg
 
-Dessa endpoints är avsedda för ett tunt integrationslager (t.ex. n8n) där backend/Postgres är source of truth.
+#### `POST /api/admin/recheck-startgg`
+*   **Beskrivning:** Kör om Start.gg-kontrollen för en enskild spelare. Uppdaterar Start.gg-status, registrerade event, och email i Postgres.
+*   **Metod:** `POST`
+
+#### `POST /api/admin/bulk-recheck-startgg`
+*   **Beskrivning:** Kör om Start.gg-kontrollen för **alla** spelare i det aktiva eventet. Loopar alla spelare med tag, anropar n8n Start.gg Check för varje, applicerar resultat (email, events, startgg-flagga). 0.3s delay mellan anrop för att respektera Start.gg rate limits.
+*   **Metod:** `POST`
+*   **Svar (JSON):**
+    ```json
+    {
+      "total": 34,
+      "checked": 34,
+      "emails_found": 29,
+      "errors": 0
+    }
+    ```
+
+#### `POST /api/startgg/registered-count`
+*   **Beskrivning:** Tar emot antal registrerade spelare från Start.gg (via n8n eller dashboard) och uppdaterar `events_json.tournament_entrants` i aktiva inställningar. Används för no-show-beräkning vid arkivering.
+*   **Metod:** `POST`
+
+### 1.4 Event-livscykel (Arkivering)
+
+#### `POST /api/archive/event`
+*   **Beskrivning:** Arkiverar det aktiva eventet. Flyttar alla check-in-rader till `event_archive`, beräknar statistik (inklusive no-show-metrik) och sparar i `event_stats`. Rensar `active_event_data`.
+*   **Metod:** `POST`
+
+#### `POST /api/archive/reopen`
+*   **Beskrivning:** Återöppnar ett arkiverat event. Återställer check-in-data från `event_archive` till `active_event_data` (inklusive `player_uuid`). Rensar stale `startgg_event_url` och `events_json` i settings så att TO kan hämta färsk Start.gg-data.
+*   **Metod:** `POST`
+
+#### `POST /api/archive/delete`
+*   **Beskrivning:** Permanent radering av ett arkiverat event (kräver explicit bekräftelse).
+*   **Metod:** `POST`
+
+### 1.5 Integration Engine (n8n/external)
+
+Dessa endpoints är avsedda för integrationslager (n8n) där backend/Postgres är source of truth.
 
 #### `POST /api/checkin/begin`
-*   **Beskrivning:** Startar eller uppdaterar ett checkin-försök och returnerar `checkin_id`.
+*   **Beskrivning:** Startar eller uppdaterar ett checkin-försök och returnerar `checkin_id`. Använder Postgres UPSERT.
 *   **Metod:** `POST`
 *   **Request Body (JSON):**
     ```json
@@ -148,7 +201,7 @@ Dessa endpoints är avsedda för ett tunt integrationslager (t.ex. n8n) där bac
     ```
 
 #### `POST /api/integration/result`
-*   **Beskrivning:** Applicerar resultat från en extern integration (t.ex. `startgg`, `ebas`, `swish`) på ett checkin och loggar audit-händelse.
+*   **Beskrivning:** Applicerar resultat från en extern integration (t.ex. `startgg`, `ebas`) på ett checkin. Uppdaterar Postgres med resultat, beräknar status, triggar SSE-broadcast, och loggar audit-händelse. För `startgg`-källa sparas även `email` om tillgänglig.
 *   **Metod:** `POST`
 *   **Request Body (JSON):**
     ```json
@@ -158,7 +211,8 @@ Dessa endpoints är avsedda för ett tunt integrationslager (t.ex. n8n) där bac
       "ok": true,
       "data": {
         "registered": true,
-        "startgg_event_id": "123456"
+        "startgg_event_id": "123456",
+        "email": "player@example.com"
       },
       "error": null,
       "fetched_at": "2026-02-22T14:30:00Z"
@@ -166,21 +220,21 @@ Dessa endpoints är avsedda för ett tunt integrationslager (t.ex. n8n) där bac
     ```
 
 #### `POST /api/checkin/{checkin_id}/member-status`
-*   **Beskrivning:** Tunn endpoint för medlemskap (eBas-flöde) som sätter `member` direkt för ett checkin.
+*   **Beskrivning:** Endpoint för eBas-registreringsflöde som sätter `member` direkt för ett checkin. Anropas av n8n eBas Register v2.
 *   **Metod:** `POST`
 *   **Request Body (JSON):**
     ```json
     { "member": true }
     ```
 
-### 1.4 Server-Sent Events (SSE) för Realtidsuppdateringar
+### 1.6 Server-Sent Events (SSE) for Realtidsuppdateringar
 
-Dessa endpoints utgör ryggraden i realtidsfunktionaliteten för dashboarden.
+Dessa endpoints utgor ryggraden i realtidsfunktionaliteten for dashboarden.
 
 #### `GET /api/events/stream`
-*   **Beskrivning:** En klient (dashboarden) ansluter till denna endpoint för att prenumerera på händelser. Anslutningen hålls öppen.
+*   **Beskrivning:** En klient (dashboarden eller status_pending.html) ansluter till denna endpoint for att prenumerera pa handelser. Anslutningen halls oppen.
 *   **Metod:** `GET`
-*   **Svar:** En `text/event-stream` ström som skickar händelser. Exempel:
+*   **Svar:** En `text/event-stream` strom som skickar handelser. Exempel:
     ```
     event: checkin
     data: {"type": "new_checkin", "name": "Ny Spelare", ...}
@@ -189,24 +243,35 @@ Dessa endpoints utgör ryggraden i realtidsfunktionaliteten för dashboarden.
     ```
 
 #### `POST /api/notify/checkin` och `POST /api/notify/update`
-*   **Beskrivning:** Webhooks som `n8n` anropar efter att en operation är slutförd (t.ex. en ny incheckning har sparats i Airtable). Anropet får `backend`-tjänsten att skicka ut en SSE-händelse till alla anslutna klienter.
+*   **Beskrivning:** Webhooks som triggar SSE-broadcasts. Anropas av backend internt efter databasuppdateringar, eller av n8n efter externa operationer.
 *   **Metod:** `POST`
-*   **Request Body (JSON):** Flexibel, innehåller data som ska sändas.
+*   **Request Body (JSON):** Flexibel, innehaller data som ska sandas.
 
-### 1.5 System & Hälsa
+### 1.7 OAuth (Start.gg)
+
+#### `GET /login`
+*   **Beskrivning:** Initierar Start.gg OAuth-inloggningsflode for admin-dashboard.
+
+#### `GET /auth/callback`
+*   **Beskrivning:** OAuth callback fran Start.gg. Visar en bridge page under token-utbyte, sedan redirect till dashboard.
+
+### 1.8 System & Halsa
 
 #### `GET /health`
-*   **Beskrivning:** En lättviktig hälsocheck som verifierar integration engine enligt `INTEGRATION_ENGINE` (standard `n8n`). Returnerar även metadata om `data_backend` och integration engine.
+*   **Beskrivning:** En lattviktig halsocheck som verifierar integration engine enligt `INTEGRATION_ENGINE` (standard `n8n`). Returnerar metadata om `data_backend` och integration engine.
 *   **Metod:** `GET`
 
 #### `GET /health/deep`
-*   **Beskrivning:** En djupare hälsocheck som verifierar data-backend enligt `DATA_BACKEND` (`airtable` eller `postgres`) samt integration engine. Ska endast användas för manuell felsökning.
+*   **Beskrivning:** En djupare halsocheck som verifierar data-backend (`postgres` eller `airtable`) samt integration engine. Ska endast anvandas for manuell felsokning.
 *   **Metod:** `GET`
 
 ---
 
-## 2. Autentisering och Säkerhet
+## 2. Autentisering och Sakerhet
 
-*   **N8N Webhook Token:** Om `N8N_WEBHOOK_TOKEN` är satt i `.env`, måste anrop till `/n8n/webhook/*` inkludera denna token, antingen via query-parametern `token` eller `X-N8N-Token` headern. Detta skyddar `n8n`-flödena från oauktoriserade anrop.
-*   **Server-side Validering:** All inkommande data till `POST /n8n/webhook/checkin/validate` valideras och saneras på servern innan den processas, som ett skydd mot felaktig eller skadlig data.
-*   **Integrationsmodell:** `n8n` ska fungera som integrationslager (Start.gg/eBas/Swish), medan backend/storage äger datamodell, checkin-state och audit-logik.
+*   **Start.gg OAuth:** Admin-dashboard anvander Start.gg OAuth for inloggning (prod). Dev-miljo har ingen auth.
+*   **N8N Webhook Token:** Om `N8N_WEBHOOK_TOKEN` ar satt i `.env`, maste anrop fran backend till n8n inkludera denna token.
+*   **Server-side Validering:** All inkommande data till `POST /api/checkin/orchestrate` valideras och saneras pa servern innan den processas, som ett skydd mot felaktig eller skadlig data.
+*   **Integrationsmodell:** n8n fungerar som integrationslager (Start.gg/eBas), medan backend/Postgres ager datamodell, checkin-state och audit-logik.
+*   **Rate Limiting:** Nginx tillampardistinction rate limits: 30 req/min generell trafik, 10 req/min for webhooks.
+*   **Basic Auth:** I prod-miljo skyddas admin-dashboard av basic auth via nginx (utover OAuth).

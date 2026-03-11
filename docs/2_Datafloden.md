@@ -97,7 +97,7 @@ Hanterar registrering av nya Sverok-medlemmar.
 #### Sub-workflows (oförändrade)
 
 *   **eBas Membership Check** — Anropar eBas `confirm_membership` med personnummer. Returnerar `isMember` (true/false).
-*   **Start.gg Check** — Anropar Start.gg GraphQL med tag och slug. Returnerar `isRegistered` (true/false) och matchade events.
+*   **Start.gg Check** — Anropar Start.gg GraphQL med tag och slug. Returnerar `isRegistered` (true/false), matchade events, och `email` (om tillgänglig från Start.gg).
 
 ---
 

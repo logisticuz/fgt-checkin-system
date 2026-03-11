@@ -43,7 +43,7 @@ Denna sida visas när en deltagare saknar något av de nödvändiga kraven för 
 ### Manuell Spelval
 Om en spelare inte hittades på Start.gg, kan de manuellt välja vilka spel de ska delta i.
 *   **UI:** En serie checkboxar (en för varje spel) visas, vilket är mer användarvänligt än en traditionell multi-select.
-*   **Logik:** När spelaren bekräftar sina val, skickas en `PATCH`-förfrågan till `/api/player/games` för att uppdatera deras `tournament_games_registered`-fält i Airtable.
+*   **Logik:** När spelaren bekräftar sina val, skickas en `PATCH`-förfrågan till `/api/player/games` för att uppdatera deras `tournament_games_registered`-fält i databasen (Postgres).
 
 ### Swish-integration
 För att förenkla betalningsprocessen har en adaptiv Swish-integration implementerats.

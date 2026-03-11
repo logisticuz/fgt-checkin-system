@@ -1,38 +1,50 @@
 # FGT Check-in System - Dokumentation
 
-Välkommen till den tekniska dokumentationen för FGT Check-in System. Detta dokument fungerar som en huvudsida och innehållsförteckning för att hjälpa utvecklare och tekniskt ansvariga att förstå, underhålla och vidareutveckla systemet.
+Valkommen till den tekniska dokumentationen for FGT Check-in System. Detta dokument fungerar som en huvudsida och innehallsforteckning for att hjalpa utvecklare och tekniskt ansvariga att forsta, underhalla och vidareutveckla systemet.
 
-Systemet är designat för att automatisera och förenkla incheckningsprocessen för spelevent, vilket minskar manuellt arbete för arrangörer och skapar en smidigare upplevelse for deltagare.
+Systemet ar designat for att automatisera och forenkla incheckningsprocessen for spelevent, vilket minskar manuellt arbete for arrangoerer och skapar en smidigare upplevelse for deltagare.
 
 ---
 
-## Innehållsförteckning
+## Innehallsforteckning
 
-Här är en översikt över de olika delarna av dokumentationen. Vi rekommenderar att du läser dem i ordning för att få en komplett bild av projektet.
+Har ar en oversikt over de olika delarna av dokumentationen. Vi rekommenderar att du laser dem i ordning for att fa en komplett bild av projektet.
 
-1.  **[Problem och Lösning](./0_Problem_och_Losning.md)**
-    *   Beskriver *varför* detta projekt existerar. Vilka utmaningar löser det och vilka är målen med systemet?
+1.  **[Problem och Losning](./0_Problem_och_Losning.md)**
+    *   Beskriver *varfor* detta projekt existerar. Vilka utmaningar loser det och vilka ar malen med systemet?
 
 2.  **[Arkitektur](./1_Arkitektur.md)**
-    *   En djupgående titt på systemets tekniska arkitektur, dess olika komponenter (`backend`, `fgt_dashboard`, `n8n`) och deras ansvarsområden.
+    *   En djupgaende titt pa systemets tekniska arkitektur, dess olika komponenter (`backend`, `fgt_dashboard`, `n8n`, `postgres`) och deras ansvarsomraden.
 
-3.  **[Dataflöden](./2_Datafloden.md)**
-    *   Steg-för-steg-beskrivningar av de tre huvudsakliga processerna: hur en administratör konfigurerar ett event, hur en deltagare checkar in, och hur status-polling fungerar för väntande deltagare.
+3.  **[Datafloden](./2_Datafloden.md)**
+    *   Steg-for-steg-beskrivningar av de huvudsakliga processerna: hur en administrator konfigurerar ett event, hur en deltagare checkar in, och hur realtidsuppdateringar fungerar via SSE.
 
 4.  **[Installation och Setup](./3_Installation_och_Setup.md)**
-    *   En praktisk guide för att sätta upp och köra projektet i en lokal utvecklingsmiljö med Docker.
+    *   En praktisk guide for att satta upp och kora projektet i en lokal utvecklingsmiljo med Docker.
 
 5.  **[Externa Beroenden](./4_Externa_Beroenden.md)**
-    *   En lista över de externa tjänster och API:er som systemet är beroende av, såsom Airtable, Start.gg och Sverok eBas.
+    *   En lista over de externa tjanster och API:er som systemet ar beroende av, sasom PostgreSQL, Start.gg och Sverok eBas.
 
-6.  **[Förbättringsförslag](./5_Forbattringsforslag.md)**
-    *   En sammanfattning av identifierade områden där systemet kan förbättras för att öka robusthet och underhållbarhet på lång sikt.
+6.  **[Forbattringsforslag](./5_Forbattringsforslag.md)**
+    *   En sammanfattning av identifierade omraden dar systemet kan forbattras for att oka robusthet och underhallbarhet pa lang sikt.
 
 7.  **[API Referens](./6_API_Referens.md)**
-    *   Detaljerad beskrivning av systemets API-endpoints och n8n-webhooks, deras anrop och förväntade svar.
+    *   Detaljerad beskrivning av systemets API-endpoints, deras anrop och forvantade svar.
 
-8.  **[Datamodell - Airtable](./7_Datamodell_Airtable.md)**
-    *   En översikt över schemat för de centrala Airtable-tabellerna (`settings`, `active_event_data`), inklusive fält, datatyper och syfte.
+8.  **[Datamodell](./7_Datamodell_Airtable.md)**
+    *   En oversikt over schemat for de centrala databastabellerna (`settings`, `active_event_data`, `players`, `event_archive`, `event_stats`, `audit_log`).
 
-9.  **[Postgres Migration Plan](./postgres-migration-plan.md)**
-    *   Plan för att ersätta Airtable med Postgres, inklusive schema, adapter och cutover.
+9.  **[Frontend](./8_Frontend.md)**
+    *   Beskriver frontendlogik, designsystem, validering, SSE-klient och Swish-integration.
+
+10. **[Projektstatus](./PROJECT_STATUS.md)**
+    *   Aktuell status, roadmap, senaste framsteg och nasta steg.
+
+### Ovriga resurser
+
+- **[Changelogs](./changelogs/)** — Detaljerade forandringsbeskrivningar per session (inklusive *varfor* beslut togs)
+- **[Postgres Migration Plan](./postgres-migration-plan.md)** — Historisk plan for migrering fran Airtable till Postgres (genomford)
+- **[Planned Features](./planned-feautures/)** — Specifikationer for planerade features (Swish-automatisering, Start.gg-registrering, etc.)
+- **[Event History spec](./event-history/)** — Specifikation for event-arkivering och historik-funktionalitet
+- **[Codex Feedback](./codex-feedback/)** — Arkitekturanalys och rekommendationer fran Codex
+- **[Insights KPI spec](./insights-kpi-spec.md)** — Specifikation for Insights KPI-kort och metrik

@@ -1,80 +1,135 @@
-# 7. Datamodell - Airtable
+# 7. Datamodell
 
-> **Historiskt dokument.** Postgres är nu systemets primära databas (sedan 2026-02). Det auktoritativa schemat finns i `shared/postgres_api.py`. Airtable stöds fortfarande som legacy fallback via `DATA_BACKEND=airtable`, och detta dokument är relevant som referens för det läget. Tabellschemat är identiskt mellan Postgres och Airtable.
-
-Airtable fungerade tidigare som den centrala databasen för systemet. Denna dokumentation beskriver schemat för de viktigaste tabellerna, som fortfarande gäller för både Postgres- och Airtable-backenderna.
+> **Postgres ar systemets primara databas** (sedan 2026-02). Det auktoritativa schemat finns i `db/init.sql` och `shared/postgres_api.py`. Airtable stods fortfarande som legacy fallback via `DATA_BACKEND=airtable`. Tabellschemat ar i princip identiskt mellan Postgres och Airtable.
 
 ---
 
 ## 1. Tabell: `settings`
 
-*   **Syfte:** Lagrar den övergripande konfigurationen för det **aktuella aktiva eventet**. Denna rad uppdateras av **FGT Dashboard** när en turneringsorganisatör konfigurerar ett event.
-*   **Viktiga Fält:**
+*   **Syfte:** Lagrar den overgripande konfigurationen for det **aktuella aktiva eventet**. Denna rad uppdateras av **FGT Dashboard** nar en turneringsorganisator konfigurerar ett event.
+*   **Viktiga Falt:**
 
-| Fältnamn                  | Typ              | Beskrivning                                                              | Exempel                           |
+| Faltnamn                  | Typ              | Beskrivning                                                              | Exempel                           |
 | :------------------------ | :--------------- | :----------------------------------------------------------------------- | :-------------------------------- |
-| `Name`                    | `Single line text` | Namnet på inställningsraden (ofta bara "Active Settings").               | `Active Settings`                 |
-| `is_active`               | `Checkbox`       | **MÅSTE VARA BOCKAD** för att systemet ska känna igen raden som den aktiva konfigurationen. | `[x]` (bockad)                    |
-| `active_event_slug`       | `Single line text` | Den unika "sluggen" från Start.gg för den aktiva turneringen.           | `fgc-trollhattan-weekly-42`       |
-| `event_date`              | `Date`           | Startdatumet för turneringen (hämtas från Start.gg).                      | `2025-12-17`                      |
-| `default_game`            | `Multi-select`   | Lista över spel som är valda av TO att visas i formuläret. Fylls från Start.gg events. | `["Street Fighter 6", "Tekken 8"]` |
-| `events_json`             | `Long text`      | Rå `JSON`-data innehållande all information om eventen från Start.gg. Används för att bygga `default_game`-listan. | `{"events": [...]}`               |
-| `startgg_event_url`       | `URL`            | Den ursprungliga URL:en till Start.gg-turneringen.                      | `https://start.gg/tournament/...` |
-| `tournament_name`         | `Single line text` | Namnet på turneringen (från Start.gg).                                  | `FGC Trollhättan Weekly #42`      |
-| `timezone`                | `Single line text` | Tidzonen för turneringen (från Start.gg).                               | `Europe/Stockholm`                |
-| `swish_number`            | `Single line text` | Swish-nummer för betalningar (om använt).                                | `1234567890`                      |
-| `swish_expected_per_game` | `Number`         | Förväntad Swish-betalning per spel (i SEK).                             | `50`                              |
-| `require_payment`         | `Checkbox`       | Om `[x]`, måste `payment_valid` vara sann för att en deltagare ska bli `Ready`. | `[x]`                             |
-| `require_membership`      | `Checkbox`       | Om `[x]`, måste `member` vara sann för att en deltagare ska bli `Ready`.       | `[x]`                             |
-| `require_startgg`         | `Checkbox`       | Om `[x]`, måste `startgg` vara sann för att en deltagare ska bli `Ready`.      | `[x]`                             |
+| `Name`                    | `text`           | Namnet pa installningsraden (ofta bara "Active Settings").               | `Active Settings`                 |
+| `is_active`               | `boolean`        | **MASTE VARA TRUE** for att systemet ska kanna igen raden som den aktiva konfigurationen. | `true`                            |
+| `active_event_slug`       | `text`           | Den unika "sluggen" fran Start.gg for den aktiva turneringen.           | `fgc-trollhattan-weekly-42`       |
+| `event_date`              | `date`           | Startdatumet for turneringen (hamtas fran Start.gg).                      | `2025-12-17`                      |
+| `default_game`            | `text[]`         | Lista over spel som ar valda av TO att visas i formularet. Fylls fran Start.gg events. | `["Street Fighter 6", "Tekken 8"]` |
+| `events_json`             | `jsonb`          | JSON-data med all info om eventen fran Start.gg, inklusive `tournament_entrants` for no-show-berakning. | `{"tournament_entrants": 38, "events": [...]}` |
+| `startgg_event_url`       | `text`           | Den ursprungliga URL:en till Start.gg-turneringen. Rensas vid reopen.   | `https://start.gg/tournament/...` |
+| `tournament_name`         | `text`           | Namnet pa turneringen (fran Start.gg).                                  | `FGC Trollhattan Weekly #42`      |
+| `timezone`                | `text`           | Tidzonen for turneringen (fran Start.gg).                               | `Europe/Stockholm`                |
+| `swish_number`            | `text`           | Swish-nummer for betalningar (om anvant).                                | `1234567890`                      |
+| `swish_expected_per_game` | `numeric`        | Forvantad Swish-betalning per spel (i SEK).                             | `50`                              |
+| `require_payment`         | `boolean`        | Om `true`, maste `payment_valid` vara sann for att bli `Ready`.          | `true`                            |
+| `require_membership`      | `boolean`        | Om `true`, maste `member` vara sann for att bli `Ready`.                 | `true`                            |
+| `require_startgg`         | `boolean`        | Om `true`, maste `startgg` vara sann for att bli `Ready`.                | `true`                            |
 
 ---
 
 ## 2. Tabell: `active_event_data`
 
-*   **Syfte:** Lagrar **live-data** för varje deltagares incheckning för det aktiva eventet. Denna tabell uppdateras primärt av **N8N** och läses av både **Backend** och **FGT Dashboard**.
-*   **Viktig underhållsnotering:** Funktionen `get_checkins` i `shared/airtable_api.py`, som läser från denna tabell, använder en statisk fältlista. Om ett nytt fält läggs till i denna tabell i Airtable måste det även läggas till manuellt i fältlistan i den funktionen för att datan ska hämtas.
-*   **Viktiga Fält:**
+*   **Syfte:** Lagrar **live-data** for varje deltagares incheckning for det aktiva eventet. Denna tabell uppdateras primärt av **Backend** (via orchestrate-flödet). n8n rapporterar resultat till backend, som i sin tur skriver till denna tabell.
+*   **Viktiga Falt:**
 
-| Fältnamn                      | Typ              | Beskrivning                                                              | Exempel                                    |
+| Faltnamn                      | Typ              | Beskrivning                                                              | Exempel                                    |
 | :---------------------------- | :--------------- | :----------------------------------------------------------------------- | :----------------------------------------- |
-| `name`                        | `Single line text` | Deltagarens fullständiga namn (tvättat).                                 | `Anna Andersson`                           |
-| `tag`                         | `Single line text` | Deltagarens gamer-tag (tvättat). Används för matchning mot Start.gg.      | `CoolPlayer`                               |
-| `email`                       | `Email`          | Deltagarens e-postadress.                                                | `anna@example.com`                         |
-| `telephone`                   | `Phone number`   | Deltagarens telefonnummer (tvättat, endast siffror).                     | `0701234567`                               |
-| `personnummer`                | `Single line text` | Används för API-slagning mot Sverok, men **sparas inte** i den slutgiltiga posten för att skydda personlig information. Fältet är avsiktligt tomt efter att incheckningen processats. | `(tomt)`                             |
-| `UUID`                        | `Single line text` | En unik identifierare för denna incheckning (genereras av n8n).          | `b7d4e1f8-c2a7-...`                         |
-| `external_id`                 | `Single line text` | Extern ID, t.ex. från Start.gg-registrering.                             | `startgg_reg_12345`                        |
-| `event_slug`                  | `Single line text` | Start.gg-sluggen för eventet deltagaren checkar in till.                 | `fgc-trollhattan-weekly-42`                |
-| `startgg_event_id`            | `Single line text` | ID för det specifika Start.gg-eventet (t.ex. för ett visst spel).         | `123456`                                   |
-| `tournament_games_registered` | `Multi-select`   | Lista över spel som deltagaren är registrerad för i turneringen.          | `["Street Fighter 6", "Tekken 8"]`         |
-| `member`                      | `Checkbox`       | `[x]` om deltagaren är verifierad medlem i föreningen.                   | `[x]`                                      |
-| `startgg`                     | `Checkbox`       | `[x]` om deltagaren är verifierad registrerad på Start.gg för eventet.   | `[x]`                                      |
-| `is_guest`                    | `Checkbox`       | `[x]` om spelaren **inte** hittades på Start.gg. Sätts automatiskt.      | `[x]`                                      |
-| `payment_amount`              | `Number`         | Belopp som deltagaren har betalat (från Swish-matchning eller manuellt). | `100`                                      |
-| `payment_expected`            | `Number`         | Förväntat betalningsbelopp.                                              | `100`                                      |
-| `payment_valid`               | `Checkbox`       | `[x]` om betalningen har verifierats och är korrekt.                     | `[x]`                                      |
-| `status`                      | `Single select`  | Övergripande status för deltagaren: `Ready`, `Pending`.                  | `Ready`                                    |
-| `created`                     | `Created time`   | Tidstämpel för när incheckningsraden skapades. **Notering:** Detta är ett metadata-fält från Airtable (`createdTime`) och kan inte redigeras manuellt. | `2025-12-17T11:30:00.000Z`                 |
+| `id`                          | `serial`         | Primar nyckel (auto-increment).                                          | `42`                                       |
+| `name`                        | `text`           | Deltagarens fullstandiga namn (tvattat).                                 | `Anna Andersson`                           |
+| `tag`                         | `text`           | Deltagarens gamer-tag (tvattat). Anvands for matchning mot Start.gg.      | `CoolPlayer`                               |
+| `email`                       | `text`           | Deltagarens e-postadress (hamtas fran Start.gg vid check-in/bulk recheck). | `anna@example.com`                         |
+| `telephone`                   | `text`           | Deltagarens telefonnummer (tvattat, endast siffror).                     | `0701234567`                               |
+| `UUID`                        | `text`           | En unik identifierare for denna incheckning.                              | `b7d4e1f8-c2a7-...`                         |
+| `player_uuid`                 | `text`           | Canonical player UUID — kopplar ihop spelaren over flera event. Matchas vid check-in via `_find_player_uuid()`. | `a1b2c3d4-...`                             |
+| `external_id`                 | `text`           | Extern ID, t.ex. fran Start.gg-registrering.                             | `startgg_reg_12345`                        |
+| `event_slug`                  | `text`           | Start.gg-sluggen for eventet deltagaren checkar in till.                 | `fgc-trollhattan-weekly-42`                |
+| `startgg_event_id`            | `text`           | ID for det specifika Start.gg-eventet (t.ex. for ett visst spel).         | `123456`                                   |
+| `tournament_games_registered` | `text[]`         | Lista over spel som deltagaren ar registrerad for i turneringen.          | `["Street Fighter 6", "Tekken 8"]`         |
+| `member`                      | `boolean`        | `true` om deltagaren ar verifierad medlem i foreningen (via eBas).       | `true`                                     |
+| `startgg`                     | `boolean`        | `true` om deltagaren ar verifierad registrerad pa Start.gg for eventet.  | `true`                                     |
+| `is_guest`                    | `boolean`        | `true` om spelaren **inte** hittades pa Start.gg. Satts automatiskt.      | `true`                                     |
+| `payment_amount`              | `numeric`        | Belopp som deltagaren har betalat (fran Swish-matchning eller manuellt). | `100`                                      |
+| `payment_expected`            | `numeric`        | Forväntat betalningsbelopp.                                              | `100`                                      |
+| `payment_valid`               | `boolean`        | `true` om betalningen har verifierats och ar korrekt.                     | `true`                                     |
+| `status`                      | `text`           | Overgripande status for deltagaren: `Ready`, `Pending`.                  | `Ready`                                    |
+| `created_at`                  | `timestamptz`    | Tidstampel for nar incheckningsraden skapades.                           | `2025-12-17T11:30:00Z`                     |
 
 ---
 
-## 3. Tabell: `players` (Potentiell)
+## 3. Tabell: `players`
 
-*   **Syfte:** Denna tabell kan användas som en masterlista över alla spelare, oberoende av event. För närvarande används den sparsamt eller inte alls i de primära flödena.
-*   **Viktiga Fält:** Kan inkludera `name`, `email`, `tag`, `telephone`, `created`.
+*   **Syfte:** Masterlista over alla spelare, oberoende av event. Anvands for canonical identity tracking och Insights-spelarleaderboard.
+*   **Viktiga Falt:**
+
+| Faltnamn              | Typ              | Beskrivning                                                    | Exempel                         |
+| :-------------------- | :--------------- | :------------------------------------------------------------- | :------------------------------ |
+| `uuid`                | `text`           | Canonical player UUID (PK). Samma UUID anvands i `active_event_data.player_uuid` och `event_archive.player_uuid`. | `a1b2c3d4-...`                  |
+| `name`                | `text`           | Spelarens namn.                                                | `Anna Andersson`                |
+| `tag`                 | `text`           | Spelarens gamer-tag.                                           | `CoolPlayer`                    |
+| `email`               | `text`           | Spelarens email.                                               | `anna@example.com`              |
+| `telephone`           | `text`           | Spelarens telefon.                                             | `0701234567`                    |
+| `games_played`        | `text[]`         | Lista over spel spelaren deltagit i.                           | `["Street Fighter 6"]`          |
+| `events_participated` | `integer`        | Antal event spelaren deltagit i.                               | `5`                             |
+| `total_paid`          | `numeric`        | Totalt belopp betalat.                                         | `250`                           |
+| `joined_at`           | `timestamptz`    | Nar spelaren forst registrerades.                              | `2025-12-17T11:30:00Z`          |
+| `last_seen`           | `timestamptz`    | Senaste aktivitet.                                             | `2026-03-10T18:00:00Z`          |
+| `notes`               | `text`           | Fritext-anteckningar.                                          | `Sponsor: Razer`                |
 
 ---
 
-## 4. Tabell: `event_history` och `event_history_dashboard`
+## 4. Tabell: `event_archive` (event_history)
 
-*   **Syfte:** Dessa tabeller är tänkta att lagra arkiverad eller denormaliserad historisk data om event för statistik eller snabbare läsning för dashboarden. Det exakta innehållet och hur de fylls är inte fullständigt definierat i de primära flödena, men de indikerar ett behov av historisk data.
-*   **Viktiga Fält:** Troligtvis `event_slug`, `status`, `participants`, `created`.
+*   **Syfte:** Arkiverad check-in-data per event. Fylls nar TO arkiverar ett event. Anvands for Insights-tabben.
+*   **Viktiga Falt:** Samma falt som `active_event_data` plus:
+
+| Faltnamn              | Typ              | Beskrivning                                                    |
+| :-------------------- | :--------------- | :------------------------------------------------------------- |
+| `player_uuid`         | `text`           | Canonical player UUID — bevaras fran active_event_data vid arkivering och aterstalls vid reopen. |
+| `archived_at`         | `timestamptz`    | Tidstampel for nar raden arkiverades.                          |
 
 ---
 
-## 5. Namnkonventioner
+## 5. Tabell: `event_stats`
 
-### Fältnamn: `tag` (inte `gametag` eller `gamerTag`)
+*   **Syfte:** Aggregerad statistik per event. Beraknas vid arkivering. Anvands for Insights KPI-kort.
+*   **Viktiga Falt:**
 
-Systemet använder **`tag`** som standardnamn för spelarens "gamer-tag". Detta är konsekvent över hela kodbasen för att undvika förvirring. Namnet `tag` är kort, universellt och fungerar i alla tekniska kontexter (Python, JS, etc.).
+| Faltnamn                    | Typ              | Beskrivning                                                    | Exempel        |
+| :-------------------------- | :--------------- | :------------------------------------------------------------- | :------------- |
+| `event_slug`                | `text`           | Start.gg-slug for eventet (PK).                               | `fightbox-2`   |
+| `total_participants`        | `integer`        | Totalt antal deltagare som checkade in.                        | `34`           |
+| `startgg_registered_count`  | `integer`        | Antal registrerade pa Start.gg (fran `events_json.tournament_entrants`). | `38`           |
+| `checked_in_count`          | `integer`        | Antal incheckade (= `total_participants`).                     | `34`           |
+| `no_show_count`             | `integer`        | Registrerade minus incheckade: `max(registered - checked_in, 0)`. | `4`            |
+| `no_show_rate`              | `numeric(5,2)`   | No-show i procent: `(no_show / registered * 100)`.            | `10.53`        |
+| `total_revenue`             | `numeric`        | Total betalad summa.                                           | `1700`         |
+| `event_date`                | `date`           | Eventets datum.                                                | `2026-03-08`   |
+| `archived_at`               | `timestamptz`    | Nar statistiken skapades/uppdaterades.                         | `2026-03-09T...` |
+
+---
+
+## 6. Tabell: `audit_log`
+
+*   **Syfte:** Loggar viktiga systemhandelser for sparbarhet och felsokning.
+*   **Viktiga Falt:**
+
+| Faltnamn    | Typ              | Beskrivning                                            |
+| :---------- | :--------------- | :----------------------------------------------------- |
+| `id`        | `serial`         | Primar nyckel.                                         |
+| `action`    | `text`           | Typ av handelse (t.ex. `checkin`, `archive`, `reopen`). |
+| `actor`     | `text`           | Vem som utforde handelsen (TO-namn eller `system`).    |
+| `details`   | `jsonb`          | Extra data om handelsen.                               |
+| `created_at`| `timestamptz`    | Tidstampel.                                            |
+
+---
+
+## 7. Namnkonventioner
+
+### Faltnamn: `tag` (inte `gametag` eller `gamerTag`)
+
+Systemet anvander **`tag`** som standardnamn for spelarens "gamer-tag". Detta ar konsekvent over hela kodbasen for att undvika forvirring. Namnet `tag` ar kort, universellt och fungerar i alla tekniska kontexter (Python, JS, etc.).
+
+### Canonical Player UUID
+
+`player_uuid` ar systemets satt att koppla ihop samma spelare over flera event, aven om de stavar sitt namn/tag olika. UUID:t matchas vid check-in via `_find_player_uuid()` (soker pa tag och email i `players`-tabellen) och lagras i bade `active_event_data` och `event_archive`.

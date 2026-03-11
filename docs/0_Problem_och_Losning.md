@@ -24,7 +24,7 @@ Detta verktyg är byggt för att lösa dessa problem genom att automatisera hela
 2.  **Automatisk verifiering:** I bakgrunden anropar systemet automatiskt de nödvändiga externa tjänsterna:
     *   **Sverok eBas API** för att verifiera medlemskap.
     *   **Start.gg API** för att verifiera turneringsregistrering.
-    *   Kontrollerar betalningsstatus mot data i en central databas (Airtable).
+    *   Kontrollerar betalningsstatus mot data i databasen (Postgres).
 3.  **Omedelbar feedback:**
     *   Om allt är i sin ordning får deltagaren en "Grön" status och är redo att spela.
     *   Om något saknas (t.ex. medlemskap eller turneringsregistrering), presenteras ett dynamiskt formulär som guidar deltagaren att slutföra de saknade stegen direkt på plats.
