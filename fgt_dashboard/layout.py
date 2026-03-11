@@ -2112,6 +2112,17 @@ def create_layout():
                                                                     "whiteSpace": "nowrap",
                                                                 },
                                                             ),
+                                                            html.Div(
+                                                                id="insights-added-via-summary",
+                                                                style={
+                                                                    "color": COLORS["text_secondary"],
+                                                                    "fontSize": "0.78rem",
+                                                                    "padding": "0.25rem 0.55rem",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "borderRadius": "999px",
+                                                                    "whiteSpace": "nowrap",
+                                                                },
+                                                            ),
                                                         ],
                                                     ),
                                                     dash_table.DataTable(
@@ -2202,6 +2213,14 @@ def create_layout():
                                                             {
                                                                 "name": "No-show %",
                                                                 "id": "no_show_rate",
+                                                            },
+                                                            {
+                                                                "name": "Manual adds",
+                                                                "id": "manual_count",
+                                                            },
+                                                            {
+                                                                "name": "Manual %",
+                                                                "id": "manual_share",
                                                             },
                                                         ],
                                                         data=[],

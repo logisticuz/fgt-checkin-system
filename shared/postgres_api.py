@@ -75,10 +75,22 @@ def _run_migrations(pool):
                     "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS player_uuid TEXT"
                 )
                 cur.execute(
+                    "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS added_via TEXT DEFAULT 'unknown'"
+                )
+                cur.execute(
+                    "UPDATE active_event_data SET added_via = 'unknown' WHERE added_via IS NULL"
+                )
+                cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_active_player_uuid
                     ON active_event_data(player_uuid)
                     """
+                )
+                cur.execute(
+                    "ALTER TABLE event_archive ADD COLUMN IF NOT EXISTS added_via TEXT DEFAULT 'unknown'"
+                )
+                cur.execute(
+                    "UPDATE event_archive SET added_via = 'unknown' WHERE added_via IS NULL"
                 )
 
                 # Merge log table (added 2026-03-11)
@@ -104,7 +116,7 @@ def _run_migrations(pool):
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_merge_log_remove ON merge_log(remove_uuid)"
                 )
-        logger.info("✅ Schema migrations checked (no-show + player_uuid + merge_log)")
+        logger.info("✅ Schema migrations checked (no-show + player_uuid + added_via + merge_log)")
     except Exception as e:
         logger.warning(f"⚠️ Migration check failed (non-fatal): {e}")
 
@@ -120,6 +132,12 @@ def _coerce_jsonb(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+def _normalize_added_via(value: Any) -> str:
+    allowed = {"manual_dashboard", "startgg_flow", "api", "reopen_restore", "unknown"}
+    candidate = str(value or "unknown").strip().lower()
+    return candidate if candidate in allowed else "unknown"
 
 
 def _row_to_dict(columns: List[str], row: tuple) -> Dict[str, Any]:
@@ -144,6 +162,7 @@ def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "event_slug": row.get("event_slug"),
         "startgg_event_id": row.get("startgg_event_id"),
         "external_id": row.get("external_id"),
+        "added_via": row.get("added_via"),
     }
 
 
@@ -338,7 +357,8 @@ def get_checkins(
         SELECT record_id, created, event_slug, status, member, startgg, is_guest,
                payment_amount, payment_expected, payment_valid,
                name, email, tag, telephone,
-               tournament_games_registered, checkin_uuid, startgg_event_id, external_id
+               tournament_games_registered, checkin_uuid, startgg_event_id, external_id,
+               added_via
         FROM active_event_data
         {where_sql}
         ORDER BY created DESC
@@ -370,6 +390,7 @@ def get_checkins(
             checkin_uuid,
             startgg_event_id,
             external_id,
+            added_via,
         ) = row
 
         result.append(
@@ -392,6 +413,7 @@ def get_checkins(
                 "UUID": checkin_uuid,
                 "startgg_event_id": startgg_event_id,
                 "external_id": external_id,
+                "added_via": added_via,
             }
         )
 
@@ -438,7 +460,7 @@ def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, created
+               startgg_event_id, external_id, is_guest, added_via, created
         FROM active_event_data
         WHERE {where_sql}
         ORDER BY created DESC
@@ -471,6 +493,7 @@ def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[
         "startgg_event_id",
         "external_id",
         "is_guest",
+        "added_via",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -486,7 +509,7 @@ def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, created
+               startgg_event_id, external_id, is_guest, added_via, created
         FROM active_event_data
         WHERE LOWER(tag) = LOWER(%s) AND event_slug = %s
         ORDER BY created DESC
@@ -519,6 +542,7 @@ def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
         "startgg_event_id",
         "external_id",
         "is_guest",
+        "added_via",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -534,7 +558,7 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, created
+               startgg_event_id, external_id, is_guest, added_via, created
         FROM active_event_data
         WHERE record_id = %s
         LIMIT 1
@@ -566,6 +590,7 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         "startgg_event_id",
         "external_id",
         "is_guest",
+        "added_via",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -675,6 +700,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
         "startgg_event_id": payload.get("startgg_event_id"),
         "external_id": payload.get("external_id"),
+        "added_via": _normalize_added_via(payload.get("added_via")),
         "player_uuid": matched_player_uuid,
     }
 
@@ -701,14 +727,14 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     status, member, startgg, payment_valid,
                     payment_amount, payment_expected,
                     tournament_games_registered, checkin_uuid,
-                    startgg_event_id, is_guest, player_uuid
+                    startgg_event_id, is_guest, added_via, player_uuid
                 ) VALUES (
                     %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s,
                     %s, %s,
-                    %s, %s, %s
+                    %s, %s, %s, %s
                 )
                 RETURNING record_id
                 """,
@@ -729,6 +755,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     fields.get("checkin_uuid") or fields.get("UUID"),
                     fields["startgg_event_id"],
                     fields["is_guest"],
+                    fields["added_via"],
                     matched_player_uuid,
                 ),
             )
@@ -970,6 +997,102 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         )
 
     logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
+    return result
+
+
+def get_event_manual_add_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return per-event manual check-in stats from event_archive.added_via."""
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT
+            event_slug,
+            COUNT(*) AS total_count,
+            COUNT(*) FILTER (WHERE added_via = 'manual_dashboard') AS manual_count
+        FROM event_archive
+        {where_sql}
+        GROUP BY event_slug
+    """
+
+    out: Dict[str, Dict[str, Any]] = {}
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    for slug, total_count, manual_count in rows:
+        total_i = int(total_count or 0)
+        manual_i = int(manual_count or 0)
+        manual_pct = (manual_i / total_i * 100.0) if total_i > 0 else 0.0
+        out[str(slug)] = {
+            "total_count": total_i,
+            "manual_count": manual_i,
+            "manual_pct": manual_pct,
+        }
+
+    return out
+
+
+def get_added_via_breakdown(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return added_via source distribution for archived rows in scope."""
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT
+            COALESCE(NULLIF(added_via, ''), 'unknown') AS source,
+            COUNT(*) AS cnt
+        FROM event_archive
+        {where_sql}
+        GROUP BY source
+        ORDER BY cnt DESC, source ASC
+    """
+
+    result: List[Dict[str, Any]] = []
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    total = sum(int(r[1] or 0) for r in rows)
+    for source, cnt in rows:
+        count_i = int(cnt or 0)
+        share = (count_i / total * 100.0) if total > 0 else 0.0
+        result.append({"source": source, "count": count_i, "share": share})
+
     return result
 
 
@@ -1494,7 +1617,7 @@ def archive_event(
                            member, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
-                           external_id, startgg_event_id, is_guest
+                           external_id, startgg_event_id, is_guest, added_via
                     FROM active_event_data
                     WHERE event_slug = %s
                     """,
@@ -1527,7 +1650,7 @@ def archive_event(
                         payment_amount, payment_expected,
                         swish_expected_per_game,
                         tournament_games_registered, checkin_uuid,
-                        external_id, startgg_event_id, is_guest,
+                        external_id, startgg_event_id, is_guest, added_via,
                         archived_at, player_uuid
                     ) VALUES (
                         %s, %s, %s,
@@ -1536,7 +1659,7 @@ def archive_event(
                         %s, %s,
                         %s,
                         %s, %s,
-                        %s, %s, %s,
+                        %s, %s, %s, %s,
                         %s, %s
                     )
                     """,
@@ -1550,7 +1673,7 @@ def archive_event(
                             swish_expected_per_game,
                             c.get("tournament_games_registered"), c.get("checkin_uuid"),
                             c.get("external_id"), c.get("startgg_event_id"),
-                            c.get("is_guest"),
+                            c.get("is_guest"), c.get("added_via"),
                             now, player_results[i][0],
                         )
                         for i, c in enumerate(checkins)
@@ -1845,7 +1968,7 @@ def reopen_event(
                                 status, member, startgg, payment_valid,
                                 payment_amount, payment_expected,
                                 tournament_games_registered, checkin_uuid,
-                                startgg_event_id, is_guest, player_uuid,
+                                startgg_event_id, is_guest, added_via, player_uuid,
                                 created
                             )
                             SELECT
@@ -1866,6 +1989,7 @@ def reopen_event(
                                 checkin_uuid,
                                 startgg_event_id,
                                 is_guest,
+                                COALESCE(NULLIF(added_via, ''), 'reopen_restore'),
                                 player_uuid,
                                 %s
                             FROM event_archive

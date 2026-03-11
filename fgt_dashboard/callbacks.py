@@ -20,6 +20,7 @@ import json
 import re
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -1326,6 +1327,7 @@ def register_callbacks(app):
         Output("insights-kpi-startggrate-delta", "children"),
         Output("insights-kpi-retention-delta", "children"),
         Output("insights-top-game", "children"),
+        Output("insights-added-via-summary", "children"),
         Output("insights-top-players-title", "children"),
         Output("insights-top-players-table", "data"),
         Output("insights-games-title", "children"),
@@ -1352,7 +1354,7 @@ def register_callbacks(app):
         custom_end_date,
     ):
         if selected_tab != "tab-insights":
-            return (no_update,) * 28
+            return (no_update,) * 29
 
         def _empty_response(hint: str = "", summary: str = "Insights overview"):
             return (
@@ -1378,6 +1380,7 @@ def register_callbacks(app):
                 "—",
                 "—",
                 "Most popular game: -",
+                "Added via: -",
                 "Top attendees",
                 [],
                 "Most played games",
@@ -1611,6 +1614,37 @@ def register_callbacks(app):
 
         table_rows = []
         earnings_rows = []
+        manual_by_event: Dict[str, Dict[str, Any]] = {}
+        added_via_breakdown: List[Dict[str, Any]] = []
+
+        selected_scope_slugs = [
+            ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
+        ]
+        start_date_iso = range_start.isoformat() if range_start else None
+        end_date_iso = range_end.isoformat() if range_end else None
+
+        try:
+            manual_stats_fn = getattr(storage_api, "get_event_manual_add_stats", None)
+            if manual_stats_fn:
+                manual_by_event = manual_stats_fn(
+                    event_slugs=selected_scope_slugs or None,
+                    start_date=start_date_iso,
+                    end_date=end_date_iso,
+                ) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load manual check-in stats: {e}")
+
+        try:
+            added_via_fn = getattr(storage_api, "get_added_via_breakdown", None)
+            if added_via_fn:
+                added_via_breakdown = added_via_fn(
+                    event_slugs=selected_scope_slugs or None,
+                    start_date=start_date_iso,
+                    end_date=end_date_iso,
+                ) or []
+        except Exception as e:
+            logger.warning(f"Failed to load added_via breakdown: {e}")
+
         for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
             ev_member_rate = (
@@ -1629,10 +1663,14 @@ def register_callbacks(app):
             revenue_per_player = (ev_revenue / ev_total) if ev_total > 0 else 0.0
             ev_no_show = _as_int(ev.get("no_show_count"))
             ev_no_show_rate = _as_float(ev.get("no_show_rate"))
+            ev_slug = ev.get("event_slug", "")
+            manual_stats = manual_by_event.get(ev_slug, {}) if ev_slug else {}
+            manual_count = _as_int(manual_stats.get("manual_count"))
+            manual_pct = _as_float(manual_stats.get("manual_pct"))
             table_rows.append(
                 {
                     "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
-                    "event_slug": ev.get("event_slug", ""),
+                    "event_slug": ev_slug,
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
                     "checked_in_vs_registered": (
@@ -1647,6 +1685,8 @@ def register_callbacks(app):
                     "retention_rate": f"{_as_float(ev.get('retention_rate')):.0f}%",
                     "no_show_count": ev_no_show,
                     "no_show_rate": f"{ev_no_show_rate:.0f}%" if ev_no_show_rate > 0 else "-",
+                    "manual_count": manual_count,
+                    "manual_share": f"{manual_pct:.0f}%" if ev_total > 0 else "-",
                 }
             )
             earnings_rows.append(
@@ -1812,12 +1852,20 @@ def register_callbacks(app):
                         f"({no_show_total} of {reg_total} players) in this scope."
                     )
 
+        # Added-via source summary for selected scope (archive)
+        if added_via_breakdown:
+            chunks = []
+            for row in added_via_breakdown[:3]:
+                source = str(row.get("source") or "unknown")
+                share = _as_float(row.get("share"))
+                chunks.append(f"{source}: {share:.0f}%")
+            added_via_summary = "Added via: " + " | ".join(chunks)
+        else:
+            added_via_summary = "Added via: -"
+
         # Top attendees leaderboard for selected scope
         top_players_rows = []
         top_players_title = "Top attendees"
-        selected_scope_slugs = [
-            ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
-        ]
         try:
             top_players_fn = getattr(storage_api, "get_top_players_history", None)
             if top_players_fn:
@@ -1904,6 +1952,7 @@ def register_callbacks(app):
             startgg_delta,
             retention_delta,
             top_game_text,
+            added_via_summary,
             top_players_title,
             top_players_rows,
             games_title,
@@ -2917,6 +2966,7 @@ def register_callbacks(app):
             "is_guest": False,
             "member": require_membership,
             "payment_valid": require_payment,
+            "added_via": "manual_dashboard",
             "tournament_games_registered": selected_games,
         }
 

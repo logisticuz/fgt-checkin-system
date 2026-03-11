@@ -55,6 +55,7 @@ CREATE TABLE active_event_data (
     checkin_uuid                    TEXT,            -- maps to Airtable "UUID"
     startgg_event_id                TEXT,
     is_guest                        BOOLEAN DEFAULT false,
+    added_via                       TEXT DEFAULT 'unknown',
     player_uuid                     TEXT,
     created                         TIMESTAMPTZ DEFAULT now()
 );
@@ -90,6 +91,7 @@ CREATE TABLE event_archive (
     external_id                     TEXT,
     startgg_event_id                TEXT,
     is_guest                        BOOLEAN DEFAULT false,
+    added_via                       TEXT DEFAULT 'unknown',
     -- Archive metadata
     archived_at                     TIMESTAMPTZ DEFAULT now(),
     player_uuid                     TEXT,

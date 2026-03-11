@@ -1236,6 +1236,8 @@ async def begin_checkin_endpoint(request: Request):
         raise HTTPException(status_code=400, detail="event_slug is required")
 
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+    if isinstance(payload, dict) and not payload.get("added_via"):
+        payload["added_via"] = "api"
 
     try:
         result = begin_fn(event_slug, payload)
@@ -1366,6 +1368,7 @@ async def orchestrate_checkin(request: Request):
             "email": email,
             "telephone": telefon,
             "status": "Pending",
+            "added_via": "startgg_flow",
         })
     except Exception as e:
         logger.exception(f"begin_checkin failed: {e}")
