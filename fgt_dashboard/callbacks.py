@@ -46,6 +46,7 @@ ACTION_META = {
     "auth_logout": ("Auth", "Logout"),
     "auth_select_active_event": ("Auth", "Select Active Event"),
     "admin_fetch_event_data": ("Settings", "Fetch Event Data"),
+    "admin_use_mock_event": ("Settings", "Use Mock Event"),
     "admin_update_requirements": ("Settings", "Update Requirements"),
     "admin_update_payment_settings": ("Settings", "Update Payment Settings"),
     "admin_toggle_field": ("Check-ins", "Toggle Field"),
@@ -53,6 +54,7 @@ ACTION_META = {
     "admin_update_tag": ("Check-ins", "Update Tag"),
     "admin_update_telephone": ("Check-ins", "Update Phone"),
     "admin_update_games": ("Check-ins", "Update Games"),
+    "admin_update_event_timing": ("Settings", "Update Event Timing"),
     "admin_manual_checkin": ("Check-ins", "Manual Check-in"),
     "admin_recheck_startgg": ("Check-ins", "Re-check Start.gg"),
     "admin_delete_checkin": ("Check-ins", "Delete Player"),
@@ -62,9 +64,32 @@ ACTION_META = {
     "event_rearchived": ("Archive", "Event Re-Archived"),
     "event_reopened": ("Archive", "Event Reopened"),
     "event_deleted_from_history": ("Archive", "Deleted From History"),
+    "event_stats_recomputed": ("Archive", "Stats Recomputed"),
+    "event_stats_integrity_scanned": ("Archive", "Integrity Scanned"),
 }
 
 ACTION_GROUP_ORDER = ["Auth", "Settings", "Check-ins", "Archive", "Integrations", "Other"]
+
+_default_dev_identities = "viktor molina,logisticuz"
+_env_dev_identities = os.getenv("DEV_TOOLS_ALLOWED_IDENTITIES", _default_dev_identities)
+DEV_ALLOWED_IDENTITIES = {
+    item.strip().lower() for item in str(_env_dev_identities).split(",") if item.strip()
+}
+
+
+def _is_dev_tools_owner(auth_state: Any) -> bool:
+    if not isinstance(auth_state, dict):
+        return False
+
+    candidates = [
+        auth_state.get("user_name"),
+        auth_state.get("user_email"),
+        auth_state.get("user_id"),
+        auth_state.get("username"),
+        auth_state.get("tag"),
+    ]
+    normalized = {str(v).strip().lower() for v in candidates if str(v or "").strip()}
+    return any(v in DEV_ALLOWED_IDENTITIES for v in normalized)
 
 
 def format_action_label(action: str) -> str:
@@ -231,28 +256,30 @@ def register_callbacks(app):
                 # For active event: use live settings snapshot.
                 if selected_slug == active_slug:
                     # Guard against stale/mismatched settings snapshot.
-                    snapshot_matches_selected = (not snapshot_slug) or (snapshot_slug == selected_slug)
+                    snapshot_matches_selected = (not snapshot_slug) or (
+                        snapshot_slug == selected_slug
+                    )
 
                     if snapshot_matches_selected:
                         if isinstance(events_json, dict):
-                            registered_players = int(events_json.get("tournament_entrants_players") or 0)
+                            registered_players = int(
+                                events_json.get("tournament_entrants_players") or 0
+                            )
                             registered_slots = int(events_json.get("tournament_entrants") or 0)
-                        elif isinstance(settings.get("startgg_registered_count"), (int, float, str)):
+                        elif isinstance(
+                            settings.get("startgg_registered_count"), (int, float, str)
+                        ):
                             registered_slots = int(settings.get("startgg_registered_count") or 0)
 
                         if registered_players > 0:
                             coverage_rate = (total_count / registered_players) * 100
-                            coverage_text = (
-                                f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
-                            )
+                            coverage_text = f"Coverage: {total_count}/{registered_players} players ({coverage_rate:.0f}%)"
                             coverage_source = "Source: Active snapshot"
                             if registered_slots and registered_slots != registered_players:
                                 coverage_text += f" | {registered_slots} event slots"
                         elif registered_slots > 0:
                             coverage_rate = (total_count / registered_slots) * 100
-                            coverage_text = (
-                                f"Coverage (slots): {total_count}/{registered_slots} ({coverage_rate:.0f}%)"
-                            )
+                            coverage_text = f"Coverage (slots): {total_count}/{registered_slots} ({coverage_rate:.0f}%)"
                             coverage_source = "Source: Active snapshot (slot fallback)"
                     else:
                         coverage_text = (
@@ -268,7 +295,11 @@ def register_callbacks(app):
                         history_raw = history_fn() or []
                         history_rows = history_raw if isinstance(history_raw, list) else []
                         stat_row = next(
-                            (r for r in history_rows if (r.get("event_slug") or "") == selected_slug),
+                            (
+                                r
+                                for r in history_rows
+                                if (r.get("event_slug") or "") == selected_slug
+                            ),
                             None,
                         )
                         if stat_row:
@@ -277,14 +308,14 @@ def register_callbacks(app):
                                 or stat_row.get("total_participants")
                                 or total_count
                             )
-                            registered_players = int(stat_row.get("startgg_registered_players") or 0)
+                            registered_players = int(
+                                stat_row.get("startgg_registered_players") or 0
+                            )
                             registered_slots = int(stat_row.get("startgg_registered_count") or 0)
 
                             if registered_players > 0:
                                 coverage_rate = (checked_in / registered_players) * 100
-                                coverage_text = (
-                                    f"Coverage: {checked_in}/{registered_players} players ({coverage_rate:.0f}%)"
-                                )
+                                coverage_text = f"Coverage: {checked_in}/{registered_players} players ({coverage_rate:.0f}%)"
                                 coverage_source = "Source: Archived stats"
                                 if registered_slots and registered_slots != registered_players:
                                     coverage_text += f" | {registered_slots} event slots"
@@ -774,10 +805,30 @@ def register_callbacks(app):
             except Exception as e:
                 logger.warning(f"Failed to write audit log for clear current event: {e}")
 
-            return None, html.Span("✅ Cleared event selection (dashboard only).", style={"color": "#10b981"})
+            return None, html.Span(
+                "✅ Cleared event selection (dashboard only).", style={"color": "#10b981"}
+            )
         except Exception as e:
             logger.exception(f"Failed to clear current event: {e}")
-            return no_update, html.Span(f"❌ Failed to clear current event: {e}", style={"color": "#ef4444"})
+            return no_update, html.Span(
+                f"❌ Failed to clear current event: {e}", style={"color": "#ef4444"}
+            )
+
+    @app.callback(
+        Output("dev-tools-advanced-container", "style"),
+        Output("dev-tools-panel", "style"),
+        Output("recompute-dev-container", "style"),
+        Input("auth-store", "data"),
+        Input("dev-tools-visible-toggle", "value"),
+    )
+    def toggle_dev_tools_visibility(auth_state, visibility_flags):
+        if not _is_dev_tools_owner(auth_state):
+            return {"display": "none"}, {"display": "none"}, {"display": "none"}
+
+        show_panel = "show" in (visibility_flags or [])
+        return {"display": "block", "marginBottom": "1.1rem"}, {
+            "display": "block" if show_panel else "none"
+        }, {"display": "block"}
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update settings
@@ -787,10 +838,13 @@ def register_callbacks(app):
         Output("event-dropdown", "options"),
         Output("event-dropdown", "value"),
         Input("btn-fetch-event", "n_clicks"),
+        Input("btn-use-mock-event", "n_clicks"),
         State("input-startgg-link", "value"),
+        State("input-mock-event-slug", "value"),
+        State("input-mock-event-name", "value"),
         State("auth-store", "data"),
     )
-    def fetch_event_data(n_clicks, link, auth_state):
+    def fetch_event_data(n_clicks, mock_clicks, link, mock_slug, mock_name, auth_state):
         """
         Admin action:
         1) Extract tournament slug from Start.gg URL
@@ -805,8 +859,196 @@ def register_callbacks(app):
            - First time: default_game = ALL events
            - Later: keep TO's selections that still exist, drop removed, add new
         """
-        if not n_clicks or not link:
+        if not n_clicks and not mock_clicks:
             return no_update, no_update, no_update
+
+        trigger_id = ctx.triggered_id
+
+        if trigger_id == "btn-use-mock-event":
+            if not _is_dev_tools_owner(auth_state):
+                return "❌ Unauthorized: dev tools are owner-only.", no_update, no_update
+
+            # Prepare safe mock values
+            slug = (mock_slug or "mock-event").strip().lower()
+            slug = re.sub(r"[^a-z0-9-]+", "-", slug).strip("-")
+            if not slug:
+                return "❌ Invalid mock slug.", no_update, no_update
+
+            event_name = (mock_name or "Mock Event").strip() or "Mock Event"
+            start_iso = date.today().isoformat()
+            fetched_names = ["SSBU Singles"]
+            events_compact = [
+                {
+                    "id": 999999,
+                    "name": "SSBU Singles",
+                    "slug": f"{slug}/event/ssbu-singles",
+                    "startAt": None,
+                    "numEntrants": 0,
+                    "setCount": 0,
+                    "gamesPlayed": 0,
+                }
+            ]
+            events_json_value = {
+                "tournament_entrants": 0,
+                "tournament_entrants_players": 0,
+                "events": events_compact,
+            }
+
+            settings_data = get_active_settings_with_id()
+            if not settings_data:
+                return "❌ No active settings record found.", no_update, no_update
+
+            settings_id = settings_data["record_id"]
+            patch_fields = {
+                "active_event_slug": slug,
+                "event_display_name": event_name,
+                "is_active": True,
+                "events_json": events_json_value,
+                "event_date": start_iso,
+                "default_game": fetched_names,
+                "startgg_event_url": f"https://start.gg/tournament/{slug}",
+                "tournament_name": event_name,
+                "timezone": "Europe/Stockholm",
+            }
+
+            result = update_settings(settings_id, patch_fields)
+            if not result:
+                return "❌ Failed to apply mock event", no_update, no_update
+
+            try:
+                storage_api.log_action(
+                    {
+                        "user_id": (auth_state or {}).get("user_id", ""),
+                        "user_name": (auth_state or {}).get("user_name", "system"),
+                        "user_email": (auth_state or {}).get("user_email", ""),
+                    },
+                    "admin_use_mock_event",
+                    "settings",
+                    target_event=slug,
+                    details=json.dumps(
+                        {
+                            "event_name": event_name,
+                            "default_games": fetched_names,
+                            "source": "dev_tools",
+                        }
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write audit log for mock event: {e}")
+
+            from shared.storage import get_all_event_slugs
+
+            all_slugs = get_all_event_slugs() or []
+            if slug not in all_slugs:
+                all_slugs = [slug] + all_slugs
+
+            dropdown_options = [
+                {
+                    "label": (event_name if s == slug else s.replace("-", " ").title()),
+                    "value": s,
+                }
+                for s in all_slugs
+            ]
+
+            return (
+                f"✅ Mock event active: {event_name} ({slug})",
+                dropdown_options,
+                slug,
+            )
+
+        if not link:
+            return "❌ Enter a Start.gg link first.", no_update, no_update
+
+        def _fetch_event_games_summary(event_id: Any, headers: Dict[str, str]) -> Dict[str, int]:
+            """Fetch set scores for one event and aggregate game counts."""
+            if not event_id:
+                return {"games_played": 0, "sets_with_score": 0, "set_total": 0}
+
+            query_sets = {
+                "query": """
+                query EventSets($eventId: ID!, $page: Int!, $perPage: Int!) {
+                  event(id: $eventId) {
+                    sets(page: $page, perPage: $perPage, sortType: STANDARD) {
+                      pageInfo { total totalPages }
+                      nodes {
+                        slots(includeByes: false) {
+                          standing {
+                            stats {
+                              score {
+                                value
+                                label
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+                "variables": {"eventId": str(event_id), "page": 1, "perPage": 100},
+            }
+
+            games_played = 0
+            sets_with_score = 0
+            set_total = 0
+            page = 1
+
+            while True:
+                query_sets["variables"]["page"] = page
+                resp_sets = requests.post(
+                    "https://api.start.gg/gql/alpha",
+                    json=query_sets,
+                    headers=headers,
+                    timeout=25,
+                )
+                resp_sets.raise_for_status()
+                payload_sets = resp_sets.json()
+                if payload_sets.get("errors"):
+                    raise RuntimeError(str(payload_sets.get("errors")))
+
+                sets_conn = (
+                    (payload_sets.get("data") or {}).get("event") or {}
+                ).get("sets") or {}
+                page_info = sets_conn.get("pageInfo") or {}
+                nodes = sets_conn.get("nodes") or []
+
+                try:
+                    set_total = int(page_info.get("total") or set_total or 0)
+                except Exception:
+                    set_total = set_total or 0
+
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    slot_scores = []
+                    for slot in node.get("slots") or []:
+                        score_obj = (
+                            ((slot or {}).get("standing") or {}).get("stats") or {}
+                        ).get("score") or {}
+                        raw_val = score_obj.get("value")
+                        try:
+                            score_val = int(raw_val)
+                        except (TypeError, ValueError):
+                            continue
+                        if score_val < 0:
+                            continue
+                        slot_scores.append(score_val)
+
+                    if slot_scores:
+                        sets_with_score += 1
+                        games_played += sum(slot_scores)
+
+                total_pages = int(page_info.get("totalPages") or 1)
+                if page >= total_pages or not nodes:
+                    break
+                page += 1
+
+            return {
+                "games_played": games_played,
+                "sets_with_score": sets_with_score,
+                "set_total": set_total,
+            }
 
         # Guards for env
         if not STARTGG_API_KEY:
@@ -843,6 +1085,9 @@ def register_callbacks(app):
                     nodes {
                       participants { id }
                     }
+                  }
+                  sets(page: 1, perPage: 1, sortType: STANDARD) {
+                    pageInfo { total }
                   }
                 }
               }
@@ -890,6 +1135,7 @@ def register_callbacks(app):
         events_compact = []
         all_participant_ids = set()
         partial_participant_data = False
+        partial_score_data = False
         for e in events:
             if not isinstance(e, dict):
                 continue
@@ -902,10 +1148,26 @@ def register_callbacks(app):
             # Collect participant IDs for unique player count
             nodes = entrants_data.get("nodes") or []
             for node in nodes:
-                for p in (node.get("participants") or []):
+                for p in node.get("participants") or []:
                     pid = p.get("id")
                     if pid:
                         all_participant_ids.add(pid)
+            sets_data = e.get("sets") or {}
+            set_total = 0
+            try:
+                set_total = int((sets_data.get("pageInfo") or {}).get("total") or 0)
+            except Exception:
+                set_total = 0
+
+            games_played = 0
+            sets_with_score = 0
+            try:
+                score_summary = _fetch_event_games_summary(e.get("id"), headers_startgg)
+                games_played = int(score_summary.get("games_played") or 0)
+                sets_with_score = int(score_summary.get("sets_with_score") or 0)
+            except Exception as ex:
+                partial_score_data = True
+                logger.warning(f"Failed set-score summary for event {e.get('id')}: {ex}")
             # Check if we got all entrants (pagination)
             total_pages = (entrants_data.get("pageInfo") or {}).get("totalPages", 1)
             if total_pages > 1:
@@ -914,13 +1176,18 @@ def register_callbacks(app):
                     f"Event {e.get('name')}: {total_pages} pages of entrants, "
                     f"only fetched page 1. Unique player count may be approximate."
                 )
-            events_compact.append({
-                "id": e.get("id"),
-                "name": e.get("name"),
-                "slug": e.get("slug"),
-                "startAt": e.get("startAt"),
-                "numEntrants": entrant_total,
-            })
+            events_compact.append(
+                {
+                    "id": e.get("id"),
+                    "name": e.get("name"),
+                    "slug": e.get("slug"),
+                    "startAt": e.get("startAt"),
+                    "numEntrants": entrant_total,
+                    "setCount": set_total,
+                    "gamesPlayed": games_played,
+                    "scoredSets": sets_with_score,
+                }
+            )
         tournament_entrants_slots = sum(ev.get("numEntrants", 0) for ev in events_compact)
         tournament_entrants_players = len(all_participant_ids)
         logger.info(
@@ -1037,7 +1304,13 @@ def register_callbacks(app):
             for s in all_slugs
         ]
 
-        return f"✅ Updated {tournament_name} • {len(events)} events", dropdown_options, slug
+        output_msg = f"✅ Updated {tournament_name} • {len(events)} events"
+        if partial_participant_data:
+            output_msg += " • ⚠ entrants partial"
+        if partial_score_data:
+            output_msg += " • ⚠ games partial"
+
+        return output_msg, dropdown_options, slug
 
     # ---------------------------------------------------------------------
     # Helper: read active settings.fields from storage backend
@@ -1328,12 +1601,49 @@ def register_callbacks(app):
         Output("insights-kpi-retention-delta", "children"),
         Output("insights-top-game", "children"),
         Output("insights-added-via-summary", "children"),
+        Output("insights-ops-live-note", "children"),
         Output("insights-top-players-title", "children"),
         Output("insights-top-players-table", "data"),
+        Output("insights-player-funnel-note", "children"),
+        Output("insights-player-funnel", "children"),
         Output("insights-games-title", "children"),
         Output("insights-games-table", "data"),
+        Output("insights-game-mover", "children"),
+        Output("insights-games-trend", "figure"),
+        Output("insights-crossover-title", "children"),
+        Output("insights-crossover-table", "data"),
         Output("insights-events-table", "data"),
         Output("insights-earnings-table", "data"),
+        Output("insights-kpi-slots", "children"),
+        Output("insights-kpi-avggames", "children"),
+        Output("insights-kpi-multigame", "children"),
+        Output("insights-kpi-new", "children"),
+        Output("insights-kpi-returning", "children"),
+        Output("insights-kpi-noshow", "children"),
+        Output("insights-kpi-manual", "children"),
+        Output("insights-kpi-checkinspeed", "children"),
+        Output("insights-kpi-duration", "children"),
+        Output("insights-kpi-growth", "children"),
+        Output("insights-kpi-churn", "children"),
+        Output("insights-kpi-slots-delta", "children"),
+        Output("insights-kpi-avggames-delta", "children"),
+        Output("insights-kpi-multigame-delta", "children"),
+        Output("insights-kpi-new-delta", "children"),
+        Output("insights-kpi-returning-delta", "children"),
+        Output("insights-kpi-noshow-delta", "children"),
+        Output("insights-kpi-manual-delta", "children"),
+        Output("insights-kpi-checkinspeed-delta", "children"),
+        Output("insights-kpi-duration-delta", "children"),
+        Output("insights-kpi-growth-delta", "children"),
+        Output("insights-kpi-churn-delta", "children"),
+        Output("insights-kpi-coreplayers", "children"),
+        Output("insights-kpi-lifetime", "children"),
+        Output("insights-kpi-coreplayers-delta", "children"),
+        Output("insights-kpi-lifetime-delta", "children"),
+        Output("insights-summary-core-value", "children"),
+        Output("insights-summary-community-value", "children"),
+        Output("insights-summary-tournament-value", "children"),
+        Output("insights-summary-operations-value", "children"),
         Input("tabs", "value"),
         Input("btn-insights-refresh", "n_clicks"),
         Input("insights-event-dropdown", "value"),
@@ -1354,7 +1664,41 @@ def register_callbacks(app):
         custom_end_date,
     ):
         if selected_tab != "tab-insights":
-            return (no_update,) * 29
+            return (no_update,) * 66
+
+        def _normalize_game_name(name: Any) -> str:
+            raw = str(name or "").strip()
+            if not raw:
+                return ""
+            key = raw.lower()
+            compact = re.sub(r"[^a-z0-9]+", "", key)
+
+            # SSBU canonicalization
+            if (
+                "ssbu" in key
+                or "super smash bros ultimate" in key
+                or key == "smash singles"
+                or ("smash" in key and "ultimate" in key)
+            ):
+                return "SSBU Singles"
+
+            # SF6 canonicalization
+            if (
+                compact in {"sf6", "streetfighter6", "streetfighter6tournament"}
+                or "street fighter 6" in key
+                or "sf6" == key
+            ):
+                return "STREET FIGHTER 6 TOURNAMENT"
+
+            # Tekken 8 canonicalization
+            if (
+                compact in {"t8", "tekken8", "tekken8tournament"}
+                or "tekken 8" in key
+                or "t8" == key
+            ):
+                return "TEKKEN 8 TOURNAMENT"
+
+            return raw
 
         def _empty_response(hint: str = "", summary: str = "Insights overview"):
             return (
@@ -1381,12 +1725,49 @@ def register_callbacks(app):
                 "—",
                 "Most popular game: -",
                 "Added via: -",
+                "",
                 "Top attendees",
+                [],
+                "",
                 [],
                 "Most played games",
                 [],
+                "",
+                {},
+                "",
                 [],
                 [],
+                [],
+                "0",
+                "0.0",
+                "0.0%",
+                "0",
+                "0",
+                "0.0%",
+                "0.0%",
+                "-",
+                "-",
+                "-",
+                "-",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "Live",
+                "Live",
+                "Live",
+                "Live",
+                "0",
+                "0.0",
+                "—",
+                "—",
+                "-",
+                "-",
+                "-",
+                "-",
             )
 
         try:
@@ -1405,6 +1786,11 @@ def register_callbacks(app):
             return _empty_response(
                 "No archived events yet. Archive your first event to unlock insights."
             )
+
+        try:
+            live_settings = get_active_settings() or {}
+        except Exception:
+            live_settings = {}
 
         all_events = list(events)
 
@@ -1538,6 +1924,13 @@ def register_callbacks(app):
             for ev in series_scoped_events
             if (not selected_event_slugs) or ev.get("event_slug") in selected_event_slugs
         ]
+        scope_event_count = len(selected_events)
+        single_event_scope = scope_event_count == 1
+        selected_single_slug = (
+            str(selected_events[0].get("event_slug") or "") if single_event_scope else ""
+        )
+        active_event_slug = str(live_settings.get("active_event_slug") or "")
+        single_active_scope = single_event_scope and selected_single_slug == active_event_slug
 
         def _aggregate_metrics(event_rows):
             total = 0
@@ -1550,6 +1943,9 @@ def register_callbacks(app):
             weighted_retention_sum = 0.0
             weighted_retention_den = 0
             top_game_counts = {}
+            slots = 0
+            new_players = 0
+            returning_players = 0
             startgg_registered_total = 0
             checked_in_total = 0
             no_show_total = 0
@@ -1561,6 +1957,8 @@ def register_callbacks(app):
                 member_count += _as_int(ev.get("member_count"))
                 guest_count += _as_int(ev.get("guest_count"))
                 startgg_count += _as_int(ev.get("startgg_count"))
+                new_players += _as_int(ev.get("new_players"))
+                returning_players += _as_int(ev.get("returning_players"))
                 startgg_account_count += max(
                     _as_int(ev.get("startgg_count")) - _as_int(ev.get("guest_count")),
                     0,
@@ -1575,9 +1973,14 @@ def register_callbacks(app):
                     weighted_retention_sum += retention_val * ev_total
                     weighted_retention_den += ev_total
 
-                top_game = ev.get("most_popular_game")
-                if top_game:
-                    top_game_counts[top_game] = top_game_counts.get(top_game, 0) + 1
+                breakdown = ev.get("games_breakdown")
+                if isinstance(breakdown, dict):
+                    for game, count in breakdown.items():
+                        cnt = _as_int(count)
+                        if cnt <= 0:
+                            continue
+                        top_game_counts[game] = top_game_counts.get(game, 0) + cnt
+                        slots += cnt
 
                 # No-show aggregation (prefer player count, fall back to slot count)
                 reg_players = _as_int(ev.get("startgg_registered_players"))
@@ -1600,12 +2003,15 @@ def register_callbacks(app):
                 "startgg_count": startgg_count,
                 "startgg_account_count": startgg_account_count,
                 "ready_count": ready_count,
+                "new_players": new_players,
+                "returning_players": returning_players,
                 "retention": (
                     (weighted_retention_sum / weighted_retention_den)
                     if weighted_retention_den > 0
                     else 0.0
                 ),
                 "top_game_counts": top_game_counts,
+                "slots": slots,
                 "startgg_registered_total": startgg_registered_total,
                 "checked_in_total": checked_in_total,
                 "no_show_total": no_show_total,
@@ -1616,34 +2022,90 @@ def register_callbacks(app):
         earnings_rows = []
         manual_by_event: Dict[str, Dict[str, Any]] = {}
         added_via_breakdown: List[Dict[str, Any]] = []
+        acquisition_source_breakdown: List[Dict[str, Any]] = []
 
         selected_scope_slugs = [
             ev.get("event_slug") for ev in selected_events if ev.get("event_slug")
         ]
         start_date_iso = range_start.isoformat() if range_start else None
         end_date_iso = range_end.isoformat() if range_end else None
+        multi_game_count = 0
+        core_players = 0
+        player_lifetime = 0.0
 
         try:
             manual_stats_fn = getattr(storage_api, "get_event_manual_add_stats", None)
             if manual_stats_fn:
-                manual_by_event = manual_stats_fn(
-                    event_slugs=selected_scope_slugs or None,
-                    start_date=start_date_iso,
-                    end_date=end_date_iso,
-                ) or {}
+                manual_by_event = (
+                    manual_stats_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=start_date_iso,
+                        end_date=end_date_iso,
+                    )
+                    or {}
+                )
         except Exception as e:
             logger.warning(f"Failed to load manual check-in stats: {e}")
 
         try:
             added_via_fn = getattr(storage_api, "get_added_via_breakdown", None)
             if added_via_fn:
-                added_via_breakdown = added_via_fn(
-                    event_slugs=selected_scope_slugs or None,
-                    start_date=start_date_iso,
-                    end_date=end_date_iso,
-                ) or []
+                added_via_breakdown = (
+                    added_via_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=start_date_iso,
+                        end_date=end_date_iso,
+                    )
+                    or []
+                )
         except Exception as e:
             logger.warning(f"Failed to load added_via breakdown: {e}")
+
+        try:
+            acquisition_source_fn = getattr(storage_api, "get_acquisition_source_breakdown", None)
+            if acquisition_source_fn:
+                acquisition_source_breakdown = (
+                    acquisition_source_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=start_date_iso,
+                        end_date=end_date_iso,
+                    )
+                    or []
+                )
+        except Exception as e:
+            logger.warning(f"Failed to load acquisition-source breakdown: {e}")
+
+        try:
+            multi_game_fn = getattr(storage_api, "get_multi_game_count", None)
+            if multi_game_fn:
+                multi_stats = (
+                    multi_game_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=start_date_iso,
+                        end_date=end_date_iso,
+                    )
+                    or {}
+                )
+                multi_game_count = _as_int(multi_stats.get("multi_game_count"))
+        except Exception as e:
+            logger.warning(f"Failed to load multi-game stats: {e}")
+
+        try:
+            community_v2_fn = getattr(storage_api, "get_community_health_v2_stats", None)
+            if community_v2_fn:
+                community_v2 = (
+                    community_v2_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=start_date_iso,
+                        end_date=end_date_iso,
+                        anchor_date=end_date_iso,
+                    )
+                    or {}
+                )
+                core_players = _as_int(community_v2.get("core_players"))
+                player_lifetime = _as_float(community_v2.get("player_lifetime"))
+        except Exception as e:
+            logger.warning(f"Failed to load community health v2 stats: {e}")
 
         for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
@@ -1676,7 +2138,11 @@ def register_callbacks(app):
                     "checked_in_vs_registered": (
                         f"{_as_int(ev.get('checked_in_count'))}"
                         f"/{_as_int(ev.get('startgg_registered_players')) or _as_int(ev.get('startgg_registered_count'))}"
-                        if (_as_int(ev.get("startgg_registered_players")) or _as_int(ev.get("startgg_registered_count"))) > 0
+                        if (
+                            _as_int(ev.get("startgg_registered_players"))
+                            or _as_int(ev.get("startgg_registered_count"))
+                        )
+                        > 0
                         else "-"
                     ),
                     "total_revenue": f"{ev_revenue:.0f} kr",
@@ -1720,6 +2186,17 @@ def register_callbacks(app):
             else 0.0
         )
         retention = metrics["retention"]
+        slots = _as_int(metrics.get("slots"))
+        avg_games = (slots / metrics["total"]) if metrics["total"] > 0 else 0.0
+        multigame_pct = (multi_game_count / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        new_players = _as_int(metrics.get("new_players"))
+        returning_players = _as_int(metrics.get("returning_players"))
+        noshow_rate = _as_float(metrics.get("no_show_rate"))
+        manual_total_count = sum(_as_int(v.get("total_count")) for v in manual_by_event.values())
+        manual_total_manual = sum(_as_int(v.get("manual_count")) for v in manual_by_event.values())
+        manual_share = (
+            (manual_total_manual / manual_total_count * 100) if manual_total_count > 0 else 0.0
+        )
 
         if metrics["top_game_counts"]:
             top_game = max(metrics["top_game_counts"], key=metrics["top_game_counts"].get)
@@ -1742,10 +2219,20 @@ def register_callbacks(app):
                 return f"{arrow} {diff:+.0f} kr vs prev"
             if unit == "pp":
                 return f"{arrow} {diff:+.1f} pp vs prev"
+            if unit == "count1":
+                return f"{arrow} {diff:+.1f} vs prev"
             return f"{arrow} {int(diff):+d} vs prev"
 
         # Delta against previous period (same length), disabled for all-time and specific-event selection.
         prev_metrics = None
+        prev_start = None
+        prev_end = None
+        prev_multi_game_count = None
+        prev_manual_share = None
+        prev_core_players = None
+        prev_player_lifetime = None
+        prev_unique_count = None
+        prev_churn_rate = None
         if selected_period != "all" and not selected_event_slugs and range_start and range_end:
             period_days = (range_end - range_start).days + 1
             prev_end = range_start - timedelta(days=1)
@@ -1764,6 +2251,97 @@ def register_callbacks(app):
 
             if prev_events:
                 prev_metrics = _aggregate_metrics(prev_events)
+                prev_scope_slugs = [
+                    ev.get("event_slug") for ev in prev_events if ev.get("event_slug")
+                ]
+                prev_start_iso = prev_start.isoformat() if prev_start else None
+                prev_end_iso = prev_end.isoformat() if prev_end else None
+
+                try:
+                    prev_multi_game_fn = getattr(storage_api, "get_multi_game_count", None)
+                    if prev_multi_game_fn:
+                        prev_multi_stats = (
+                            prev_multi_game_fn(
+                                event_slugs=prev_scope_slugs or None,
+                                start_date=prev_start_iso,
+                                end_date=prev_end_iso,
+                            )
+                            or {}
+                        )
+                        prev_multi_game_count = _as_int(prev_multi_stats.get("multi_game_count"))
+                except Exception as e:
+                    logger.warning(f"Failed to load previous multi-game stats: {e}")
+
+                try:
+                    prev_manual_fn = getattr(storage_api, "get_event_manual_add_stats", None)
+                    if prev_manual_fn:
+                        prev_manual_stats = (
+                            prev_manual_fn(
+                                event_slugs=prev_scope_slugs or None,
+                                start_date=prev_start_iso,
+                                end_date=prev_end_iso,
+                            )
+                            or {}
+                        )
+                        prev_total_count = sum(
+                            _as_int(v.get("total_count")) for v in prev_manual_stats.values()
+                        )
+                        prev_total_manual = sum(
+                            _as_int(v.get("manual_count")) for v in prev_manual_stats.values()
+                        )
+                        prev_manual_share = (
+                            (prev_total_manual / prev_total_count * 100)
+                            if prev_total_count > 0
+                            else None
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load previous manual-share stats: {e}")
+
+                try:
+                    prev_community_v2_fn = getattr(
+                        storage_api, "get_community_health_v2_stats", None
+                    )
+                    if prev_community_v2_fn:
+                        prev_community_v2 = (
+                            prev_community_v2_fn(
+                                event_slugs=prev_scope_slugs or None,
+                                start_date=prev_start_iso,
+                                end_date=prev_end_iso,
+                                anchor_date=prev_end_iso,
+                            )
+                            or {}
+                        )
+                        prev_core_players = _as_int(prev_community_v2.get("core_players"))
+                        prev_player_lifetime = _as_float(prev_community_v2.get("player_lifetime"))
+                except Exception as e:
+                    logger.warning(f"Failed to load previous community-v2 stats: {e}")
+
+                try:
+                    prev_unique_fn = getattr(storage_api, "get_unique_attendee_count", None)
+                    if prev_unique_fn:
+                        prev_unique_count = prev_unique_fn(
+                            event_slugs=prev_scope_slugs or None,
+                            start_date=prev_start_iso,
+                            end_date=prev_end_iso,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load previous unique attendee count: {e}")
+
+                try:
+                    prev_churn_fn = getattr(storage_api, "get_player_churn_stats", None)
+                    if prev_churn_fn:
+                        prev_churn_stats = (
+                            prev_churn_fn(
+                                event_slugs=prev_scope_slugs or None,
+                                start_date=prev_start_iso,
+                                end_date=prev_end_iso,
+                                anchor_date=prev_end_iso,
+                            )
+                            or {}
+                        )
+                        prev_churn_rate = _as_float(prev_churn_stats.get("churn_rate"))
+                except Exception as e:
+                    logger.warning(f"Failed to load previous churn stats: {e}")
 
         total_delta = _fmt_delta(
             metrics["total"], prev_metrics["total"] if prev_metrics else None, "count"
@@ -1810,6 +2388,53 @@ def register_callbacks(app):
         retention_delta = _fmt_delta(
             retention, prev_metrics["retention"] if prev_metrics else None, "pp"
         )
+        slots_delta = _fmt_delta(
+            slots, _as_int(prev_metrics.get("slots")) if prev_metrics else None, "count"
+        )
+        avggames_delta = _fmt_delta(
+            avg_games,
+            (
+                (_as_int(prev_metrics.get("slots")) / prev_metrics["total"])
+                if prev_metrics and prev_metrics["total"] > 0
+                else None
+            ),
+            "count1",
+        )
+        multigame_delta = _fmt_delta(
+            multigame_pct,
+            (
+                (prev_multi_game_count / prev_metrics["total"] * 100)
+                if (
+                    prev_metrics and prev_metrics["total"] > 0 and prev_multi_game_count is not None
+                )
+                else None
+            ),
+            "pp",
+        )
+        new_delta = _fmt_delta(
+            new_players,
+            _as_int(prev_metrics.get("new_players")) if prev_metrics else None,
+            "count",
+        )
+        returning_delta = _fmt_delta(
+            returning_players,
+            _as_int(prev_metrics.get("returning_players")) if prev_metrics else None,
+            "count",
+        )
+        noshow_delta = _fmt_delta(
+            noshow_rate,
+            _as_float(prev_metrics.get("no_show_rate")) if prev_metrics else None,
+            "pp",
+        )
+        manual_delta = _fmt_delta(manual_share, prev_manual_share, "pp")
+        coreplayers_delta = _fmt_delta(core_players, prev_core_players, "count")
+        lifetime_delta = _fmt_delta(player_lifetime, prev_player_lifetime, "count1")
+        summary_core = "Participants, checked-in slots, readiness, and revenue"
+        summary_community = "New/returning, core, growth, and churn trends"
+        summary_tournament = "Game spread, multi-game share, and no-show quality"
+        summary_operations = "Manual share and overall check-in process health"
+        if not single_active_scope:
+            summary_operations += " (ops timing cards need active single-event scope)"
 
         period_label = {
             "day": "Last 24h",
@@ -1863,9 +2488,98 @@ def register_callbacks(app):
         else:
             added_via_summary = "Added via: -"
 
+        if acquisition_source_breakdown:
+            total_source_count = sum(int(r.get("count") or 0) for r in acquisition_source_breakdown)
+            unknown_source_count = sum(
+                int(r.get("count") or 0)
+                for r in acquisition_source_breakdown
+                if str(r.get("source") or "").strip().lower() == "unknown"
+            )
+            known_rows = [
+                r
+                for r in acquisition_source_breakdown
+                if str(r.get("source") or "").strip().lower() != "unknown"
+            ]
+            known_total = max(total_source_count - unknown_source_count, 0)
+
+            if known_total > 0 and known_rows:
+                known_rows_sorted = sorted(
+                    known_rows,
+                    key=lambda r: int(r.get("count") or 0),
+                    reverse=True,
+                )
+                known_chunks = []
+                for row in known_rows_sorted[:3]:
+                    source = str(row.get("source") or "other")
+                    count = int(row.get("count") or 0)
+                    share_known = (count / known_total) * 100.0 if known_total > 0 else 0.0
+                    known_chunks.append(f"{source}: {share_known:.0f}%")
+                acquisition_summary = "Acq known: " + " | ".join(known_chunks)
+            else:
+                source_chunks = []
+                for row in acquisition_source_breakdown[:3]:
+                    source = str(row.get("source") or "unknown")
+                    share = _as_float(row.get("share"))
+                    source_chunks.append(f"{source}: {share:.0f}%")
+                acquisition_summary = "Acq: " + " | ".join(source_chunks)
+
+            if total_source_count > 0 and unknown_source_count > 0:
+                unknown_share = (unknown_source_count / total_source_count) * 100.0
+                acquisition_summary += f" • missing: {unknown_share:.0f}%"
+                if unknown_share >= 40:
+                    acquisition_summary += " (legacy)"
+
+            added_via_summary = f"{added_via_summary} • {acquisition_summary}"
+
+        ops_live_note = ""
+        checkin_speed_value = "-"
+        duration_value = "-"
+        opened_at = live_settings.get("checkin_opened_at")
+        started_at = live_settings.get("event_started_at")
+        ended_at = live_settings.get("event_ended_at")
+        now_utc = datetime.now(timezone.utc)
+
+        if single_active_scope and opened_at and metrics["total"] > 0:
+            try:
+                if not isinstance(opened_at, datetime):
+                    opened_at = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                minutes = max((now_utc - opened_at).total_seconds() / 60.0, 1.0)
+                checkin_speed = metrics["total"] / minutes
+                checkin_speed_value = f"{checkin_speed:.2f}/min"
+                ops_live_note = f"Live check-in speed: {checkin_speed:.2f} players/min"
+            except Exception:
+                pass
+
+        if single_active_scope and started_at and ended_at:
+            try:
+                if not isinstance(started_at, datetime):
+                    started_at = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                if not isinstance(ended_at, datetime):
+                    ended_at = datetime.fromisoformat(str(ended_at).replace("Z", "+00:00"))
+                duration_minutes = max((ended_at - started_at).total_seconds() / 60.0, 0.0)
+                duration_value = f"{duration_minutes / 60.0:.2f} h"
+                duration_text = f"Tournament duration: {duration_minutes / 60.0:.2f} h"
+                ops_live_note = (
+                    f"{ops_live_note} | {duration_text}" if ops_live_note else duration_text
+                )
+            except Exception:
+                pass
+
+        if single_active_scope:
+            checkin_speed_delta = "Live"
+            duration_delta = "Live"
+        elif single_event_scope:
+            checkin_speed_delta = "N/A (active event only)"
+            duration_delta = "N/A (active event only)"
+        else:
+            checkin_speed_delta = "N/A (single-event metric)"
+            duration_delta = "N/A (single-event metric)"
+
         # Top attendees leaderboard for selected scope
         top_players_rows = []
         top_players_title = "Top attendees"
+        funnel_note = ""
+        funnel_cards: List[Any] = []
         try:
             top_players_fn = getattr(storage_api, "get_top_players_history", None)
             if top_players_fn:
@@ -1883,9 +2597,104 @@ def register_callbacks(app):
                     or []
                 )
                 shown_label = "all" if top_players_limit == "all" else str(players_limit)
-                top_players_title = f"Top attendees ({len(top_players_rows)} shown, target: {shown_label})"
+                top_players_title = (
+                    f"Top attendees ({len(top_players_rows)} shown, target: {shown_label})"
+                )
         except Exception as e:
             logger.warning(f"Failed to load top players leaderboard: {e}")
+
+        try:
+            funnel_fn = getattr(storage_api, "get_player_funnel_stats", None)
+            if funnel_fn:
+                funnel_stats = (
+                    funnel_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=range_start.isoformat() if range_start else None,
+                        end_date=range_end.isoformat() if range_end else None,
+                        anchor_date=range_end.isoformat() if range_end else None,
+                    )
+                    or {}
+                )
+                funnel_new = _as_int(funnel_stats.get("new_count"))
+                funnel_returning = _as_int(funnel_stats.get("returning_count"))
+                funnel_core = _as_int(funnel_stats.get("core_count"))
+                funnel_churned = _as_int(funnel_stats.get("churned_count"))
+                funnel_max = max(funnel_new, funnel_returning, funnel_core, funnel_churned, 1)
+
+                def _funnel_card(label: str, value: int, color: str) -> Any:
+                    width_pct = int(round((value / funnel_max) * 100))
+                    return html.Div(
+                        style={
+                            "background": "#0f172a",
+                            "border": "1px solid #1e293b",
+                            "borderRadius": "8px",
+                            "padding": "0.45rem 0.55rem",
+                        },
+                        children=[
+                            html.Div(
+                                style={
+                                    "display": "flex",
+                                    "justifyContent": "space-between",
+                                    "alignItems": "center",
+                                    "marginBottom": "0.25rem",
+                                },
+                                children=[
+                                    html.Span(
+                                        label,
+                                        style={
+                                            "fontSize": "0.7rem",
+                                            "color": "#94a3b8",
+                                            "textTransform": "uppercase",
+                                            "letterSpacing": "0.04em",
+                                        },
+                                    ),
+                                    html.Span(
+                                        str(value),
+                                        style={
+                                            "fontSize": "0.9rem",
+                                            "color": color,
+                                            "fontWeight": "700",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={
+                                    "height": "6px",
+                                    "background": "#0b1220",
+                                    "borderRadius": "999px",
+                                    "overflow": "hidden",
+                                },
+                                children=[
+                                    html.Div(
+                                        style={
+                                            "height": "100%",
+                                            "width": f"{width_pct}%",
+                                            "background": color,
+                                        }
+                                    )
+                                ],
+                            ),
+                        ],
+                    )
+
+                funnel_cards = [
+                    _funnel_card("New", funnel_new, "#34d399"),
+                    _funnel_card("Returning", funnel_returning, "#fb923c"),
+                    _funnel_card("Core (6m)", funnel_core, "#22c55e"),
+                    _funnel_card("Churned (8m)", funnel_churned, "#f87171"),
+                ]
+                funnel_note = (
+                    "New: first-time players | Returning: 2+ total events | "
+                    "Core: 3+ distinct events in rolling 6 months | "
+                    "Churned: no attendance in 8 months (global)"
+                )
+
+                if single_event_scope:
+                    funnel_cards = []
+                    funnel_note = "Funnel v2 visas i period/series-scope (inte single-event)."
+        except Exception as e:
+            logger.warning(f"Failed to load player funnel stats: {e}")
 
         # Unique attendee count (distinct player_uuid) for selected scope
         unique_count = 0
@@ -1901,33 +2710,301 @@ def register_callbacks(app):
             logger.warning(f"Failed to load unique attendee count: {e}")
         unique_text = f"{unique_count} unique attendees" if unique_count > 0 else ""
 
+        growth_rate = None
+        if prev_unique_count is not None and prev_unique_count > 0:
+            growth_rate = ((unique_count - prev_unique_count) / prev_unique_count) * 100.0
+        growth_value = f"{growth_rate:.1f}%" if growth_rate is not None else "-"
+        growth_delta = (
+            f"From prev uniques: {prev_unique_count}" if prev_unique_count is not None else "Live"
+        )
+        if single_event_scope:
+            growth_value = "-"
+            growth_delta = "N/A (multi-event trend)"
+
+        churn_count = 0
+        churn_rate = 0.0
+        try:
+            churn_fn = getattr(storage_api, "get_player_churn_stats", None)
+            if churn_fn:
+                churn_stats = (
+                    churn_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=range_start.isoformat() if range_start else None,
+                        end_date=range_end.isoformat() if range_end else None,
+                        anchor_date=range_end.isoformat() if range_end else None,
+                    )
+                    or {}
+                )
+                churn_count = _as_int(churn_stats.get("churn_count"))
+                churn_rate = _as_float(churn_stats.get("churn_rate"))
+        except Exception as e:
+            logger.warning(f"Failed to load churn stats: {e}")
+
+        churn_value = f"{churn_rate:.1f}%"
+        churn_delta = _fmt_delta(churn_rate, prev_churn_rate, "pp")
+        if single_event_scope:
+            churn_value = "-"
+            churn_delta = "N/A (multi-event trend)"
+
         # Game popularity leaderboard for selected scope
         game_counts = {}
+        configured_games: Dict[str, Dict[str, int]] = {}
         total_entries = 0
         for ev in selected_events:
             breakdown = ev.get("games_breakdown")
-            if not isinstance(breakdown, dict):
-                continue
-            for game, count in breakdown.items():
-                cnt = _as_int(count)
-                if cnt <= 0:
-                    continue
-                game_counts[game] = game_counts.get(game, 0) + cnt
-                total_entries += cnt
+            if isinstance(breakdown, dict):
+                for game, count in breakdown.items():
+                    cnt = _as_int(count)
+                    if cnt <= 0:
+                        continue
+                    normalized_game = _normalize_game_name(game)
+                    if not normalized_game:
+                        continue
+                    game_counts[normalized_game] = game_counts.get(normalized_game, 0) + cnt
+                    total_entries += cnt
 
-        sorted_games = sorted(game_counts.items(), key=lambda kv: (-kv[1], str(kv[0]).lower()))
+            snapshot = ev.get("startgg_snapshot")
+            if isinstance(snapshot, dict):
+                snapshot_events = snapshot.get("events") or []
+                if isinstance(snapshot_events, list):
+                    for snap_ev in snapshot_events:
+                        if not isinstance(snap_ev, dict):
+                            continue
+                        normalized_game = _normalize_game_name(snap_ev.get("name"))
+                        if not normalized_game:
+                            continue
+                        agg = configured_games.setdefault(
+                            normalized_game,
+                            {"registered": 0, "sets": 0, "games": 0, "configured": 0},
+                        )
+                        agg["registered"] += _as_int(snap_ev.get("numEntrants"))
+                        agg["sets"] += _as_int(snap_ev.get("setCount"))
+                        agg["games"] += _as_int(snap_ev.get("gamesPlayed"))
+                        agg["configured"] += 1
+
+        all_games = set(game_counts) | set(configured_games)
+        sorted_games = sorted(
+            all_games,
+            key=lambda g: (
+                -_as_int(game_counts.get(g)),
+                -_as_int((configured_games.get(g) or {}).get("registered")),
+                str(g).lower(),
+            ),
+        )
         games_rows = []
-        for idx, (game, cnt) in enumerate(sorted_games[:20], start=1):
+        for idx, game in enumerate(sorted_games[:20], start=1):
+            cnt = _as_int(game_counts.get(game))
+            cfg = configured_games.get(game) or {}
+            registered = _as_int(cfg.get("registered"))
+            set_count = _as_int(cfg.get("sets"))
+            game_count = _as_int(cfg.get("games"))
             share = (cnt / total_entries * 100) if total_entries > 0 else 0.0
+            # Use games_played as strongest signal for "actually ran".
+            # set_count can be non-zero even when all sets were DQ/never scored.
+            if game_count > 0:
+                run_status = "Played"
+            elif registered > 0 and set_count > 0:
+                run_status = "No games played"
+            elif registered > 0:
+                run_status = "Registered only"
+            elif cfg:
+                run_status = "No entrants"
+            elif cnt > 0:
+                run_status = "Check-ins only"
+            else:
+                run_status = "-"
             games_rows.append(
                 {
                     "rank": idx,
                     "game": game,
                     "entries": cnt,
+                    "registered": registered,
+                    "sets_played": set_count,
+                    "games_played": game_count,
+                    "run_status": run_status,
                     "share": f"{share:.0f}%",
                 }
             )
         games_title = f"Most played games ({len(games_rows)} shown)"
+
+        total_sets_played = sum(_as_int((configured_games.get(g) or {}).get("sets")) for g in all_games)
+        total_games_played = sum(_as_int((configured_games.get(g) or {}).get("games")) for g in all_games)
+        if total_sets_played > 0 or total_games_played > 0:
+            games_title = (
+                f"Most played games ({len(games_rows)} shown, "
+                f"sets: {total_sets_played}, games: {total_games_played})"
+            )
+
+        # Game trend figure (top games across selected events)
+        trend_events = sorted(
+            selected_events,
+            key=lambda ev: (
+                _as_date(ev.get("event_date")) or date.min,
+                str(ev.get("event_slug") or ""),
+            ),
+        )
+        normalized_trend_breakdowns: List[Dict[str, int]] = []
+        trend_totals: Dict[str, int] = {}
+        for ev in trend_events:
+            breakdown = ev.get("games_breakdown")
+            normalized_breakdown: Dict[str, int] = {}
+            if isinstance(breakdown, dict):
+                for game, count in breakdown.items():
+                    cnt = _as_int(count)
+                    if cnt <= 0:
+                        continue
+                    normalized_game = _normalize_game_name(game)
+                    if not normalized_game:
+                        continue
+                    normalized_breakdown[normalized_game] = (
+                        normalized_breakdown.get(normalized_game, 0) + cnt
+                    )
+                    trend_totals[normalized_game] = trend_totals.get(normalized_game, 0) + cnt
+            normalized_trend_breakdowns.append(normalized_breakdown)
+
+        trend_games = [
+            g for g, _ in sorted(trend_totals.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        ]
+        trend_x = []
+        trend_hover_labels: List[str] = []
+        for ev in trend_events:
+            ev_name = ev.get("event_display_name") or ev.get("event_slug") or "event"
+            ev_date = _as_date(ev.get("event_date"))
+            if ev_date:
+                trend_x.append(f"{ev_date.isoformat()} | {ev_name}")
+                trend_hover_labels.append(f"{ev_name} ({ev_date.isoformat()})")
+            else:
+                trend_x.append(str(ev_name))
+                trend_hover_labels.append(str(ev_name))
+        trend_traces = []
+        palette = ["#22d3ee", "#34d399", "#f59e0b", "#f87171", "#a78bfa"]
+        for idx, game in enumerate(trend_games):
+            ys: List[int] = []
+            for breakdown in normalized_trend_breakdowns:
+                ys.append(_as_int(breakdown.get(game)))
+            trend_traces.append(
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "name": game,
+                    "x": trend_x,
+                    "y": ys,
+                    "customdata": [[lbl] for lbl in trend_hover_labels],
+                    "hovertemplate": "%{customdata[0]}<br>%{fullData.name}: %{y}<extra></extra>",
+                    "line": {"width": 2, "color": palette[idx % len(palette)]},
+                    "marker": {"size": 6},
+                }
+            )
+
+        games_trend_figure = {
+            "data": trend_traces,
+            "layout": {
+                "paper_bgcolor": "#0f172a",
+                "plot_bgcolor": "#0f172a",
+                "font": {"color": "#cbd5e1", "size": 11},
+                "margin": {"l": 36, "r": 12, "t": 24, "b": 48},
+                "legend": {"orientation": "h", "y": 1.18, "x": 0},
+                "xaxis": {"showgrid": False, "tickangle": -20},
+                "yaxis": {"showgrid": True, "gridcolor": "#1e293b", "rangemode": "tozero"},
+            },
+        }
+
+        # Biggest mover (second half vs first half)
+        game_mover_text = "Biggest mover: -"
+        if len(trend_events) >= 2:
+            mid = max(len(trend_events) // 2, 1)
+            first_half = trend_events[:mid]
+            second_half = trend_events[mid:]
+            first_counts: Dict[str, int] = {}
+            second_counts: Dict[str, int] = {}
+
+            for ev in first_half:
+                breakdown = ev.get("games_breakdown")
+                if isinstance(breakdown, dict):
+                    for game, count in breakdown.items():
+                        normalized_game = _normalize_game_name(game)
+                        if not normalized_game:
+                            continue
+                        first_counts[normalized_game] = first_counts.get(
+                            normalized_game, 0
+                        ) + _as_int(count)
+
+            for ev in second_half:
+                breakdown = ev.get("games_breakdown")
+                if isinstance(breakdown, dict):
+                    for game, count in breakdown.items():
+                        normalized_game = _normalize_game_name(game)
+                        if not normalized_game:
+                            continue
+                        second_counts[normalized_game] = second_counts.get(
+                            normalized_game, 0
+                        ) + _as_int(count)
+
+            all_games = set(first_counts) | set(second_counts)
+            mover_game = None
+            mover_diff = 0
+            first_den = max(len(first_half), 1)
+            second_den = max(len(second_half), 1)
+            for game in all_games:
+                first_avg = first_counts.get(game, 0) / first_den
+                second_avg = second_counts.get(game, 0) / second_den
+                diff = second_avg - first_avg
+                if abs(diff) > abs(mover_diff):
+                    mover_game = game
+                    mover_diff = diff
+
+            if mover_game:
+                sign = "+" if mover_diff > 0 else ""
+                game_mover_text = (
+                    f"Biggest mover: {mover_game} "
+                    f"({sign}{mover_diff:.1f} avg entries/event vs previous half)"
+                )
+
+        # Game crossover (top pairs)
+        crossover_rows: List[Dict[str, Any]] = []
+        crossover_title = "Game crossover (top pairs)"
+        try:
+            crossover_fn = getattr(storage_api, "get_game_crossover_stats", None)
+            if crossover_fn:
+                crossover_stats = (
+                    crossover_fn(
+                        event_slugs=selected_scope_slugs or None,
+                        start_date=range_start.isoformat() if range_start else None,
+                        end_date=range_end.isoformat() if range_end else None,
+                        limit=20,
+                    )
+                    or []
+                )
+                crossover_merged: Dict[tuple, int] = {}
+                for row in crossover_stats:
+                    game_a = _normalize_game_name(row.get("game_a"))
+                    game_b = _normalize_game_name(row.get("game_b"))
+                    if not game_a or not game_b or game_a == game_b:
+                        continue
+                    a, b = sorted([game_a, game_b])
+                    key = (a, b)
+                    crossover_merged[key] = crossover_merged.get(key, 0) + _as_int(
+                        row.get("shared_players")
+                    )
+
+                merged_rows = sorted(
+                    crossover_merged.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1])
+                )
+                for idx, (pair, shared) in enumerate(merged_rows, start=1):
+                    game_a, game_b = pair
+                    share = (shared / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+                    crossover_rows.append(
+                        {
+                            "rank": idx,
+                            "game_a": game_a,
+                            "game_b": game_b,
+                            "shared_players": shared,
+                            "share": f"{share:.0f}%",
+                        }
+                    )
+                crossover_title = f"Game crossover ({len(crossover_rows)} shown)"
+        except Exception as e:
+            logger.warning(f"Failed to load game crossover stats: {e}")
 
         return (
             series_options,
@@ -1953,12 +3030,49 @@ def register_callbacks(app):
             retention_delta,
             top_game_text,
             added_via_summary,
+            ops_live_note,
             top_players_title,
             top_players_rows,
+            funnel_note,
+            funnel_cards,
             games_title,
             games_rows,
+            game_mover_text,
+            games_trend_figure,
+            crossover_title,
+            crossover_rows,
             table_rows,
             earnings_rows,
+            str(slots),
+            f"{avg_games:.1f}",
+            f"{multigame_pct:.1f}%",
+            str(new_players),
+            str(returning_players),
+            f"{noshow_rate:.1f}%",
+            f"{manual_share:.1f}%",
+            checkin_speed_value,
+            duration_value,
+            growth_value,
+            churn_value,
+            slots_delta,
+            avggames_delta,
+            multigame_delta,
+            new_delta,
+            returning_delta,
+            noshow_delta,
+            manual_delta,
+            checkin_speed_delta,
+            duration_delta,
+            growth_delta,
+            churn_delta,
+            str(core_players),
+            f"{player_lifetime:.1f}",
+            coreplayers_delta,
+            lifetime_delta,
+            summary_core,
+            summary_community,
+            summary_tournament,
+            summary_operations,
         )
 
     @app.callback(
@@ -1969,6 +3083,147 @@ def register_callbacks(app):
         if selected_period == "custom":
             return {"display": "block", "minWidth": "320px"}
         return {"display": "none"}
+
+    @app.callback(
+        Output("insights-kpi-category-filter", "value"),
+        Input("insights-summary-all", "n_clicks"),
+        Input("insights-summary-core", "n_clicks"),
+        Input("insights-summary-community", "n_clicks"),
+        Input("insights-summary-tournament", "n_clicks"),
+        Input("insights-summary-operations", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def select_kpi_category_from_summary(_all, _core, _community, _tournament, _operations):
+        triggered = ctx.triggered_id
+        mapping = {
+            "insights-summary-all": "all",
+            "insights-summary-core": "core",
+            "insights-summary-community": "community",
+            "insights-summary-tournament": "tournament",
+            "insights-summary-operations": "operations",
+        }
+        return mapping.get(triggered, no_update)
+
+    @app.callback(
+        Output("insights-summary-all", "className"),
+        Output("insights-summary-core", "className"),
+        Output("insights-summary-community", "className"),
+        Output("insights-summary-tournament", "className"),
+        Output("insights-summary-operations", "className"),
+        Output("insights-kpi-label-core", "className"),
+        Output("insights-kpi-label-community", "className"),
+        Output("insights-kpi-label-tournament", "className"),
+        Output("insights-kpi-label-operations", "className"),
+        Output("insights-card-total", "className"),
+        Output("insights-card-slots", "className"),
+        Output("insights-card-ready", "className"),
+        Output("insights-card-revenue", "className"),
+        Output("insights-card-new", "className"),
+        Output("insights-card-returning", "className"),
+        Output("insights-card-coreplayers", "className"),
+        Output("insights-card-lifetime", "className"),
+        Output("insights-card-growth", "className"),
+        Output("insights-card-churn", "className"),
+        Output("insights-card-retention", "className"),
+        Output("insights-card-guest", "className"),
+        Output("insights-card-startgg", "className"),
+        Output("insights-card-member", "className"),
+        Output("insights-card-avggames", "className"),
+        Output("insights-card-multigame", "className"),
+        Output("insights-card-noshow", "className"),
+        Output("insights-card-manual", "className"),
+        Output("insights-card-checkinspeed", "className"),
+        Output("insights-card-duration", "className"),
+        Input("insights-kpi-category-filter", "value"),
+        Input("insights-kpi-auto-visibility-toggle", "value"),
+        Input("insights-event-dropdown", "value"),
+    )
+    def filter_insights_kpi_category(selected_category, visibility_flags, selected_event_slugs):
+        mode = (selected_category or "all").strip().lower()
+        if mode not in {"all", "core", "community", "tournament", "operations"}:
+            mode = "all"
+
+        auto_visibility = "auto" in (visibility_flags or [])
+        if isinstance(selected_event_slugs, list):
+            selected_count = len([s for s in selected_event_slugs if s])
+            selected_slug = str(selected_event_slugs[0]) if selected_count == 1 else ""
+        elif selected_event_slugs:
+            selected_count = 1
+            selected_slug = str(selected_event_slugs)
+        else:
+            selected_count = 0
+            selected_slug = ""
+
+        try:
+            active_settings = get_active_settings() or {}
+            active_slug = str(active_settings.get("active_event_slug") or "")
+        except Exception:
+            active_slug = ""
+
+        single_event_scope = selected_count == 1
+        single_active_scope = single_event_scope and selected_slug == active_slug
+
+        show_core = mode in {"all", "core"}
+        show_community = mode in {"all", "community"}
+        show_tournament = mode in {"all", "tournament"}
+        show_operations = mode in {"all", "operations"}
+
+        summary_base = "stat-card-live insights-summary-card"
+        all_summary = f"{summary_base} is-active" if mode == "all" else summary_base
+        core_summary = f"{summary_base} is-active" if mode == "core" else summary_base
+        community_summary = f"{summary_base} is-active" if mode == "community" else summary_base
+        tournament_summary = f"{summary_base} is-active" if mode == "tournament" else summary_base
+        operations_summary = f"{summary_base} is-active" if mode == "operations" else summary_base
+
+        label_visible = "insights-kpi-section-label"
+        label_hidden = "insights-kpi-section-label kpi-hidden"
+        card_visible = "stat-card-live"
+        card_hidden = "stat-card-live kpi-hidden"
+
+        growth_class = card_visible if show_community else card_hidden
+        churn_class = card_visible if show_community else card_hidden
+        checkinspeed_class = card_visible if show_operations else card_hidden
+        duration_class = card_visible if show_operations else card_hidden
+
+        if auto_visibility:
+            if single_event_scope:
+                growth_class = card_hidden
+                churn_class = card_hidden
+            if not single_active_scope:
+                checkinspeed_class = card_hidden
+                duration_class = card_hidden
+
+        return (
+            all_summary,
+            core_summary,
+            community_summary,
+            tournament_summary,
+            operations_summary,
+            label_visible if show_core else label_hidden,
+            label_visible if show_community else label_hidden,
+            label_visible if show_tournament else label_hidden,
+            label_visible if show_operations else label_hidden,
+            card_visible if show_core else card_hidden,
+            card_visible if show_core else card_hidden,
+            card_visible if show_core else card_hidden,
+            card_visible if show_core else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            growth_class,
+            churn_class,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_community else card_hidden,
+            card_visible if show_tournament else card_hidden,
+            card_visible if show_tournament else card_hidden,
+            card_visible if show_tournament else card_hidden,
+            card_visible if show_operations else card_hidden,
+            checkinspeed_class,
+            duration_class,
+        )
 
     @app.callback(
         Output("insights-view-players", "style"),
@@ -2006,8 +3261,42 @@ def register_callbacks(app):
         Input("insights-card-startgg", "n_clicks"),
         Input("insights-card-retention", "n_clicks"),
         Input("insights-card-revenue", "n_clicks"),
+        Input("insights-card-slots", "n_clicks"),
+        Input("insights-card-avggames", "n_clicks"),
+        Input("insights-card-multigame", "n_clicks"),
+        Input("insights-card-new", "n_clicks"),
+        Input("insights-card-returning", "n_clicks"),
+        Input("insights-card-coreplayers", "n_clicks"),
+        Input("insights-card-lifetime", "n_clicks"),
+        Input("insights-card-growth", "n_clicks"),
+        Input("insights-card-churn", "n_clicks"),
+        Input("insights-card-noshow", "n_clicks"),
+        Input("insights-card-manual", "n_clicks"),
+        Input("insights-card-checkinspeed", "n_clicks"),
+        Input("insights-card-duration", "n_clicks"),
     )
-    def show_kpi_help(_total, _ready, _member, _guest, _startgg, _retention, _revenue):
+    def show_kpi_help(
+        _total,
+        _ready,
+        _member,
+        _guest,
+        _startgg,
+        _retention,
+        _revenue,
+        _slots,
+        _avggames,
+        _multigame,
+        _new,
+        _returning,
+        _coreplayers,
+        _lifetime,
+        _growth,
+        _churn,
+        _noshow,
+        _manual,
+        _checkinspeed,
+        _duration,
+    ):
         help_map = {
             "insights-card-total": "Participants: total participant entries in selected period/scope.",
             "insights-card-ready": "Ready Rate: ready participants divided by total participants at archive time.",
@@ -2016,6 +3305,19 @@ def register_callbacks(app):
             "insights-card-startgg": "Start.gg Rate: Start.gg-verified participants divided by total participants.",
             "insights-card-retention": "Retention: returning-player share, weighted by event size.",
             "insights-card-revenue": "Total Revenue: summed event revenue in selected scope.",
+            "insights-card-slots": "Checked-in Slots: total game entries for checked-in participants (3 games = 3 slots).",
+            "insights-card-avggames": "Avg Games / Player: total slots divided by total participants.",
+            "insights-card-multigame": "Multi-Game Players: share of participants playing 2+ games.",
+            "insights-card-new": "New Players: first-time participants in selected scope.",
+            "insights-card-returning": "Returning: players who attended at least one previous event.",
+            "insights-card-coreplayers": "Core Players: players with 3+ distinct events in the rolling 6-month window.",
+            "insights-card-lifetime": "Player Lifetime: average total events attended by players in selected scope.",
+            "insights-card-growth": "Growth Rate: unique attendee growth vs previous period of same length.",
+            "insights-card-churn": "Churn Rate: scoped players whose last_seen is older than 3 months from anchor date.",
+            "insights-card-noshow": "No-Show Rate: Start.gg-registered players who did not check in.",
+            "insights-card-manual": "Manual Share: check-ins added manually via dashboard vs total.",
+            "insights-card-checkinspeed": "Check-in Speed: checked-in participants per minute from check-in opened timestamp.",
+            "insights-card-duration": "Tournament Duration: elapsed time between event start and end timestamps.",
         }
         triggered = ctx.triggered_id
         if triggered in help_map:
@@ -2213,10 +3515,12 @@ def register_callbacks(app):
             return [html.Span("Failed to load.", style={"color": COLORS["text_secondary"]})]
 
         if not history:
-            return [html.Span(
-                "No merges yet.",
-                style={"color": COLORS["text_secondary"], "fontSize": "0.8rem"},
-            )]
+            return [
+                html.Span(
+                    "No merges yet.",
+                    style={"color": COLORS["text_secondary"], "fontSize": "0.8rem"},
+                )
+            ]
 
         items = []
         for entry in history:
@@ -2296,10 +3600,12 @@ def register_callbacks(app):
 
         if not candidates:
             return (
-                [html.Div(
-                    "No potential duplicates found.",
-                    style={"color": COLORS["accent_green"], "padding": "1rem 0"},
-                )],
+                [
+                    html.Div(
+                        "No potential duplicates found.",
+                        style={"color": COLORS["accent_green"], "padding": "1rem 0"},
+                    )
+                ],
                 "",
                 "Potential duplicates (0)",
             )
@@ -2339,13 +3645,21 @@ def register_callbacks(app):
                             html.Div(
                                 style={"flex": "1"},
                                 children=[
-                                    html.Div(a.get("name", "?"), style={
-                                        "color": COLORS["text_primary"],
-                                        "fontWeight": "600", "fontSize": "0.85rem",
-                                    }),
-                                    html.Div(f"Tag: {a.get('tag', '-')}", style={
-                                        "color": COLORS["text_secondary"], "fontSize": "0.75rem",
-                                    }),
+                                    html.Div(
+                                        a.get("name", "?"),
+                                        style={
+                                            "color": COLORS["text_primary"],
+                                            "fontWeight": "600",
+                                            "fontSize": "0.85rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Tag: {a.get('tag', '-')}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.75rem",
+                                        },
+                                    ),
                                     html.Div(
                                         f"Phone: {a.get('telephone', '-') or '-'}  |  "
                                         f"Events: {a.get('total_events', 0)}",
@@ -2358,34 +3672,56 @@ def register_callbacks(app):
                             ),
                             html.Div(
                                 style={
-                                    "display": "flex", "flexDirection": "column",
-                                    "alignItems": "center", "minWidth": "80px",
+                                    "display": "flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "minWidth": "80px",
                                 },
                                 children=[
-                                    html.Div("\u2194", style={
-                                        "fontSize": "1.2rem",
-                                        "color": COLORS["text_secondary"],
-                                    }),
-                                    html.Div(conf.upper(), style={
-                                        "color": conf_color, "fontSize": "0.65rem",
-                                        "fontWeight": "700", "letterSpacing": "0.05em",
-                                    }),
-                                    html.Div(reason_text, style={
-                                        "color": COLORS["text_secondary"],
-                                        "fontSize": "0.65rem", "textAlign": "center",
-                                    }),
+                                    html.Div(
+                                        "\u2194",
+                                        style={
+                                            "fontSize": "1.2rem",
+                                            "color": COLORS["text_secondary"],
+                                        },
+                                    ),
+                                    html.Div(
+                                        conf.upper(),
+                                        style={
+                                            "color": conf_color,
+                                            "fontSize": "0.65rem",
+                                            "fontWeight": "700",
+                                            "letterSpacing": "0.05em",
+                                        },
+                                    ),
+                                    html.Div(
+                                        reason_text,
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.65rem",
+                                            "textAlign": "center",
+                                        },
+                                    ),
                                 ],
                             ),
                             html.Div(
                                 style={"flex": "1", "textAlign": "right"},
                                 children=[
-                                    html.Div(b.get("name", "?"), style={
-                                        "color": COLORS["text_primary"],
-                                        "fontWeight": "600", "fontSize": "0.85rem",
-                                    }),
-                                    html.Div(f"Tag: {b.get('tag', '-')}", style={
-                                        "color": COLORS["text_secondary"], "fontSize": "0.75rem",
-                                    }),
+                                    html.Div(
+                                        b.get("name", "?"),
+                                        style={
+                                            "color": COLORS["text_primary"],
+                                            "fontWeight": "600",
+                                            "fontSize": "0.85rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        f"Tag: {b.get('tag', '-')}",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.75rem",
+                                        },
+                                    ),
                                     html.Div(
                                         f"Phone: {b.get('telephone', '-') or '-'}  |  "
                                         f"Events: {b.get('total_events', 0)}",
@@ -2400,28 +3736,38 @@ def register_callbacks(app):
                     ),
                     html.Div(
                         style={
-                            "display": "flex", "gap": "0.5rem",
-                            "marginTop": "0.6rem", "justifyContent": "flex-end",
+                            "display": "flex",
+                            "gap": "0.5rem",
+                            "marginTop": "0.6rem",
+                            "justifyContent": "flex-end",
                         },
                         children=[
                             html.Button(
                                 f"Keep {a.get('tag', '?')}",
                                 id={"type": "btn-merge", "keep": a["uuid"], "remove": b["uuid"]},
                                 style={
-                                    "backgroundColor": COLORS["accent_green"], "color": "#fff",
-                                    "border": "none", "padding": "0.3rem 0.7rem",
-                                    "borderRadius": "5px", "cursor": "pointer",
-                                    "fontSize": "0.72rem", "fontWeight": "500",
+                                    "backgroundColor": COLORS["accent_green"],
+                                    "color": "#fff",
+                                    "border": "none",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
+                                    "fontWeight": "500",
                                 },
                             ),
                             html.Button(
                                 f"Keep {b.get('tag', '?')}",
                                 id={"type": "btn-merge", "keep": b["uuid"], "remove": a["uuid"]},
                                 style={
-                                    "backgroundColor": COLORS["accent_blue"], "color": "#fff",
-                                    "border": "none", "padding": "0.3rem 0.7rem",
-                                    "borderRadius": "5px", "cursor": "pointer",
-                                    "fontSize": "0.72rem", "fontWeight": "500",
+                                    "backgroundColor": COLORS["accent_blue"],
+                                    "color": "#fff",
+                                    "border": "none",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
+                                    "fontWeight": "500",
                                 },
                             ),
                             html.Button(
@@ -2431,8 +3777,10 @@ def register_callbacks(app):
                                     "backgroundColor": "transparent",
                                     "color": COLORS["text_secondary"],
                                     "border": f"1px solid {COLORS['border']}",
-                                    "padding": "0.3rem 0.7rem", "borderRadius": "5px",
-                                    "cursor": "pointer", "fontSize": "0.72rem",
+                                    "padding": "0.3rem 0.7rem",
+                                    "borderRadius": "5px",
+                                    "cursor": "pointer",
+                                    "fontSize": "0.72rem",
                                 },
                             ),
                         ],
@@ -2618,6 +3966,31 @@ def register_callbacks(app):
         require_membership = settings.get("require_membership") is True
         require_startgg = settings.get("require_startgg") is True
 
+        # Payment toggle should also set payment_amount/payment_expected so revenue is tracked.
+        if col_id == "payment_valid":
+            try:
+                per_game = int(settings.get("swish_expected_per_game") or 0)
+            except Exception:
+                per_game = 0
+
+            raw_games = row.get("tournament_games_registered")
+            if isinstance(raw_games, list):
+                game_count = len([g for g in raw_games if str(g or "").strip()])
+            elif isinstance(raw_games, str):
+                game_count = len([g for g in raw_games.split(",") if str(g or "").strip()])
+            else:
+                game_count = 0
+
+            expected_amount = per_game * max(game_count, 1)
+            if new_val:
+                # Mark as paid: set amount to expected so archive revenue is correct.
+                update_data["payment_expected"] = expected_amount
+                update_data["payment_amount"] = expected_amount
+            else:
+                # Unmark paid: clear paid amount but keep expected for UI context.
+                update_data["payment_expected"] = expected_amount
+                update_data["payment_amount"] = 0
+
         # Determine current field values (with the toggled value updated)
         if col_id == "payment_valid":
             payment_val = new_val
@@ -2652,6 +4025,10 @@ def register_callbacks(app):
             table_data[row_idx][col_id] = "✓" if new_val else "✗"
             if "is_guest" in update_data:
                 table_data[row_idx]["is_guest"] = "✓" if bool(update_data["is_guest"]) else "✗"
+            if "payment_amount" in update_data:
+                table_data[row_idx]["payment_amount"] = update_data["payment_amount"]
+            if "payment_expected" in update_data:
+                table_data[row_idx]["payment_expected"] = update_data["payment_expected"]
             table_data[row_idx]["status"] = new_status
 
             # Broadcast SSE to notify status pages
@@ -3463,6 +4840,7 @@ def register_callbacks(app):
         State("require-membership-toggle", "value"),
         State("require-startgg-toggle", "value"),
         State("offer-membership-toggle", "value"),
+        State("collect-acquisition-source-toggle", "value"),
         State("requirements-store", "data"),
         State("auth-store", "data"),
         prevent_initial_call=True,
@@ -3473,6 +4851,7 @@ def register_callbacks(app):
         req_membership,
         req_startgg,
         offer_membership,
+        collect_acquisition_source,
         current_store,
         auth_state,
     ):
@@ -3498,6 +4877,7 @@ def register_callbacks(app):
             "require_membership": bool(req_membership),
             "require_startgg": bool(req_startgg),
             "offer_membership": bool(offer_membership),
+            "collect_acquisition_source": bool(collect_acquisition_source),
         }
 
         # Update settings
@@ -3512,6 +4892,8 @@ def register_callbacks(app):
                 enabled.append("Membership")
             if req_startgg:
                 enabled.append("Start.gg")
+            if collect_acquisition_source:
+                enabled.append("Acquisition Source")
 
             if enabled:
                 summary = f"Requiring: {', '.join(enabled)}"
@@ -3523,6 +4905,7 @@ def register_callbacks(app):
                 "require_payment": bool(req_payment),
                 "require_membership": bool(req_membership),
                 "require_startgg": bool(req_startgg),
+                "collect_acquisition_source": bool(collect_acquisition_source),
             }
 
             try:
@@ -3555,6 +4938,10 @@ def register_callbacks(app):
                                     (settings_data.get("fields") or {}).get("offer_membership")
                                 ),
                                 "new": bool(offer_membership),
+                            },
+                            "collect_acquisition_source": {
+                                "old": bool(previous.get("collect_acquisition_source")),
+                                "new": bool(collect_acquisition_source),
                             },
                         }
                     ),
@@ -3597,6 +4984,7 @@ def register_callbacks(app):
         req_payment = requirements.get("require_payment", True)
         req_membership = requirements.get("require_membership", True)
         req_startgg = requirements.get("require_startgg", True)
+        collect_source = requirements.get("collect_acquisition_source", False)
 
         # Payment badge
         if req_payment:
@@ -3643,6 +5031,18 @@ def register_callbacks(app):
         else:
             badges.append(html.Span("🎮 Start.gg", style=badge_style_inactive))
 
+        if collect_source:
+            badges.append(
+                html.Span(
+                    "🧭 Source",
+                    style={
+                        **badge_style_active,
+                        "backgroundColor": "rgba(56, 189, 248, 0.2)",
+                        "color": "#38bdf8",
+                    },
+                )
+            )
+
         # If nothing required, add a note
         if not any([req_payment, req_membership, req_startgg]):
             badges.append(
@@ -3661,20 +5061,22 @@ def register_callbacks(app):
         Output("require-payment-toggle", "value"),
         Output("require-membership-toggle", "value"),
         Output("require-startgg-toggle", "value"),
+        Output("collect-acquisition-source-toggle", "value"),
         Input("requirements-store", "data"),
     )
     def sync_checkboxes_with_store(requirements):
         """Sync the settings checkboxes with the requirements store."""
         if not requirements:
             # Default all to True if no store data
-            return [True], [True], [True]
+            return [True], [True], [True], []
 
         # Default to True (checked) unless explicitly False
         payment_val = [True] if requirements.get("require_payment", True) else []
         membership_val = [True] if requirements.get("require_membership", True) else []
         startgg_val = [True] if requirements.get("require_startgg", True) else []
+        source_val = [True] if requirements.get("collect_acquisition_source", False) else []
 
-        return payment_val, membership_val, startgg_val
+        return payment_val, membership_val, startgg_val, source_val
 
     # -------------------------------------------------------------------------
     # Save Payment Settings - update swish_expected_per_game and swish_number
@@ -3753,9 +5155,403 @@ def register_callbacks(app):
         else:
             return html.Span("❌ Failed to save settings", style={"color": "#ef4444"})
 
+    @app.callback(
+        Output("input-checkin-opened-at", "value"),
+        Output("input-event-started-at", "value"),
+        Output("input-event-ended-at", "value"),
+        Input("btn-set-checkin-opened-now", "n_clicks"),
+        Input("btn-set-event-started-now", "n_clicks"),
+        Input("btn-set-event-ended-now", "n_clicks"),
+        State("input-checkin-opened-at", "value"),
+        State("input-event-started-at", "value"),
+        State("input-event-ended-at", "value"),
+        prevent_initial_call=True,
+    )
+    def set_ops_timing_now(
+        _opened_clicks,
+        _started_clicks,
+        _ended_clicks,
+        opened_value,
+        started_value,
+        ended_value,
+    ):
+        now_local = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        trig = ctx.triggered_id
+        if trig == "btn-set-checkin-opened-now":
+            return now_local, started_value, ended_value
+        if trig == "btn-set-event-started-now":
+            return opened_value, now_local, ended_value
+        if trig == "btn-set-event-ended-now":
+            return opened_value, started_value, now_local
+        return opened_value, started_value, ended_value
+
+    @app.callback(
+        Output("ops-timing-feedback", "children"),
+        Input("btn-save-ops-timing", "n_clicks"),
+        State("input-checkin-opened-at", "value"),
+        State("input-event-started-at", "value"),
+        State("input-event-ended-at", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def save_ops_timing(n_clicks, checkin_opened_at, event_started_at, event_ended_at, auth_state):
+        if not n_clicks:
+            return no_update
+
+        settings_data = get_active_settings_with_id()
+        if not settings_data:
+            return html.Span("❌ No active settings found", style={"color": "#ef4444"})
+
+        record_id = settings_data.get("record_id")
+        if not record_id:
+            return html.Span("❌ Could not find settings record", style={"color": "#ef4444"})
+
+        local_tz = datetime.now().astimezone().tzinfo
+
+        def _to_iso(v):
+            if not v:
+                return None
+            txt = str(v).strip()
+            if not txt:
+                return None
+            txt = txt.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(txt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=local_tz)
+            return dt.isoformat()
+
+        try:
+            opened_iso = _to_iso(checkin_opened_at)
+            started_iso = _to_iso(event_started_at)
+            ended_iso = _to_iso(event_ended_at)
+        except Exception:
+            return html.Span(
+                "❌ Invalid datetime format. Use YYYY-MM-DDTHH:MM",
+                style={"color": "#ef4444"},
+            )
+
+        if started_iso and ended_iso and ended_iso < started_iso:
+            return html.Span(
+                "❌ Event ended-at cannot be earlier than started-at",
+                style={"color": "#ef4444"},
+            )
+
+        update_data = {
+            "checkin_opened_at": opened_iso,
+            "event_started_at": started_iso,
+            "event_ended_at": ended_iso,
+        }
+        result = update_settings(record_id, update_data)
+        if not result:
+            return html.Span("❌ Failed to save timing", style={"color": "#ef4444"})
+
+        try:
+            prev_fields = settings_data.get("fields", {}) or {}
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "admin_update_event_timing",
+                "settings",
+                target_event=get_active_slug() or "",
+                details=json.dumps(
+                    {
+                        "checkin_opened_at": {
+                            "old": prev_fields.get("checkin_opened_at"),
+                            "new": opened_iso,
+                        },
+                        "event_started_at": {
+                            "old": prev_fields.get("event_started_at"),
+                            "new": started_iso,
+                        },
+                        "event_ended_at": {
+                            "old": prev_fields.get("event_ended_at"),
+                            "new": ended_iso,
+                        },
+                    }
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for ops timing save: {e}")
+
+        return html.Span("✅ Operations timing saved", style={"color": "#10b981"})
+
+    @app.callback(
+        Output("live-ops-feedback", "children"),
+        Input("btn-live-checkin-opened-now", "n_clicks"),
+        Input("btn-live-event-started-now", "n_clicks"),
+        Input("btn-live-event-ended-now", "n_clicks"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def live_set_ops_now(_open_clicks, _start_clicks, _end_clicks, auth_state):
+        trig = ctx.triggered_id
+        field_map = {
+            "btn-live-checkin-opened-now": "checkin_opened_at",
+            "btn-live-event-started-now": "event_started_at",
+            "btn-live-event-ended-now": "event_ended_at",
+        }
+        labels = {
+            "checkin_opened_at": "Check-in opened",
+            "event_started_at": "Event started",
+            "event_ended_at": "Event ended",
+        }
+
+        key = field_map.get(trig)
+        if not key:
+            return no_update
+
+        settings_data = get_active_settings_with_id()
+        if not settings_data:
+            return html.Span("❌ No active settings found", style={"color": "#ef4444"})
+
+        record_id = settings_data.get("record_id")
+        if not record_id:
+            return html.Span("❌ Could not find settings record", style={"color": "#ef4444"})
+
+        now_iso = datetime.now().astimezone().isoformat()
+        result = update_settings(record_id, {key: now_iso})
+        if not result:
+            return html.Span("❌ Failed to update live timing", style={"color": "#ef4444"})
+
+        try:
+            prev_fields = settings_data.get("fields", {}) or {}
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "admin_update_event_timing",
+                "settings",
+                target_event=get_active_slug() or "",
+                details=json.dumps({key: {"old": prev_fields.get(key), "new": now_iso}}),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for live timing update: {e}")
+
+        return html.Span(f"✅ {labels.get(key, 'Timing')} set to now", style={"color": "#10b981"})
+
+    @app.callback(
+        Output("live-ops-status", "children"),
+        Input("interval-refresh", "n_intervals"),
+        Input("tabs", "value"),
+        Input("event-dropdown", "value"),
+    )
+    def update_live_ops_status(_n_intervals, selected_tab, selected_slug):
+        if selected_tab != "tab-checkins":
+            return no_update
+
+        settings = get_active_settings() or {}
+        slug = selected_slug
+        if not slug or slug == "__ALL__":
+            slug = settings.get("active_event_slug")
+
+        opened_at = settings.get("checkin_opened_at")
+        started_at = settings.get("event_started_at")
+        ended_at = settings.get("event_ended_at")
+        now_utc = datetime.now(timezone.utc)
+
+        chips: List[Any] = []
+
+        def _chip(label: str, value: str, color: str = "#94a3b8") -> Any:
+            return html.Div(
+                style={
+                    "display": "inline-flex",
+                    "gap": "0.35rem",
+                    "alignItems": "center",
+                    "backgroundColor": "#0f172a",
+                    "border": "1px solid #1e293b",
+                    "borderRadius": "999px",
+                    "padding": "0.28rem 0.58rem",
+                },
+                children=[
+                    html.Span(
+                        label,
+                        style={
+                            "fontSize": "0.68rem",
+                            "color": "#94a3b8",
+                            "textTransform": "uppercase",
+                            "letterSpacing": "0.04em",
+                        },
+                    ),
+                    html.Span(
+                        value,
+                        style={"fontSize": "0.76rem", "fontWeight": "600", "color": color},
+                    ),
+                ],
+            )
+
+        if slug and slug != "__ALL__":
+            try:
+                active_rows = get_checkins(slug) or []
+            except Exception:
+                active_rows = []
+            participant_count = len(active_rows)
+            chips.append(_chip("Participants", str(participant_count), "#22d3ee"))
+
+            if opened_at and participant_count > 0:
+                try:
+                    if not isinstance(opened_at, datetime):
+                        opened_at = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                    minutes = max((now_utc - opened_at).total_seconds() / 60.0, 1.0)
+                    speed = participant_count / minutes
+                    chips.append(_chip("Check-in speed", f"{speed:.2f}/min", "#34d399"))
+                except Exception:
+                    chips.append(_chip("Check-in speed", "-"))
+            else:
+                chips.append(_chip("Check-in speed", "-"))
+
+        if started_at:
+            try:
+                if not isinstance(started_at, datetime):
+                    started_at = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                if ended_at:
+                    if not isinstance(ended_at, datetime):
+                        ended_at = datetime.fromisoformat(str(ended_at).replace("Z", "+00:00"))
+                    elapsed = max((ended_at - started_at).total_seconds(), 0.0)
+                    duration_label = "Duration"
+                else:
+                    elapsed = max((now_utc - started_at).total_seconds(), 0.0)
+                    duration_label = "Elapsed"
+                hours = elapsed / 3600.0
+                chips.append(_chip(duration_label, f"{hours:.2f} h", "#60a5fa"))
+            except Exception:
+                chips.append(_chip("Duration", "-"))
+        else:
+            chips.append(_chip("Duration", "-"))
+
+        return chips
+
     # -------------------------------------------------------------------------
     # Archive current event to event_archive + event_stats
     # -------------------------------------------------------------------------
+    @app.callback(
+        Output("recompute-event-feedback", "children"),
+        Input("btn-recompute-event-stats", "n_clicks"),
+        State("event-dropdown", "value"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def recompute_selected_event_stats(n_clicks, selected_slug, auth_state):
+        if not n_clicks:
+            return no_update
+
+        if not selected_slug or selected_slug == "__ALL__":
+            return html.Span(
+                "❌ Select a specific event first.", style={"color": "#ef4444"}
+            )
+
+        recompute_fn = getattr(storage_api, "recompute_event_stats", None)
+        if not recompute_fn:
+            return html.Span(
+                "❌ Recompute is unavailable on current data backend.",
+                style={"color": "#ef4444"},
+            )
+
+        try:
+            result = recompute_fn(
+                selected_slug,
+                user={
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+            )
+        except Exception as e:
+            logger.exception(f"Recompute failed for {selected_slug}: {e}")
+            return html.Span(f"❌ Recompute failed: {e}", style={"color": "#ef4444"})
+
+        warns = result.get("integrity_warnings") or []
+        children = [
+            html.Div(
+                f"✅ Recomputed stats for {result.get('event_slug', selected_slug)}",
+                style={"color": "#10b981"},
+            ),
+            html.Div(
+                f"Participants: {result.get('participants', 0)} | "
+                f"New: {result.get('new_players', 0)} | "
+                f"Returning: {result.get('returning_players', 0)} | "
+                f"Revenue: {result.get('total_revenue', 0)}",
+                style={"color": "#10b981"},
+            ),
+        ]
+        if warns:
+            children.append(
+                html.Div(
+                    f"⚠ Integrity warnings: {'; '.join(str(w) for w in warns)}",
+                    style={"color": "#f59e0b", "marginTop": "0.25rem"},
+                )
+            )
+        return html.Div(children=children, style={"lineHeight": "1.5"})
+
+    @app.callback(
+        Output("scan-integrity-feedback", "children"),
+        Output("integrity-scan-table", "data"),
+        Input("btn-scan-event-integrity", "n_clicks"),
+        State("auth-store", "data"),
+        prevent_initial_call=True,
+    )
+    def scan_archived_event_integrity(n_clicks, auth_state):
+        if not n_clicks:
+            return no_update, no_update
+
+        scan_fn = getattr(storage_api, "scan_event_stats_integrity", None)
+        if not scan_fn:
+            return (
+                html.Span(
+                    "❌ Integrity scan is unavailable on current data backend.",
+                    style={"color": "#ef4444"},
+                ),
+                [],
+            )
+
+        try:
+            rows = scan_fn() or []
+        except Exception as e:
+            logger.exception(f"Integrity scan failed: {e}")
+            return html.Span(f"❌ Integrity scan failed: {e}", style={"color": "#ef4444"}), []
+
+        table_rows = [
+            {
+                "event_slug": r.get("event_slug", ""),
+                "warnings_count": int(r.get("warnings_count") or 0),
+                "warnings_text": "; ".join(str(w) for w in (r.get("warnings") or [])),
+                "archived_at": r.get("archived_at", ""),
+            }
+            for r in rows
+        ]
+
+        try:
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("user_email", ""),
+                },
+                "event_stats_integrity_scanned",
+                "event_stats",
+                details=json.dumps({"scan": True, "issues_found": len(table_rows)}),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for integrity scan: {e}")
+
+        if not table_rows:
+            return (
+                html.Span("✅ No integrity warnings found.", style={"color": "#10b981"}),
+                [],
+            )
+
+        return (
+            html.Span(
+                f"⚠ Found warnings in {len(table_rows)} archived event(s).",
+                style={"color": "#f59e0b"},
+            ),
+            table_rows,
+        )
+
     @app.callback(
         Output("archive-feedback", "children", allow_duplicate=True),
         Output("event-dropdown", "value", allow_duplicate=True),
@@ -3778,7 +5574,9 @@ def register_callbacks(app):
 
         if not selected_slug or selected_slug == "__ALL__":
             return (
-                html.Span("❌ Select a specific event before archiving.", style={"color": "#ef4444"}),
+                html.Span(
+                    "❌ Select a specific event before archiving.", style={"color": "#ef4444"}
+                ),
                 no_update,
                 no_update,
             )
@@ -3786,12 +5584,13 @@ def register_callbacks(app):
         clear_active = "clear" in (clear_flags or [])
 
         settings = get_active_settings() or {}
+        is_selected_active = (settings.get("active_event_slug") or "") == selected_slug
         payload = {
             "event_slug": selected_slug,
-            "event_date": settings.get("event_date"),
-            "event_display_name": settings.get("event_display_name", ""),
+            "event_date": settings.get("event_date") if is_selected_active else None,
+            "event_display_name": settings.get("event_display_name", "") if is_selected_active else "",
             "swish_expected_per_game": settings.get("swish_expected_per_game", 0),
-            "startgg_snapshot": settings.get("events_json"),
+            "startgg_snapshot": settings.get("events_json") if is_selected_active else None,
             "clear_active": clear_active,
             "user": {
                 "user_id": (auth_state or {}).get("user_id", ""),
@@ -3806,7 +5605,11 @@ def register_callbacks(app):
                 result = archive_fn(**payload)
             except Exception as e:
                 logger.exception(f"Archive failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Archive failed: {e}", style={"color": "#ef4444"}), no_update, no_update
+                return (
+                    html.Span(f"❌ Archive failed: {e}", style={"color": "#ef4444"}),
+                    no_update,
+                    no_update,
+                )
         else:
             try:
                 resp = requests.post(
@@ -3826,7 +5629,11 @@ def register_callbacks(app):
                 result = resp.json()
             except Exception as e:
                 logger.exception(f"Archive API call failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"}), no_update, no_update
+                return (
+                    html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"}),
+                    no_update,
+                    no_update,
+                )
 
         clear_dropdown = no_update
         if clear_active:
@@ -3887,6 +5694,18 @@ def register_callbacks(app):
                         f"New: {result.get('new_players', 0)} | Returning: {result.get('returning_players', 0)}"
                     ),
                     html.Div(
+                        "⚠ Integrity warnings: "
+                        + "; ".join(str(w) for w in (result.get("integrity_warnings") or [])),
+                        style={
+                            "color": "#f59e0b",
+                            "display": (
+                                "block"
+                                if bool(result.get("integrity_warnings"))
+                                else "none"
+                            ),
+                        },
+                    ),
+                    html.Div(
                         f"Replaced rows: {result.get('replaced_rows', 0)} | "
                         f"Cleared active: {result.get('cleared_active', 0)}"
                     ),
@@ -3917,7 +5736,8 @@ def register_callbacks(app):
         if not selected_slug:
             return (
                 html.Span(
-                    "⚠️ Select an archived event from the dropdown first.", style={"color": "#f59e0b"}
+                    "⚠️ Select an archived event from the dropdown first.",
+                    style={"color": "#f59e0b"},
                 ),
                 no_update,
                 no_update,
@@ -3941,7 +5761,12 @@ def register_callbacks(app):
                 result = reopen_fn(**payload)
             except Exception as e:
                 logger.exception(f"Reopen failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Reopen failed: {e}", style={"color": "#ef4444"}), no_update, no_update, no_update
+                return (
+                    html.Span(f"❌ Reopen failed: {e}", style={"color": "#ef4444"}),
+                    no_update,
+                    no_update,
+                    no_update,
+                )
         else:
             try:
                 resp = requests.post(
@@ -3962,7 +5787,12 @@ def register_callbacks(app):
                 result = resp.json()
             except Exception as e:
                 logger.exception(f"Reopen API call failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"}), no_update, no_update, no_update
+                return (
+                    html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"}),
+                    no_update,
+                    no_update,
+                    no_update,
+                )
 
         try:
             storage_api.log_action(
@@ -3986,21 +5816,18 @@ def register_callbacks(app):
 
         # Update main event dropdown with the reopened slug
         from shared.storage import get_all_event_slugs
+
         all_slugs = get_all_event_slugs() or []
         if selected_slug not in all_slugs:
             all_slugs = [selected_slug] + all_slugs
-        dropdown_options = [
-            {"label": s.replace("-", " ").title(), "value": s} for s in all_slugs
-        ]
+        dropdown_options = [{"label": s.replace("-", " ").title(), "value": s} for s in all_slugs]
 
         return (
             html.Div(
                 style={"color": "#10b981", "lineHeight": "1.5"},
                 children=[
                     html.Div(f"✅ Reopened event: {result.get('event_slug', selected_slug)}"),
-                    html.Div(
-                        f"Restored rows: {result.get('restored_rows', 0)}"
-                    ),
+                    html.Div(f"Restored rows: {result.get('restored_rows', 0)}"),
                 ],
             ),
             dropdown_options,

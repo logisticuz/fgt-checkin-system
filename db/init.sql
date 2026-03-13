@@ -29,6 +29,10 @@ CREATE TABLE settings (
     require_membership      BOOLEAN DEFAULT false,
     require_startgg         BOOLEAN DEFAULT false,
     offer_membership        BOOLEAN DEFAULT false,
+    collect_acquisition_source BOOLEAN DEFAULT false,
+    checkin_opened_at       TIMESTAMPTZ,
+    event_started_at        TIMESTAMPTZ,
+    event_ended_at          TIMESTAMPTZ,
     created_at              TIMESTAMPTZ DEFAULT now(),
     updated_at              TIMESTAMPTZ DEFAULT now()
 );
@@ -56,6 +60,7 @@ CREATE TABLE active_event_data (
     startgg_event_id                TEXT,
     is_guest                        BOOLEAN DEFAULT false,
     added_via                       TEXT DEFAULT 'unknown',
+    acquisition_source              TEXT,
     player_uuid                     TEXT,
     created                         TIMESTAMPTZ DEFAULT now()
 );
@@ -92,6 +97,7 @@ CREATE TABLE event_archive (
     startgg_event_id                TEXT,
     is_guest                        BOOLEAN DEFAULT false,
     added_via                       TEXT DEFAULT 'unknown',
+    acquisition_source              TEXT,
     -- Archive metadata
     archived_at                     TIMESTAMPTZ DEFAULT now(),
     player_uuid                     TEXT,

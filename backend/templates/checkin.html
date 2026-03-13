@@ -323,6 +323,19 @@
         <div id="ci-pnr-error" style="color: #f44336; font-size: 0.8rem; min-height: 1.1rem;"></div>
       </div>
 
+      <div class="form-group" id="acquisition-source-group">
+        <label for="acquisition_source">How did you hear about this event?</label>
+        <select id="acquisition_source" name="acquisition_source">
+          <option value="">Select one</option>
+          <option value="friend">Friend</option>
+          <option value="discord">Discord</option>
+          <option value="startgg">Start.gg</option>
+          <option value="social">Social Media</option>
+          <option value="venue">At Venue</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+
       <div class="consent">
         <input type="checkbox" id="consent" required>
         <span id="consent-text">I consent to my data being used to validate tournament registration.</span>
@@ -433,13 +446,17 @@
     const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
     const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
     const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
+    const COLLECT_ACQUISITION_SOURCE = {{ collect_acquisition_source | default(false) | tojson }};
 
-    // Kiosk mode - auto-redirect back to start after check-in
-    const KIOSK_MODE = {{ kiosk | default(false) | tojson }};
+    // Kiosk mode - inferred from backend route and/or explicit query param.
+    // Clear stale kiosk flag when browsing normal mode.
+    const URL_KIOSK = new URLSearchParams(window.location.search).get("kiosk") === "true";
+    const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || URL_KIOSK;
 
-    // Store kiosk mode in sessionStorage so it persists through redirects
     if (KIOSK_MODE) {
       sessionStorage.setItem("kioskMode", "true");
+    } else {
+      sessionStorage.removeItem("kioskMode");
     }
 
     // Hide personnummer field if membership not required
@@ -448,6 +465,12 @@
     } else {
       // Make personnummer required if membership is required
       document.getElementById("personnummer").setAttribute("required", "");
+    }
+
+    if (!COLLECT_ACQUISITION_SOURCE) {
+      document.getElementById("acquisition-source-group").style.display = "none";
+    } else {
+      document.getElementById("acquisition_source").setAttribute("required", "");
     }
 
     // Update consent text based on active requirements
@@ -494,6 +517,9 @@
         telefon: document.getElementById("telefon").value,
         tag: document.getElementById("tag").value,
         personnummer: document.getElementById("personnummer").value,
+        acquisition_source: COLLECT_ACQUISITION_SOURCE
+          ? document.getElementById("acquisition_source").value
+          : "",
       };
 
       // Validate
@@ -574,7 +600,8 @@
 
           // Include event slug in URL for register page
           const eventSlug = data.slug ? `&event=${encodeURIComponent(data.slug)}` : "";
-          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}`;
+          const kioskQ = KIOSK_MODE ? "&kiosk=true" : "";
+          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}${kioskQ}`;
           window.location.href = `/register?${qs}`;
         }
       } catch (err) {

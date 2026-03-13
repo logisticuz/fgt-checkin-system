@@ -26,6 +26,7 @@ MAX_LENGTHS = {
     "nick": 30,
     "email": 254,  # RFC 5321
     "discord": 50,
+    "acquisition_source": 32,
 }
 
 # === Valid "missing" keys (normalized to English) ===
@@ -171,7 +172,7 @@ def sanitize_checkin_payload(data: dict) -> dict:
     result = data.copy()
 
     # String fields to trim
-    string_fields = ["namn", "name", "tag", "nick", "email", "discord"]
+    string_fields = ["namn", "name", "tag", "nick", "email", "discord", "acquisition_source"]
     for field in string_fields:
         if field in result and isinstance(result[field], str):
             result[field] = sanitize_string(result[field], field)

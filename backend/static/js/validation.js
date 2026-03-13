@@ -14,6 +14,7 @@ const Validation = {
     nick: 30,
     email: 254,
     discord: 50,
+    acquisition_source: 32,
   },
 
   /**
@@ -136,7 +137,7 @@ const Validation = {
     const result = { ...data };
 
     // String fields (support both Swedish and English field names for backward compat)
-    ["namn", "name", "tag", "nick", "email", "discord"].forEach((field) => {
+    ["namn", "name", "tag", "nick", "email", "discord", "acquisition_source"].forEach((field) => {
       if (result[field]) {
         result[field] = this.sanitizeString(result[field], field);
       }

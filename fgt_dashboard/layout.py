@@ -15,6 +15,7 @@ from shared.storage import (
 )
 import pandas as pd
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +318,24 @@ def create_layout():
         else (active_slug.replace("-", " ").title() if active_slug else "No Event Selected")
     )
 
+    def _fmt_dt_local(value):
+        if not value:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%dT%H:%M")
+        txt = str(value).strip()
+        if not txt:
+            return ""
+        txt = txt.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(txt).strftime("%Y-%m-%dT%H:%M")
+        except Exception:
+            return ""
+
+    checkin_opened_local = _fmt_dt_local(settings.get("checkin_opened_at"))
+    event_started_local = _fmt_dt_local(settings.get("event_started_at"))
+    event_ended_local = _fmt_dt_local(settings.get("event_ended_at"))
+
     # Build visible columns based on active requirements
     default_columns = [
         "name",
@@ -352,6 +371,8 @@ def create_layout():
                     "require_payment": settings.get("require_payment") is True,
                     "require_membership": settings.get("require_membership") is True,
                     "require_startgg": settings.get("require_startgg") is True,
+                    "collect_acquisition_source": settings.get("collect_acquisition_source")
+                    is True,
                 },
             ),
             dcc.Interval(
@@ -581,7 +602,51 @@ def create_layout():
                                                     "color": COLORS["accent_red"],
                                                 },
                                             ),
+                                            html.Button(
+                                                "Check-in Opened Now",
+                                                id="btn-live-checkin-opened-now",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_secondary"],
+                                                    "height": "38px",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Start Event Now",
+                                                id="btn-live-event-started-now",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_secondary"],
+                                                    "height": "38px",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "End Event Now",
+                                                id="btn-live-event-ended-now",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_secondary"],
+                                                    "height": "38px",
+                                                },
+                                            ),
                                         ],
+                                    ),
+                                    html.Div(
+                                        id="live-ops-feedback",
+                                        style={
+                                            "color": COLORS["text_secondary"],
+                                            "fontSize": "0.78rem",
+                                            "marginBottom": "0.75rem",
+                                        },
+                                    ),
+                                    html.Div(
+                                        id="live-ops-status",
+                                        style={
+                                            "display": "flex",
+                                            "gap": "0.6rem",
+                                            "flexWrap": "wrap",
+                                            "marginBottom": "0.9rem",
+                                        },
                                     ),
                                     # Active requirements indicator
                                     html.Div(
@@ -1716,9 +1781,158 @@ def create_layout():
                                                 ],
                                             ),
                                             html.Div(
+                                                id="insights-kpi-summary-row",
+                                                children=[
+                                                    html.Div(
+                                                        id="insights-summary-core",
+                                                        n_clicks=0,
+                                                        className="stat-card-live insights-summary-card is-active",
+                                                        children=[
+                                                            html.P(
+                                                                "Core Event",
+                                                                className="insights-summary-title",
+                                                            ),
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-summary-core-value",
+                                                                className="insights-summary-value",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-summary-community",
+                                                        n_clicks=0,
+                                                        className="stat-card-live insights-summary-card",
+                                                        children=[
+                                                            html.P(
+                                                                "Community Health",
+                                                                className="insights-summary-title",
+                                                            ),
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-summary-community-value",
+                                                                className="insights-summary-value",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-summary-tournament",
+                                                        n_clicks=0,
+                                                        className="stat-card-live insights-summary-card",
+                                                        children=[
+                                                            html.P(
+                                                                "Tournament Health",
+                                                                className="insights-summary-title",
+                                                            ),
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-summary-tournament-value",
+                                                                className="insights-summary-value",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-summary-operations",
+                                                        n_clicks=0,
+                                                        className="stat-card-live insights-summary-card",
+                                                        children=[
+                                                            html.P(
+                                                                "Operations",
+                                                                className="insights-summary-title",
+                                                            ),
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-summary-operations-value",
+                                                                className="insights-summary-value",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-summary-all",
+                                                        n_clicks=0,
+                                                        className="stat-card-live insights-summary-card insights-summary-all",
+                                                        children=[
+                                                            html.P(
+                                                                "All",
+                                                                className="insights-summary-title",
+                                                            ),
+                                                            html.P(
+                                                                "Show every KPI group",
+                                                                id="insights-summary-all-value",
+                                                                className="insights-summary-value",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="insights-kpi-category-filter-wrap",
+                                                style={"margin": "0.35rem 0 0.75rem"},
+                                                children=[
+                                                    dcc.RadioItems(
+                                                        id="insights-kpi-category-filter",
+                                                        options=[
+                                                            {"label": "All", "value": "all"},
+                                                            {"label": "Core", "value": "core"},
+                                                            {
+                                                                "label": "Community",
+                                                                "value": "community",
+                                                            },
+                                                            {
+                                                                "label": "Tournament",
+                                                                "value": "tournament",
+                                                            },
+                                                            {
+                                                                "label": "Operations",
+                                                                "value": "operations",
+                                                            },
+                                                        ],
+                                                        value="core",
+                                                        inline=True,
+                                                        labelStyle={
+                                                            "marginRight": "0.75rem",
+                                                            "fontSize": "0.75rem",
+                                                            "color": COLORS["text_secondary"],
+                                                        },
+                                                        inputStyle={"marginRight": "0.3rem"},
+                                                    ),
+                                                    dcc.Checklist(
+                                                        id="insights-kpi-auto-visibility-toggle",
+                                                        options=[
+                                                            {
+                                                                "label": "Auto-hide not relevant KPIs",
+                                                                "value": "auto",
+                                                            }
+                                                        ],
+                                                        value=["auto"],
+                                                        persistence=True,
+                                                        persistence_type="local",
+                                                        style={
+                                                            "marginTop": "0.45rem",
+                                                            "fontSize": "0.74rem",
+                                                            "color": COLORS["text_muted"],
+                                                        },
+                                                        inputStyle={"marginRight": "0.3rem"},
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
                                                 id="insights-kpi-grid",
                                                 style={"gap": "0.75rem", "marginBottom": "0.65rem"},
                                                 children=[
+                                                    html.Div(
+                                                        id="insights-kpi-label-core",
+                                                        className="insights-kpi-section-label",
+                                                        children="Core Event",
+                                                        style={
+                                                            "gridColumn": "1 / -1",
+                                                            "fontSize": "0.7rem",
+                                                            "color": COLORS["text_muted"],
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "marginBottom": "0.3rem",
+                                                        },
+                                                    ),
                                                     html.Div(
                                                         id="insights-card-total",
                                                         n_clicks=0,
@@ -1741,7 +1955,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Entries",
+                                                                "Participants",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -1761,6 +1975,42 @@ def create_layout():
                                                                     "fontSize": "0.72rem",
                                                                     "marginTop": "0.15rem",
                                                                     "fontWeight": "600",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-slots",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #06b6d4",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0",
+                                                                id="insights-kpi-slots",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#06b6d4",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Checked-in Slots",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-slots-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
                                                                 },
                                                             ),
                                                         ],
@@ -1802,35 +2052,299 @@ def create_layout():
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        id="insights-card-member",
+                                                        id="insights-card-revenue",
                                                         n_clicks=0,
                                                         className="stat-card-live",
                                                         style={
                                                             **STYLES["stat_card"],
                                                             "minWidth": "0",
                                                             "padding": "0.8rem 0.65rem",
-                                                            "borderTop": f"3px solid {COLORS['accent_purple']}",
+                                                            "borderTop": "3px solid #818cf8",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0 kr",
+                                                                id="insights-kpi-revenue",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.6rem",
+                                                                    "color": "#818cf8",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Total Revenue",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-revenue-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-kpi-label-community",
+                                                        className="insights-kpi-section-label",
+                                                        children="Community Health",
+                                                        style={
+                                                            "gridColumn": "1 / -1",
+                                                            "fontSize": "0.7rem",
+                                                            "color": COLORS["text_muted"],
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "marginTop": "0.2rem",
+                                                            "marginBottom": "0.3rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-new",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #34d399",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0",
+                                                                id="insights-kpi-new",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#34d399",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "New Players",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-new-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-returning",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #fb923c",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0",
+                                                                id="insights-kpi-returning",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#fb923c",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Returning",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-returning-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-coreplayers",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #22c55e",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0",
+                                                                id="insights-kpi-coreplayers",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#22c55e",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Core Players",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-coreplayers-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-lifetime",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #38bdf8",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0.0",
+                                                                id="insights-kpi-lifetime",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#38bdf8",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Player Lifetime",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-lifetime-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-growth",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #38bdf8",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-kpi-growth",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#38bdf8",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Growth Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-growth-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-churn",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #f43f5e",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-kpi-churn",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#f43f5e",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Churn Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-churn-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-retention",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": f"3px solid {COLORS['accent_red']}",
                                                             "cursor": "pointer",
                                                         },
                                                         children=[
                                                             html.P(
                                                                 "0%",
-                                                                id="insights-kpi-memberrate",
+                                                                id="insights-kpi-retention",
                                                                 style={
                                                                     **STYLES["stat_value"],
                                                                     "fontSize": "1.85rem",
-                                                                    "color": COLORS[
-                                                                        "accent_purple"
-                                                                    ],
+                                                                    "color": COLORS["accent_red"],
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Member Rate",
+                                                                "Retention",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
                                                                 "",
-                                                                id="insights-kpi-memberrate-delta",
+                                                                id="insights-kpi-retention-delta",
                                                                 style={
                                                                     "color": COLORS["text_muted"],
                                                                     "fontSize": "0.72rem",
@@ -1914,33 +2428,35 @@ def create_layout():
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        id="insights-card-retention",
+                                                        id="insights-card-member",
                                                         n_clicks=0,
                                                         className="stat-card-live",
                                                         style={
                                                             **STYLES["stat_card"],
                                                             "minWidth": "0",
                                                             "padding": "0.8rem 0.65rem",
-                                                            "borderTop": f"3px solid {COLORS['accent_red']}",
+                                                            "borderTop": f"3px solid {COLORS['accent_purple']}",
                                                             "cursor": "pointer",
                                                         },
                                                         children=[
                                                             html.P(
                                                                 "0%",
-                                                                id="insights-kpi-retention",
+                                                                id="insights-kpi-memberrate",
                                                                 style={
                                                                     **STYLES["stat_value"],
                                                                     "fontSize": "1.85rem",
-                                                                    "color": COLORS["accent_red"],
+                                                                    "color": COLORS[
+                                                                        "accent_purple"
+                                                                    ],
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Retention",
+                                                                "Member Rate",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
                                                                 "",
-                                                                id="insights-kpi-retention-delta",
+                                                                id="insights-kpi-memberrate-delta",
                                                                 style={
                                                                     "color": COLORS["text_muted"],
                                                                     "fontSize": "0.72rem",
@@ -1950,33 +2466,241 @@ def create_layout():
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        id="insights-card-revenue",
+                                                        id="insights-kpi-label-tournament",
+                                                        className="insights-kpi-section-label",
+                                                        children="Tournament Health",
+                                                        style={
+                                                            "gridColumn": "1 / -1",
+                                                            "fontSize": "0.7rem",
+                                                            "color": COLORS["text_muted"],
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "marginTop": "0.2rem",
+                                                            "marginBottom": "0.3rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-avggames",
                                                         n_clicks=0,
                                                         className="stat-card-live",
                                                         style={
                                                             **STYLES["stat_card"],
                                                             "minWidth": "0",
                                                             "padding": "0.8rem 0.65rem",
-                                                            "borderTop": "3px solid #818cf8",
+                                                            "borderTop": "3px solid #f97316",
                                                             "cursor": "pointer",
                                                         },
                                                         children=[
                                                             html.P(
-                                                                "0 kr",
-                                                                id="insights-kpi-revenue",
+                                                                "0.0",
+                                                                id="insights-kpi-avggames",
                                                                 style={
                                                                     **STYLES["stat_value"],
-                                                                    "fontSize": "1.6rem",
-                                                                    "color": "#818cf8",
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#f97316",
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Total Revenue",
+                                                                "Avg Games / Player",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
                                                                 "",
-                                                                id="insights-kpi-revenue-delta",
+                                                                id="insights-kpi-avggames-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-multigame",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #ec4899",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0.0%",
+                                                                id="insights-kpi-multigame",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#ec4899",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Multi-Game Players",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-multigame-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-noshow",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #f87171",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0.0%",
+                                                                id="insights-kpi-noshow",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#f87171",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "No-Show Rate",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-noshow-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-kpi-label-operations",
+                                                        className="insights-kpi-section-label",
+                                                        children="Operations",
+                                                        style={
+                                                            "gridColumn": "1 / -1",
+                                                            "fontSize": "0.7rem",
+                                                            "color": COLORS["text_muted"],
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "marginTop": "0.2rem",
+                                                            "marginBottom": "0.3rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-manual",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #94a3b8",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "0.0%",
+                                                                id="insights-kpi-manual",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#94a3b8",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Manual Share",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-manual-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-checkinspeed",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #22d3ee",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-kpi-checkinspeed",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#22d3ee",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Check-in Speed",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-checkinspeed-delta",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "0.35rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-card-duration",
+                                                        n_clicks=0,
+                                                        className="stat-card-live",
+                                                        style={
+                                                            **STYLES["stat_card"],
+                                                            "minWidth": "0",
+                                                            "padding": "0.8rem 0.65rem",
+                                                            "borderTop": "3px solid #60a5fa",
+                                                            "cursor": "pointer",
+                                                        },
+                                                        children=[
+                                                            html.P(
+                                                                "-",
+                                                                id="insights-kpi-duration",
+                                                                style={
+                                                                    **STYLES["stat_value"],
+                                                                    "fontSize": "1.85rem",
+                                                                    "color": "#60a5fa",
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Tournament Duration",
+                                                                style=STYLES["stat_label"],
+                                                            ),
+                                                            html.P(
+                                                                "",
+                                                                id="insights-kpi-duration-delta",
                                                                 style={
                                                                     "color": COLORS["text_muted"],
                                                                     "fontSize": "0.72rem",
@@ -1993,6 +2717,14 @@ def create_layout():
                                                     "color": COLORS["text_muted"],
                                                     "fontSize": "0.78rem",
                                                     "marginBottom": "0.9rem",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="insights-ops-live-note",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "fontSize": "0.76rem",
+                                                    "marginBottom": "0.75rem",
                                                 },
                                             ),
                                             html.Div(
@@ -2015,20 +2747,53 @@ def create_layout():
                                                                     "fontWeight": "600",
                                                                 },
                                                             ),
-                                                            dcc.Dropdown(
-                                                                id="insights-top-players-limit",
-                                                                options=[
-                                                                    {"label": "15", "value": 15},
-                                                                    {"label": "30", "value": 30},
-                                                                    {"label": "50", "value": 50},
-                                                                    {"label": "All", "value": "all"},
-                                                                ],
-                                                                value=15,
-                                                                clearable=False,
+                                                            html.Div(
                                                                 style={
+                                                                    "display": "flex",
+                                                                    "flexDirection": "column",
+                                                                    "gap": "0.2rem",
                                                                     "minWidth": "120px",
-                                                                    "fontSize": "0.78rem",
                                                                 },
+                                                                children=[
+                                                                    html.Div(
+                                                                        "Rows shown",
+                                                                        style={
+                                                                            "color": COLORS[
+                                                                                "text_muted"
+                                                                            ],
+                                                                            "fontSize": "0.68rem",
+                                                                            "textTransform": "uppercase",
+                                                                            "letterSpacing": "0.04em",
+                                                                        },
+                                                                    ),
+                                                                    dcc.Dropdown(
+                                                                        id="insights-top-players-limit",
+                                                                        className="fgc-dropdown",
+                                                                        options=[
+                                                                            {
+                                                                                "label": "15",
+                                                                                "value": 15,
+                                                                            },
+                                                                            {
+                                                                                "label": "30",
+                                                                                "value": 30,
+                                                                            },
+                                                                            {
+                                                                                "label": "50",
+                                                                                "value": 50,
+                                                                            },
+                                                                            {
+                                                                                "label": "All",
+                                                                                "value": "all",
+                                                                            },
+                                                                        ],
+                                                                        value=15,
+                                                                        clearable=False,
+                                                                        style={
+                                                                            "fontSize": "0.78rem",
+                                                                        },
+                                                                    ),
+                                                                ],
                                                             ),
                                                         ],
                                                     ),
@@ -2078,6 +2843,42 @@ def create_layout():
                                                             },
                                                         ],
                                                     ),
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "marginBottom": "0.45rem",
+                                                            "gap": "0.6rem",
+                                                            "flexWrap": "wrap",
+                                                        },
+                                                        children=[
+                                                            html.Div(
+                                                                "Player funnel",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "fontSize": "0.84rem",
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                id="insights-player-funnel-note",
+                                                                style={
+                                                                    "color": COLORS["text_muted"],
+                                                                    "fontSize": "0.72rem",
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-player-funnel",
+                                                        style={
+                                                            "display": "grid",
+                                                            "gridTemplateColumns": "repeat(3, minmax(160px, 1fr))",
+                                                            "gap": "0.55rem",
+                                                            "marginBottom": "0.9rem",
+                                                        },
+                                                    ),
                                                 ],
                                             ),
                                             html.Div(
@@ -2115,7 +2916,9 @@ def create_layout():
                                                             html.Div(
                                                                 id="insights-added-via-summary",
                                                                 style={
-                                                                    "color": COLORS["text_secondary"],
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
                                                                     "fontSize": "0.78rem",
                                                                     "padding": "0.25rem 0.55rem",
                                                                     "border": f"1px solid {COLORS['border']}",
@@ -2130,7 +2933,26 @@ def create_layout():
                                                         columns=[
                                                             {"name": "#", "id": "rank"},
                                                             {"name": "Game", "id": "game"},
-                                                            {"name": "Entries", "id": "entries"},
+                                                            {
+                                                                "name": "Check-ins",
+                                                                "id": "entries",
+                                                            },
+                                                            {
+                                                                "name": "Registered",
+                                                                "id": "registered",
+                                                            },
+                                                            {
+                                                                "name": "Sets played",
+                                                                "id": "sets_played",
+                                                            },
+                                                            {
+                                                                "name": "Games played",
+                                                                "id": "games_played",
+                                                            },
+                                                            {
+                                                                "name": "Run status",
+                                                                "id": "run_status",
+                                                            },
                                                             {"name": "Share", "id": "share"},
                                                         ],
                                                         data=[],
@@ -2149,6 +2971,76 @@ def create_layout():
                                                             "letterSpacing": "0.05em",
                                                             "padding": "0.7rem",
                                                             "borderBottom": f"2px solid {COLORS['accent_yellow']}",
+                                                        },
+                                                        style_cell={
+                                                            "backgroundColor": COLORS["bg_card"],
+                                                            "color": COLORS["text_primary"],
+                                                            "border": "none",
+                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                            "padding": "0.62rem 0.8rem",
+                                                            "fontSize": "0.78rem",
+                                                            "textAlign": "left",
+                                                        },
+                                                        style_data_conditional=[
+                                                            {
+                                                                "if": {"row_index": "odd"},
+                                                                "backgroundColor": COLORS[
+                                                                    "bg_dark"
+                                                                ],
+                                                            },
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-game-mover",
+                                                        style={
+                                                            "color": COLORS["text_secondary"],
+                                                            "fontSize": "0.76rem",
+                                                            "marginBottom": "0.5rem",
+                                                        },
+                                                    ),
+                                                    dcc.Graph(
+                                                        id="insights-games-trend",
+                                                        config={"displayModeBar": False},
+                                                        style={
+                                                            "height": "260px",
+                                                            "marginBottom": "0.75rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-crossover-title",
+                                                        style={
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "marginBottom": "0.45rem",
+                                                        },
+                                                    ),
+                                                    dash_table.DataTable(
+                                                        id="insights-crossover-table",
+                                                        columns=[
+                                                            {"name": "#", "id": "rank"},
+                                                            {"name": "Game A", "id": "game_a"},
+                                                            {"name": "Game B", "id": "game_b"},
+                                                            {
+                                                                "name": "Shared players",
+                                                                "id": "shared_players",
+                                                            },
+                                                            {"name": "Share", "id": "share"},
+                                                        ],
+                                                        data=[],
+                                                        page_size=8,
+                                                        style_table={
+                                                            "overflowX": "auto",
+                                                            "marginBottom": "1rem",
+                                                        },
+                                                        style_header={
+                                                            "backgroundColor": COLORS["bg_dark"],
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.72rem",
+                                                            "textTransform": "uppercase",
+                                                            "letterSpacing": "0.05em",
+                                                            "padding": "0.7rem",
+                                                            "borderBottom": f"2px solid {COLORS['accent_blue']}",
                                                         },
                                                         style_cell={
                                                             "backgroundColor": COLORS["bg_card"],
@@ -2199,9 +3091,9 @@ def create_layout():
                                                                 "id": "member_rate",
                                                             },
                                                             {
-                                                            "name": "Start.gg Accounts %",
-                                                            "id": "startgg_rate",
-                                                        },
+                                                                "name": "Start.gg Accounts %",
+                                                                "id": "startgg_rate",
+                                                            },
                                                             {
                                                                 "name": "Retention %",
                                                                 "id": "retention_rate",
@@ -2344,7 +3236,9 @@ def create_layout():
                                                                 id="btn-scan-duplicates",
                                                                 n_clicks=0,
                                                                 style={
-                                                                    "backgroundColor": COLORS["accent_blue"],
+                                                                    "backgroundColor": COLORS[
+                                                                        "accent_blue"
+                                                                    ],
                                                                     "color": "#fff",
                                                                     "border": "none",
                                                                     "padding": "0.4rem 0.9rem",
@@ -2389,7 +3283,9 @@ def create_layout():
                                                             html.Span(
                                                                 "No merges yet.",
                                                                 style={
-                                                                    "color": COLORS["text_secondary"],
+                                                                    "color": COLORS[
+                                                                        "text_secondary"
+                                                                    ],
                                                                     "fontSize": "0.8rem",
                                                                 },
                                                             )
@@ -2667,6 +3563,53 @@ def create_layout():
                                                     ),
                                                 ],
                                             ),
+                                            html.Div(
+                                                style={
+                                                    "marginBottom": "1.5rem",
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "0.75rem",
+                                                },
+                                                children=[
+                                                    dcc.Checklist(
+                                                        id="collect-acquisition-source-toggle",
+                                                        options=[{"label": "", "value": True}],
+                                                        value=(
+                                                            [True]
+                                                            if settings.get(
+                                                                "collect_acquisition_source"
+                                                            )
+                                                            is True
+                                                            else []
+                                                        ),
+                                                        style={"display": "inline-block"},
+                                                        inputStyle={
+                                                            "width": "18px",
+                                                            "height": "18px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Span(
+                                                                "Collect Acquisition Source (optional)",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Ask how the player found the event (friend/discord/start.gg/etc).",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "fontSize": "0.75rem",
+                                                                    "color": COLORS["text_muted"],
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
                                             html.Button(
                                                 "Save Requirements",
                                                 id="btn-save-requirements",
@@ -2764,6 +3707,157 @@ def create_layout():
                                             html.Div(
                                                 id="payment-settings-feedback",
                                                 style={"marginTop": "1rem"},
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        style=STYLES["card"],
+                                        children=[
+                                            html.H3(
+                                                "Operations Timing", style=STYLES["section_title"]
+                                            ),
+                                            html.P(
+                                                "Track check-in opening and tournament start/end for live operations KPIs.",
+                                                style={
+                                                    "color": COLORS["text_secondary"],
+                                                    "marginBottom": "1rem",
+                                                },
+                                            ),
+                                            html.Div(
+                                                style={
+                                                    "display": "grid",
+                                                    "gridTemplateColumns": "repeat(auto-fit, minmax(230px, 1fr))",
+                                                    "gap": "0.8rem",
+                                                },
+                                                children=[
+                                                    html.Div(
+                                                        children=[
+                                                            html.Label(
+                                                                "Check-in opened at",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                    "marginBottom": "0.35rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Input(
+                                                                id="input-checkin-opened-at",
+                                                                type="text",
+                                                                placeholder="YYYY-MM-DDTHH:MM",
+                                                                value=checkin_opened_local,
+                                                                style={
+                                                                    "width": "100%",
+                                                                    "padding": "0.5rem",
+                                                                    "borderRadius": "6px",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ],
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Set now",
+                                                                id="btn-set-checkin-opened-now",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    **STYLES["button_secondary"],
+                                                                    "marginTop": "0.45rem",
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Label(
+                                                                "Event started at",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                    "marginBottom": "0.35rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Input(
+                                                                id="input-event-started-at",
+                                                                type="text",
+                                                                placeholder="YYYY-MM-DDTHH:MM",
+                                                                value=event_started_local,
+                                                                style={
+                                                                    "width": "100%",
+                                                                    "padding": "0.5rem",
+                                                                    "borderRadius": "6px",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ],
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Set now",
+                                                                id="btn-set-event-started-now",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    **STYLES["button_secondary"],
+                                                                    "marginTop": "0.45rem",
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                    html.Div(
+                                                        children=[
+                                                            html.Label(
+                                                                "Event ended at",
+                                                                style={
+                                                                    "fontWeight": "600",
+                                                                    "color": COLORS["text_primary"],
+                                                                    "marginBottom": "0.35rem",
+                                                                    "display": "block",
+                                                                },
+                                                            ),
+                                                            dcc.Input(
+                                                                id="input-event-ended-at",
+                                                                type="text",
+                                                                placeholder="YYYY-MM-DDTHH:MM",
+                                                                value=event_ended_local,
+                                                                style={
+                                                                    "width": "100%",
+                                                                    "padding": "0.5rem",
+                                                                    "borderRadius": "6px",
+                                                                    "border": f"1px solid {COLORS['border']}",
+                                                                    "backgroundColor": COLORS[
+                                                                        "bg_dark"
+                                                                    ],
+                                                                    "color": COLORS["text_primary"],
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Set now",
+                                                                id="btn-set-event-ended-now",
+                                                                n_clicks=0,
+                                                                style={
+                                                                    **STYLES["button_secondary"],
+                                                                    "marginTop": "0.45rem",
+                                                                },
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Button(
+                                                "Save Timing",
+                                                id="btn-save-ops-timing",
+                                                n_clicks=0,
+                                                style={
+                                                    **STYLES["button_primary"],
+                                                    "marginTop": "0.95rem",
+                                                },
+                                            ),
+                                            html.Div(
+                                                id="ops-timing-feedback",
+                                                style={"marginTop": "0.8rem"},
                                             ),
                                         ],
                                     ),
@@ -2984,6 +4078,232 @@ def create_layout():
                                                     html.Div(
                                                         style={"marginTop": "1rem"},
                                                         children=[
+                                                            html.Div(
+                                                                id="dev-tools-advanced-container",
+                                                                style={"display": "none", "marginBottom": "1.1rem"},
+                                                                children=[
+                                                                    html.Details(
+                                                                        open=False,
+                                                                        children=[
+                                                                            html.Summary(
+                                                                                "Dev",
+                                                                                style={
+                                                                                    "cursor": "pointer",
+                                                                                    "fontWeight": "700",
+                                                                                    "color": COLORS[
+                                                                                        "text_primary"
+                                                                                    ],
+                                                                                    "fontSize": "0.95rem",
+                                                                                },
+                                                                            ),
+                                                                            html.Div(
+                                                                                style={
+                                                                                    "marginTop": "0.8rem",
+                                                                                    "padding": "0.9rem",
+                                                                                    "borderRadius": "8px",
+                                                                                    "border": f"1px dashed {COLORS['border']}",
+                                                                                    "backgroundColor": "rgba(30, 41, 59, 0.28)",
+                                                                                },
+                                                                                children=[
+                                                                                    html.P(
+                                                                                        "Owner-only developer tools for local testing.",
+                                                                                        style={
+                                                                                            "margin": "0 0 0.6rem 0",
+                                                                                            "fontSize": "0.8rem",
+                                                                                            "color": COLORS[
+                                                                                                "text_muted"
+                                                                                            ],
+                                                                                        },
+                                                                                    ),
+                                                                                    dcc.Checklist(
+                                                                                        id="dev-tools-visible-toggle",
+                                                                                        options=[
+                                                                                            {
+                                                                                                "label": "Show Dev Tools",
+                                                                                                "value": "show",
+                                                                                            }
+                                                                                        ],
+                                                                                        value=[],
+                                                                                        persistence=True,
+                                                                                        persistence_type="local",
+                                                                                        style={
+                                                                                            "marginBottom": "0.6rem",
+                                                                                            "color": COLORS[
+                                                                                                "text_primary"
+                                                                                            ],
+                                                                                        },
+                                                                                    ),
+                                                                                    html.Div(
+                                                                                        id="dev-tools-panel",
+                                                                                        style={"display": "none"},
+                                                                                        children=[
+                                                                                            html.Div(
+                                                                                                style={
+                                                                                                    "display": "grid",
+                                                                                                    "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))",
+                                                                                                    "gap": "0.6rem",
+                                                                                                },
+                                                                                                children=[
+                                                                                                    dcc.Input(
+                                                                                                        id="input-mock-event-slug",
+                                                                                                        type="text",
+                                                                                                        value="mock-acq-source",
+                                                                                                        placeholder="mock-event-slug",
+                                                                                                        style=STYLES[
+                                                                                                            "input"
+                                                                                                        ],
+                                                                                                    ),
+                                                                                                    dcc.Input(
+                                                                                                        id="input-mock-event-name",
+                                                                                                        type="text",
+                                                                                                        value="Mock Acquisition Source Test",
+                                                                                                        placeholder="Mock event name",
+                                                                                                        style=STYLES[
+                                                                                                            "input"
+                                                                                                        ],
+                                                                                                    ),
+                                                                                                ],
+                                                                                            ),
+                                                                                            html.Button(
+                                                                                                "Use Mock Event",
+                                                                                                id="btn-use-mock-event",
+                                                                                                n_clicks=0,
+                                                                                                style={
+                                                                                                    **STYLES[
+                                                                                                        "button_secondary"
+                                                                                                    ],
+                                                                                                    "marginTop": "0.75rem",
+                                                                                                },
+                                                                                            ),
+                                                                                        ],
+                                                                                    ),
+                                                                                ],
+                                                                            ),
+                                                                        ],
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                            html.Div(
+                                                                id="recompute-dev-container",
+                                                                style={"display": "none"},
+                                                                children=[
+                                                                    html.H3(
+                                                                        "Recompute Event Stats",
+                                                                        style={
+                                                                            **STYLES["section_title"],
+                                                                            "color": COLORS["accent_blue"],
+                                                                        },
+                                                                    ),
+                                                                    html.P(
+                                                                        "Rebuild KPI stats for selected event from archived rows (safe repair).",
+                                                                        style={
+                                                                            "color": COLORS["text_secondary"],
+                                                                            "marginBottom": "0.75rem",
+                                                                        },
+                                                                    ),
+                                                                    html.Div(
+                                                                        style={
+                                                                            "display": "flex",
+                                                                            "gap": "0.65rem",
+                                                                            "flexWrap": "wrap",
+                                                                        },
+                                                                        children=[
+                                                                            html.Button(
+                                                                                "Recompute Selected Event",
+                                                                                id="btn-recompute-event-stats",
+                                                                                n_clicks=0,
+                                                                                style=STYLES["button_secondary"],
+                                                                            ),
+                                                                        ],
+                                                                    ),
+                                                                    html.Div(
+                                                                        id="recompute-event-feedback",
+                                                                        style={"marginTop": "0.75rem"},
+                                                                    ),
+                                                                    html.Hr(
+                                                                        style={
+                                                                            "border": "none",
+                                                                            "borderTop": f"1px solid {COLORS['border']}",
+                                                                            "margin": "1.1rem 0",
+                                                                        }
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                            html.H3(
+                                                                "Data Integrity Scan",
+                                                                style={
+                                                                    **STYLES["section_title"],
+                                                                    "color": COLORS["accent_green"],
+                                                                },
+                                                            ),
+                                                            html.P(
+                                                                "Scan archived events for KPI mismatches (funnel/no-show/payment consistency).",
+                                                                style={
+                                                                    "color": COLORS["text_secondary"],
+                                                                    "marginBottom": "0.75rem",
+                                                                },
+                                                            ),
+                                                            html.Button(
+                                                                "Scan Archived Events",
+                                                                id="btn-scan-event-integrity",
+                                                                n_clicks=0,
+                                                                style=STYLES["button_secondary"],
+                                                            ),
+                                                            html.Div(
+                                                                id="scan-integrity-feedback",
+                                                                style={"marginTop": "0.75rem"},
+                                                            ),
+                                                            dash_table.DataTable(
+                                                                id="integrity-scan-table",
+                                                                columns=[
+                                                                    {"name": "Event", "id": "event_slug"},
+                                                                    {"name": "Warnings", "id": "warnings_count"},
+                                                                    {"name": "Details", "id": "warnings_text"},
+                                                                    {"name": "Archived At", "id": "archived_at"},
+                                                                ],
+                                                                data=[],
+                                                                page_size=8,
+                                                                sort_action="native",
+                                                                style_table={
+                                                                    "overflowX": "auto",
+                                                                    "marginTop": "0.65rem",
+                                                                },
+                                                                style_header={
+                                                                    "backgroundColor": COLORS["bg_dark"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "fontSize": "0.73rem",
+                                                                    "textTransform": "uppercase",
+                                                                    "letterSpacing": "0.04em",
+                                                                    "padding": "0.7rem",
+                                                                    "borderBottom": f"2px solid {COLORS['accent_green']}",
+                                                                },
+                                                                style_cell={
+                                                                    "backgroundColor": COLORS["bg_card"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "border": "none",
+                                                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                                                    "padding": "0.55rem 0.7rem",
+                                                                    "fontSize": "0.79rem",
+                                                                    "textAlign": "left",
+                                                                    "maxWidth": "420px",
+                                                                    "whiteSpace": "normal",
+                                                                    "height": "auto",
+                                                                },
+                                                                style_data_conditional=[
+                                                                    {
+                                                                        "if": {"row_index": "odd"},
+                                                                        "backgroundColor": COLORS["bg_dark"],
+                                                                    }
+                                                                ],
+                                                            ),
+                                                            html.Hr(
+                                                                style={
+                                                                    "border": "none",
+                                                                    "borderTop": f"1px solid {COLORS['border']}",
+                                                                    "margin": "1.1rem 0",
+                                                                }
+                                                            ),
                                                             html.H3(
                                                                 "Delete Archived Event",
                                                                 style={

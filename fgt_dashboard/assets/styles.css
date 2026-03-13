@@ -79,7 +79,13 @@
 #game-filter [class*="option"],
 #game-filter [class*="singleValue"],
 #game-filter [class*="placeholder"],
-#game-filter [class*="input"] {
+#game-filter [class*="input"],
+#insights-top-players-limit [class*="control"],
+#insights-top-players-limit [class*="menu"],
+#insights-top-players-limit [class*="option"],
+#insights-top-players-limit [class*="singleValue"],
+#insights-top-players-limit [class*="placeholder"],
+#insights-top-players-limit [class*="input"] {
     background-color: #0a0a0f !important;
     color: #ffffff !important;
     border-color: #1e293b !important;
@@ -88,7 +94,9 @@
 #event-dropdown [class*="menu"],
 #event-dropdown [class*="option"],
 #game-filter [class*="menu"],
-#game-filter [class*="option"] {
+#game-filter [class*="option"],
+#insights-top-players-limit [class*="menu"],
+#insights-top-players-limit [class*="option"] {
     background-color: #12121a !important;
 }
 
@@ -139,7 +147,10 @@
 #audit-filter-action > div > div,
 #audit-filter-user,
 #audit-filter-user > div,
-#audit-filter-user > div > div {
+#audit-filter-user > div > div,
+#insights-top-players-limit,
+#insights-top-players-limit > div,
+#insights-top-players-limit > div > div {
     background-color: #0a0a0f !important;
     color: #ffffff !important;
     border-color: #1e293b !important;
@@ -475,8 +486,93 @@
 /* Insights KPI compact grid */
 #insights-kpi-grid {
     display: grid;
-    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    grid-template-columns: repeat(4, minmax(165px, 1fr));
     gap: 0.75rem;
+    align-items: stretch;
+}
+
+#insights-kpi-grid .stat-card-live {
+    min-height: 112px;
+    padding: 0.58rem 0.55rem !important;
+}
+
+#insights-kpi-summary-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-bottom: 0.7rem;
+}
+
+.insights-summary-card {
+    flex: 0 0 auto;
+    max-width: none;
+    min-height: 36px;
+    padding: 0.34rem 0.72rem;
+    border: 1px solid #1e293b;
+    border-top: 1px solid #1e293b;
+    border-radius: 999px;
+    cursor: pointer;
+    background: #0e1422;
+    transition: border-color 140ms ease, background-color 140ms ease, transform 120ms ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.insights-summary-card:hover {
+    border-color: #475569;
+    transform: translateY(-1px);
+    background: #111a2b;
+}
+
+.insights-summary-card.is-active {
+    border-color: #22d3ee;
+    border-top-color: #22d3ee;
+    background: rgba(34, 211, 238, 0.12);
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.22) inset;
+}
+
+.insights-summary-all {
+    border-top-color: #64748b;
+    order: 999;
+}
+
+.insights-summary-title {
+    margin: 0;
+    font-size: 0.69rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #9fb0c7;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.insights-summary-value {
+    display: none;
+}
+
+.insights-summary-card.is-active .insights-summary-title {
+    color: #e6fbff;
+}
+
+#insights-kpi-category-filter-wrap {
+    display: none;
+}
+
+#insights-kpi-category-filter-wrap label {
+    background: #101524;
+    border: 1px solid #1e293b;
+    border-radius: 999px;
+    padding: 0.28rem 0.58rem;
+}
+
+#insights-kpi-grid .kpi-hidden,
+.kpi-hidden {
+    display: none !important;
+}
+
+.insights-kpi-section-label {
+    display: none;
 }
 
 /* Insights subtabs */
@@ -540,19 +636,56 @@
 
 @media (max-width: 1500px) {
     #insights-kpi-grid {
-        grid-template-columns: repeat(4, minmax(160px, 1fr));
+        grid-template-columns: repeat(3, minmax(165px, 1fr));
     }
 }
 
 @media (max-width: 1200px) {
     #insights-kpi-grid {
-        grid-template-columns: repeat(3, minmax(160px, 1fr));
+        grid-template-columns: repeat(2, minmax(160px, 1fr));
+    }
+}
+
+@media (max-width: 980px) {
+    #insights-kpi-summary-row {
+        gap: 0.5rem;
+    }
+}
+
+@media (max-width: 760px) {
+    .insights-summary-card {
+        min-height: 34px;
+        padding: 0.32rem 0.62rem;
     }
 }
 
 @media (max-width: 900px) {
     #insights-kpi-grid {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }
+
+    #insights-kpi-grid .stat-card-live {
+        min-height: 104px;
+        padding: 0.52rem 0.5rem !important;
+    }
+
+    #insights-kpi-category-filter-wrap {
+        justify-content: flex-start;
+    }
+}
+
+@media (max-width: 640px) {
+    #insights-kpi-summary-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .insights-summary-card {
+        flex: initial;
+    }
+
+    #insights-kpi-grid {
+        grid-template-columns: minmax(0, 1fr);
     }
 }
 /* Global app canvas - remove browser white frame */

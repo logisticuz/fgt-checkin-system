@@ -21,7 +21,9 @@ logging.basicConfig(level=logging.INFO)
 
 # --- Feature flags ---
 CANONICAL_PLAYER_ID_ENABLED = os.getenv("CANONICAL_PLAYER_ID_ENABLED", "true").lower() in (
-    "true", "1", "yes",
+    "true",
+    "1",
+    "yes",
 )
 logger.info(f"🔑 Feature flag CANONICAL_PLAYER_ID_ENABLED={CANONICAL_PLAYER_ID_ENABLED}")
 
@@ -67,9 +69,7 @@ def _run_migrations(pool):
                     ("no_show_count", "INTEGER DEFAULT 0"),
                     ("no_show_rate", "NUMERIC(5,2) DEFAULT 0"),
                 ]:
-                    cur.execute(
-                        f"ALTER TABLE event_stats ADD COLUMN IF NOT EXISTS {col} {typ}"
-                    )
+                    cur.execute(f"ALTER TABLE event_stats ADD COLUMN IF NOT EXISTS {col} {typ}")
                 # Canonical player ID column on active_event_data (added 2026-03-10)
                 cur.execute(
                     "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS player_uuid TEXT"
@@ -78,7 +78,15 @@ def _run_migrations(pool):
                     "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS added_via TEXT DEFAULT 'unknown'"
                 )
                 cur.execute(
+                    "ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS acquisition_source TEXT"
+                )
+                cur.execute(
                     "UPDATE active_event_data SET added_via = 'unknown' WHERE added_via IS NULL"
+                )
+                for col in ["checkin_opened_at", "event_started_at", "event_ended_at"]:
+                    cur.execute(f"ALTER TABLE settings ADD COLUMN IF NOT EXISTS {col} TIMESTAMPTZ")
+                cur.execute(
+                    "ALTER TABLE settings ADD COLUMN IF NOT EXISTS collect_acquisition_source BOOLEAN DEFAULT false"
                 )
                 cur.execute(
                     """
@@ -90,11 +98,15 @@ def _run_migrations(pool):
                     "ALTER TABLE event_archive ADD COLUMN IF NOT EXISTS added_via TEXT DEFAULT 'unknown'"
                 )
                 cur.execute(
+                    "ALTER TABLE event_archive ADD COLUMN IF NOT EXISTS acquisition_source TEXT"
+                )
+                cur.execute(
                     "UPDATE event_archive SET added_via = 'unknown' WHERE added_via IS NULL"
                 )
 
                 # Merge log table (added 2026-03-11)
-                cur.execute("""
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS merge_log (
                         id                      SERIAL PRIMARY KEY,
                         merged_at               TIMESTAMPTZ DEFAULT now(),
@@ -109,14 +121,15 @@ def _run_migrations(pool):
                         undone                  BOOLEAN DEFAULT false,
                         undone_at               TIMESTAMPTZ
                     )
-                """)
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_merge_log_keep ON merge_log(keep_uuid)"
+                """
                 )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_merge_log_keep ON merge_log(keep_uuid)")
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_merge_log_remove ON merge_log(remove_uuid)"
                 )
-        logger.info("✅ Schema migrations checked (no-show + player_uuid + added_via + merge_log)")
+        logger.info(
+            "✅ Schema migrations checked (no-show + player_uuid + added_via + acquisition source + live ops timestamps + merge_log)"
+        )
     except Exception as e:
         logger.warning(f"⚠️ Migration check failed (non-fatal): {e}")
 
@@ -138,6 +151,23 @@ def _normalize_added_via(value: Any) -> str:
     allowed = {"manual_dashboard", "startgg_flow", "api", "reopen_restore", "unknown"}
     candidate = str(value or "unknown").strip().lower()
     return candidate if candidate in allowed else "unknown"
+
+
+def _normalize_acquisition_source(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    candidate = str(value).strip().lower()
+    if not candidate:
+        return None
+    aliases = {
+        "startgg": "startgg",
+        "start.gg": "startgg",
+        "social media": "social",
+        "social_media": "social",
+    }
+    candidate = aliases.get(candidate, candidate)
+    allowed = {"friend", "discord", "startgg", "social", "venue", "other"}
+    return candidate if candidate in allowed else "other"
 
 
 def _row_to_dict(columns: List[str], row: tuple) -> Dict[str, Any]:
@@ -163,6 +193,7 @@ def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "startgg_event_id": row.get("startgg_event_id"),
         "external_id": row.get("external_id"),
         "added_via": row.get("added_via"),
+        "acquisition_source": row.get("acquisition_source"),
     }
 
 
@@ -334,7 +365,10 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
         return None
 
     data = _row_to_dict(columns_out, row)
-    return {"record_id": str(data.get("id")), "fields": {k: v for k, v in data.items() if k != "id"}}
+    return {
+        "record_id": str(data.get("id")),
+        "fields": {k: v for k, v in data.items() if k != "id"},
+    }
 
 
 # =============================================
@@ -358,7 +392,7 @@ def get_checkins(
                payment_amount, payment_expected, payment_valid,
                name, email, tag, telephone,
                tournament_games_registered, checkin_uuid, startgg_event_id, external_id,
-               added_via
+               added_via, acquisition_source
         FROM active_event_data
         {where_sql}
         ORDER BY created DESC
@@ -391,6 +425,7 @@ def get_checkins(
             startgg_event_id,
             external_id,
             added_via,
+            acquisition_source,
         ) = row
 
         result.append(
@@ -414,6 +449,7 @@ def get_checkins(
                 "startgg_event_id": startgg_event_id,
                 "external_id": external_id,
                 "added_via": added_via,
+                "acquisition_source": acquisition_source,
             }
         )
 
@@ -434,7 +470,9 @@ def get_all_event_slugs() -> List[str]:
     """
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT event_slug FROM active_event_data WHERE event_slug IS NOT NULL")
+            cur.execute(
+                "SELECT DISTINCT event_slug FROM active_event_data WHERE event_slug IS NOT NULL"
+            )
             rows = cur.fetchall()
 
     slugs = {row[0] for row in rows if row and row[0]}
@@ -460,7 +498,7 @@ def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, added_via, created
+               startgg_event_id, external_id, is_guest, added_via, acquisition_source, created
         FROM active_event_data
         WHERE {where_sql}
         ORDER BY created DESC
@@ -494,6 +532,7 @@ def get_checkin_by_name(name: str, slug: Optional[str] = None) -> Optional[Dict[
         "external_id",
         "is_guest",
         "added_via",
+        "acquisition_source",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -509,7 +548,7 @@ def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, added_via, created
+               startgg_event_id, external_id, is_guest, added_via, acquisition_source, created
         FROM active_event_data
         WHERE LOWER(tag) = LOWER(%s) AND event_slug = %s
         ORDER BY created DESC
@@ -543,6 +582,7 @@ def get_checkin_by_tag(tag: str, slug: str) -> Optional[Dict[str, Any]]:
         "external_id",
         "is_guest",
         "added_via",
+        "acquisition_source",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -558,7 +598,7 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, added_via, created
+               startgg_event_id, external_id, is_guest, added_via, acquisition_source, created
         FROM active_event_data
         WHERE record_id = %s
         LIMIT 1
@@ -591,6 +631,7 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         "external_id",
         "is_guest",
         "added_via",
+        "acquisition_source",
         "created",
     ]
     row_dict = _row_to_dict(columns, row)
@@ -704,6 +745,10 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "player_uuid": matched_player_uuid,
     }
 
+    normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
+    if normalized_source is not None:
+        fields["acquisition_source"] = normalized_source
+
     if existing and existing.get("record_id"):
         checkin_id = existing["record_id"]
         updated = update_checkin(checkin_id, fields)
@@ -727,14 +772,14 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     status, member, startgg, payment_valid,
                     payment_amount, payment_expected,
                     tournament_games_registered, checkin_uuid,
-                    startgg_event_id, is_guest, added_via, player_uuid
+                    startgg_event_id, is_guest, added_via, acquisition_source, player_uuid
                 ) VALUES (
                     %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s,
                     %s, %s,
-                    %s, %s, %s, %s
+                    %s, %s, %s, %s, %s
                 )
                 RETURNING record_id
                 """,
@@ -756,6 +801,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     fields["startgg_event_id"],
                     fields["is_guest"],
                     fields["added_via"],
+                    fields.get("acquisition_source"),
                     matched_player_uuid,
                 ),
             )
@@ -939,6 +985,7 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                        new_players, returning_players, retention_rate,
                        games_breakdown, most_popular_game, status_breakdown,
                        startgg_registered_count, checked_in_count,
+                       startgg_snapshot,
                        no_show_count, no_show_rate
                 FROM event_stats
                 ORDER BY archived_at DESC NULLS LAST
@@ -967,6 +1014,7 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             status_breakdown,
             startgg_registered_count,
             checked_in_count,
+            startgg_snapshot,
             no_show_count,
             no_show_rate,
         ) = row
@@ -991,6 +1039,7 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                 "status_breakdown": status_breakdown,
                 "startgg_registered_count": startgg_registered_count or 0,
                 "checked_in_count": checked_in_count or 0,
+                "startgg_snapshot": startgg_snapshot,
                 "no_show_count": no_show_count or 0,
                 "no_show_rate": float(no_show_rate or 0),
             }
@@ -1094,6 +1143,414 @@ def get_added_via_breakdown(
         result.append({"source": source, "count": count_i, "share": share})
 
     return result
+
+
+def get_multi_game_count(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Dict[str, int]:
+    """Count rows with 2+ registered games in archived check-ins."""
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT
+            COUNT(*) FILTER (
+                WHERE cardinality(tournament_games_registered) >= 2
+            ) AS multi_game_count,
+            COUNT(*) AS total_count
+        FROM event_archive
+        {where_sql}
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+
+    if not row:
+        return {"multi_game_count": 0, "total_count": 0}
+
+    return {
+        "multi_game_count": int(row[0] or 0),
+        "total_count": int(row[1] or 0),
+    }
+
+
+def get_community_health_v2_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    anchor_date: Optional[str] = None,
+    recent_months: int = 6,
+) -> Dict[str, float]:
+    """Return Core Players (rolling window) and Player Lifetime stats."""
+
+    scope_conditions: List[str] = []
+    scope_params: List[Any] = []
+
+    if event_slugs:
+        scope_conditions.append("event_slug = ANY(%s)")
+        scope_params.append(event_slugs)
+    if start_date:
+        scope_conditions.append("event_date >= %s")
+        scope_params.append(start_date)
+    if end_date:
+        scope_conditions.append("event_date <= %s")
+        scope_params.append(end_date)
+
+    scope_where = f"WHERE {' AND '.join(scope_conditions)}" if scope_conditions else ""
+
+    # Core players is always defined on a rolling recent window.
+    anchor = anchor_date or end_date
+    core_conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
+    core_params: List[Any] = []
+
+    if event_slugs:
+        core_conditions.append("ea.event_slug = ANY(%s)")
+        core_params.append(event_slugs)
+
+    if anchor:
+        core_conditions.append("ea.event_date <= %s::date")
+        core_params.append(anchor)
+        core_conditions.append("ea.event_date >= (%s::date - (%s || ' months')::interval)")
+        core_params.append(anchor)
+        core_params.append(max(int(recent_months), 1))
+    else:
+        core_conditions.append("ea.event_date >= (CURRENT_DATE - (%s || ' months')::interval)")
+        core_params.append(max(int(recent_months), 1))
+
+    core_where = f"WHERE {' AND '.join(core_conditions)}"
+
+    core_query = f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT ea.player_uuid
+            FROM event_archive ea
+            {core_where}
+            GROUP BY ea.player_uuid
+            HAVING COUNT(DISTINCT ea.event_slug) >= 3
+        ) core
+    """
+
+    if scope_conditions:
+        lifetime_query = f"""
+            WITH scoped_players AS (
+                SELECT DISTINCT player_uuid
+                FROM event_archive
+                {scope_where}
+                  AND player_uuid IS NOT NULL
+            )
+            SELECT AVG(p.total_events)::float
+            FROM players p
+            JOIN scoped_players sp ON sp.player_uuid = p.uuid
+            WHERE p.total_events > 0
+        """
+    else:
+        lifetime_query = """
+            SELECT AVG(total_events)::float
+            FROM players
+            WHERE total_events > 0
+        """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(core_query, core_params)
+            core_row = cur.fetchone()
+
+            cur.execute(lifetime_query, scope_params)
+            lifetime_row = cur.fetchone()
+
+    return {
+        "core_players": int((core_row[0] if core_row else 0) or 0),
+        "player_lifetime": float((lifetime_row[0] if lifetime_row else 0.0) or 0.0),
+    }
+
+
+def get_player_funnel_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    anchor_date: Optional[str] = None,
+    recent_months: int = 6,
+    churn_months: int = 8,
+) -> Dict[str, int]:
+    """Return New -> Returning -> Core funnel counts for selected scope."""
+
+    scope_conditions: List[str] = ["player_uuid IS NOT NULL"]
+    scope_params: List[Any] = []
+
+    if event_slugs:
+        scope_conditions.append("event_slug = ANY(%s)")
+        scope_params.append(event_slugs)
+    if start_date:
+        scope_conditions.append("event_date >= %s")
+        scope_params.append(start_date)
+    if end_date:
+        scope_conditions.append("event_date <= %s")
+        scope_params.append(end_date)
+
+    scope_where = f"WHERE {' AND '.join(scope_conditions)}"
+
+    anchor = anchor_date or end_date
+    core_conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
+    core_params: List[Any] = []
+
+    if event_slugs:
+        core_conditions.append("ea.event_slug = ANY(%s)")
+        core_params.append(event_slugs)
+
+    if anchor:
+        core_conditions.append("ea.event_date <= %s::date")
+        core_params.append(anchor)
+        core_conditions.append("ea.event_date >= (%s::date - (%s || ' months')::interval)")
+        core_params.append(anchor)
+        core_params.append(max(int(recent_months), 1))
+    else:
+        core_conditions.append("ea.event_date >= (CURRENT_DATE - (%s || ' months')::interval)")
+        core_params.append(max(int(recent_months), 1))
+
+    core_where = f"WHERE {' AND '.join(core_conditions)}"
+
+    query = f"""
+        WITH scoped_players AS (
+            SELECT DISTINCT player_uuid
+            FROM event_archive
+            {scope_where}
+        ),
+        core_players AS (
+            SELECT ea.player_uuid
+            FROM event_archive ea
+            JOIN scoped_players sp ON sp.player_uuid = ea.player_uuid
+            {core_where}
+            GROUP BY ea.player_uuid
+            HAVING COUNT(DISTINCT ea.event_slug) >= 3
+        ),
+        churned_players AS (
+            SELECT p.uuid
+            FROM players p
+            WHERE p.total_events > 0
+              AND p.last_seen::date < (CURRENT_DATE - (%s || ' months')::interval)
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE p.total_events = 1) AS new_count,
+            COUNT(*) FILTER (WHERE p.total_events >= 2) AS returning_count,
+            (SELECT COUNT(*) FROM core_players) AS core_count,
+            (SELECT COUNT(*) FROM churned_players) AS churned_count
+        FROM scoped_players sp
+        JOIN players p ON p.uuid = sp.player_uuid
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, scope_params + core_params + [max(int(churn_months), 1)])
+            row = cur.fetchone()
+
+    if not row:
+        return {"new_count": 0, "returning_count": 0, "core_count": 0, "churned_count": 0}
+
+    return {
+        "new_count": int(row[0] or 0),
+        "returning_count": int(row[1] or 0),
+        "core_count": int(row[2] or 0),
+        "churned_count": int(row[3] or 0),
+    }
+
+
+def get_game_crossover_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Return game-pair crossover counts (distinct players per pair)."""
+
+    conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("ea.event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("ea.event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("ea.event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}"
+
+    query = f"""
+        WITH player_games AS (
+            SELECT DISTINCT
+                ea.player_uuid,
+                game.value AS game
+            FROM event_archive ea
+            JOIN LATERAL unnest(
+                COALESCE(ea.tournament_games_registered, ARRAY[]::text[])
+            ) AS game(value) ON TRUE
+            {where_sql}
+        )
+        SELECT
+            pg1.game AS game_a,
+            pg2.game AS game_b,
+            COUNT(DISTINCT pg1.player_uuid) AS shared_players
+        FROM player_games pg1
+        JOIN player_games pg2
+          ON pg1.player_uuid = pg2.player_uuid
+         AND pg1.game < pg2.game
+        GROUP BY pg1.game, pg2.game
+        ORDER BY shared_players DESC, game_a ASC, game_b ASC
+        LIMIT %s
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params + [max(int(limit), 1)])
+            rows = cur.fetchall()
+
+    result: List[Dict[str, Any]] = []
+    for game_a, game_b, shared_players in rows:
+        result.append(
+            {
+                "game_a": str(game_a or ""),
+                "game_b": str(game_b or ""),
+                "shared_players": int(shared_players or 0),
+            }
+        )
+    return result
+
+
+def get_acquisition_source_breakdown(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return acquisition_source distribution for archived rows in scope."""
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT
+            CASE
+                WHEN acquisition_source IS NULL OR btrim(acquisition_source) = '' THEN 'unknown'
+                WHEN LOWER(btrim(acquisition_source)) IN ('start.gg', 'startgg') THEN 'startgg'
+                WHEN LOWER(btrim(acquisition_source)) IN ('social media', 'social_media', 'social') THEN 'social'
+                WHEN LOWER(btrim(acquisition_source)) IN (
+                    'friend', 'discord', 'venue', 'other', 'unknown'
+                ) THEN LOWER(btrim(acquisition_source))
+                ELSE 'other'
+            END AS source,
+            COUNT(*) AS cnt
+        FROM event_archive
+        {where_sql}
+        GROUP BY source
+        ORDER BY cnt DESC, source ASC
+    """
+
+    result: List[Dict[str, Any]] = []
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    total = sum(int(r[1] or 0) for r in rows)
+    for source, cnt in rows:
+        count_i = int(cnt or 0)
+        share = (count_i / total * 100.0) if total > 0 else 0.0
+        result.append({"source": source, "count": count_i, "share": share})
+
+    return result
+
+
+def get_player_churn_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    anchor_date: Optional[str] = None,
+    churn_months: int = 3,
+) -> Dict[str, float]:
+    """Return churn count/rate for players in selected scope."""
+
+    conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
+    params: List[Any] = []
+
+    if event_slugs:
+        conditions.append("ea.event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("ea.event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("ea.event_date <= %s")
+        params.append(end_date)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}"
+    anchor = anchor_date or end_date
+    months = max(int(churn_months), 1)
+
+    if anchor:
+        churn_expr = "p.last_seen::date < (%s::date - (%s || ' months')::interval)"
+        churn_params: List[Any] = [anchor, months]
+    else:
+        churn_expr = "p.last_seen::date < (CURRENT_DATE - (%s || ' months')::interval)"
+        churn_params = [months]
+
+    query = f"""
+        WITH scoped_players AS (
+            SELECT DISTINCT ea.player_uuid
+            FROM event_archive ea
+            {where_sql}
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE p.total_events > 0 AND {churn_expr}) AS churn_count,
+            COUNT(*) AS scoped_players
+        FROM scoped_players sp
+        JOIN players p ON p.uuid = sp.player_uuid
+    """
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params + churn_params)
+            row = cur.fetchone()
+
+    if not row:
+        return {"churn_count": 0, "scoped_players": 0, "churn_rate": 0.0}
+
+    churn_count = int(row[0] or 0)
+    scoped_players = int(row[1] or 0)
+    churn_rate = (churn_count / scoped_players * 100.0) if scoped_players > 0 else 0.0
+
+    return {
+        "churn_count": churn_count,
+        "scoped_players": scoped_players,
+        "churn_rate": churn_rate,
+    }
 
 
 def get_top_players_history(
@@ -1215,9 +1672,7 @@ def compute_event_stats(checkins: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
     # Revenue
-    total_revenue = sum(
-        Decimal(str(c.get("payment_amount") or 0)) for c in checkins
-    )
+    total_revenue = sum(Decimal(str(c.get("payment_amount") or 0)) for c in checkins)
     avg_payment = (total_revenue / total).quantize(Decimal("0.01"))
 
     # Segments
@@ -1229,7 +1684,7 @@ def compute_event_stats(checkins: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Games breakdown
     games: Dict[str, int] = {}
     for c in checkins:
-        for g in (c.get("tournament_games_registered") or []):
+        for g in c.get("tournament_games_registered") or []:
             games[g] = games.get(g, 0) + 1
 
     most_popular = max(games, key=games.get) if games else None
@@ -1252,6 +1707,384 @@ def compute_event_stats(checkins: List[Dict[str, Any]]) -> Dict[str, Any]:
         "most_popular_game": most_popular,
         "status_breakdown": statuses,
     }
+
+
+def _build_event_stats_integrity_warnings(
+    *,
+    total_participants: int,
+    new_players: int,
+    returning_players: int,
+    checked_in_count: int,
+    no_show_base: int,
+    no_show_count: int,
+    no_show_rate: Decimal,
+    games_breakdown: Dict[str, int],
+    payment_valid_count: int,
+    paid_amount_count: int,
+) -> List[str]:
+    warnings: List[str] = []
+
+    if (new_players + returning_players) != total_participants:
+        warnings.append(
+            f"funnel_mismatch:new+returning={new_players + returning_players},participants={total_participants}"
+        )
+
+    if checked_in_count > total_participants:
+        warnings.append(
+            f"checkedin_gt_participants:checked_in={checked_in_count},participants={total_participants}"
+        )
+
+    expected_no_show = max(no_show_base - checked_in_count, 0)
+    if no_show_count != expected_no_show:
+        warnings.append(
+            f"noshow_mismatch:no_show={no_show_count},expected={expected_no_show},base={no_show_base},checked_in={checked_in_count}"
+        )
+
+    if no_show_rate < 0 or no_show_rate > 100:
+        warnings.append(f"noshow_rate_out_of_bounds:{no_show_rate}")
+
+    total_game_entries = sum(int(v or 0) for v in (games_breakdown or {}).values())
+    if total_game_entries < total_participants:
+        warnings.append(
+            f"games_breakdown_low:games_total={total_game_entries},participants={total_participants}"
+        )
+
+    if payment_valid_count > paid_amount_count:
+        warnings.append(
+            f"payment_gap:payment_valid={payment_valid_count},payment_amount_gt_zero={paid_amount_count}"
+        )
+
+    return warnings
+
+
+def recompute_event_stats(event_slug: str, *, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Recompute event_stats for one archived event_slug from event_archive rows."""
+    if not event_slug:
+        raise ValueError("event_slug is required")
+
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    def _to_iso_date(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if hasattr(value, "isoformat"):
+            try:
+                txt = value.isoformat()
+                return str(txt)[:10]
+            except Exception:
+                pass
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        except Exception:
+            if len(text) >= 10:
+                return text[:10]
+            return None
+
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, event_date, event_display_name, archived_at, startgg_snapshot
+                    FROM event_stats
+                    WHERE event_slug = %s
+                    LIMIT 1
+                    """,
+                    (event_slug,),
+                )
+                stats_row = cur.fetchone()
+                if not stats_row:
+                    raise ValueError(f"No event_stats row found for '{event_slug}'")
+
+                _, stats_event_date, stats_display_name, stats_archived_at, startgg_snapshot = stats_row
+
+                cur.execute(
+                    """
+                    SELECT name, tag, email, telephone, status,
+                           member, startgg, payment_valid,
+                           payment_amount, payment_expected,
+                           tournament_games_registered, checkin_uuid,
+                           external_id, startgg_event_id, is_guest,
+                           player_uuid, event_date, event_display_name
+                    FROM event_archive
+                    WHERE event_slug = %s
+                    ORDER BY id ASC
+                    """,
+                    (event_slug,),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+
+                if not rows:
+                    raise ValueError(f"No event_archive rows found for '{event_slug}'")
+
+                checkins = [_row_to_dict(cols, r) for r in rows]
+                stats = compute_event_stats(checkins)
+
+                event_date_val = _to_iso_date(stats_event_date)
+                if not event_date_val:
+                    sample_date = checkins[0].get("event_date")
+                    event_date_val = _to_iso_date(sample_date) or datetime.now(timezone.utc).date().isoformat()
+
+                parsed_event_date = datetime.fromisoformat(event_date_val).date()
+
+                # Funnel recompute from archive history (per player_uuid)
+                new_players = 0
+                returning_players = 0
+                for c in checkins:
+                    p_uuid = c.get("player_uuid")
+                    if not p_uuid:
+                        continue
+                    cur.execute(
+                        """
+                        SELECT EXISTS(
+                            SELECT 1
+                            FROM event_archive prev
+                            WHERE prev.player_uuid = %s
+                              AND prev.event_slug <> %s
+                              AND prev.event_date < %s
+                        )
+                        """,
+                        (p_uuid, event_slug, parsed_event_date),
+                    )
+                    had_prev = bool(cur.fetchone()[0])
+                    if had_prev:
+                        returning_players += 1
+                    else:
+                        new_players += 1
+
+                total = int(stats.get("total_participants") or 0)
+                retention_rate = (
+                    (Decimal(returning_players) / Decimal(total) * 100).quantize(Decimal("0.01"))
+                    if total > 0
+                    else Decimal("0")
+                )
+
+                # No-show recompute from snapshot
+                startgg_registered_count = 0
+                startgg_registered_players = 0
+                if isinstance(startgg_snapshot, dict):
+                    startgg_registered_count = int(startgg_snapshot.get("tournament_entrants") or 0)
+                    startgg_registered_players = int(
+                        startgg_snapshot.get("tournament_entrants_players") or 0
+                    )
+                elif isinstance(startgg_snapshot, list):
+                    startgg_registered_count = sum(
+                        int(e.get("numEntrants") or 0)
+                        for e in startgg_snapshot
+                        if isinstance(e, dict)
+                    )
+
+                checked_in_count = total
+                no_show_base = startgg_registered_players or startgg_registered_count
+                no_show_count = max(no_show_base - checked_in_count, 0)
+                no_show_rate = (
+                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(Decimal("0.01"))
+                    if no_show_base > 0
+                    else Decimal("0")
+                )
+
+                payment_valid_count = sum(1 for c in checkins if bool(c.get("payment_valid")))
+                paid_amount_count = sum(
+                    1 for c in checkins if Decimal(str(c.get("payment_amount") or 0)) > 0
+                )
+                integrity_warnings = _build_event_stats_integrity_warnings(
+                    total_participants=total,
+                    new_players=new_players,
+                    returning_players=returning_players,
+                    checked_in_count=checked_in_count,
+                    no_show_base=no_show_base,
+                    no_show_count=no_show_count,
+                    no_show_rate=no_show_rate,
+                    games_breakdown=stats.get("games_breakdown") or {},
+                    payment_valid_count=payment_valid_count,
+                    paid_amount_count=paid_amount_count,
+                )
+
+                cur.execute(
+                    """
+                    UPDATE event_stats
+                    SET event_date = %s,
+                        event_display_name = %s,
+                        archived_at = %s,
+                        total_participants = %s,
+                        total_revenue = %s,
+                        avg_payment = %s,
+                        member_count = %s,
+                        member_percentage = %s,
+                        guest_count = %s,
+                        startgg_count = %s,
+                        new_players = %s,
+                        returning_players = %s,
+                        retention_rate = %s,
+                        games_breakdown = %s,
+                        most_popular_game = %s,
+                        status_breakdown = %s,
+                        startgg_registered_count = %s,
+                        startgg_registered_players = %s,
+                        checked_in_count = %s,
+                        no_show_count = %s,
+                        no_show_rate = %s
+                    WHERE event_slug = %s
+                    """,
+                    (
+                        event_date_val,
+                        stats_display_name or (checkins[0].get("event_display_name") or event_slug),
+                        stats_archived_at,
+                        total,
+                        stats["total_revenue"],
+                        stats["avg_payment"],
+                        stats["member_count"],
+                        stats["member_percentage"],
+                        stats["guest_count"],
+                        stats["startgg_count"],
+                        new_players,
+                        returning_players,
+                        retention_rate,
+                        _Json(stats["games_breakdown"]),
+                        stats["most_popular_game"],
+                        _Json(stats["status_breakdown"]),
+                        startgg_registered_count,
+                        startgg_registered_players,
+                        checked_in_count,
+                        no_show_count,
+                        no_show_rate,
+                        event_slug,
+                    ),
+                )
+
+    if integrity_warnings:
+        logger.warning(
+            "event_stats integrity warnings for '%s': %s",
+            event_slug,
+            "; ".join(integrity_warnings),
+        )
+
+    recompute_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    try:
+        log_action(
+            recompute_user,
+            "event_stats_recomputed",
+            "event_stats",
+            target_event=event_slug,
+            details=json.dumps(
+                {
+                    "participants": total,
+                    "new_players": new_players,
+                    "returning_players": returning_players,
+                    "integrity_warnings": integrity_warnings,
+                }
+            ),
+        )
+    except Exception:
+        pass
+
+    return {
+        "event_slug": event_slug,
+        "participants": total,
+        "new_players": new_players,
+        "returning_players": returning_players,
+        "total_revenue": float(stats["total_revenue"]),
+        "integrity_warnings": integrity_warnings,
+    }
+
+
+def scan_event_stats_integrity(
+    event_slugs: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Run integrity checks on archived event_stats rows.
+
+    Returns only rows that contain one or more warnings.
+    """
+    where_sql = ""
+    params: List[Any] = []
+    if event_slugs:
+        where_sql = "WHERE es.event_slug = ANY(%s)"
+        params.append(event_slugs)
+
+    warnings_rows: List[Dict[str, Any]] = []
+
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    es.event_slug,
+                    es.archived_at,
+                    es.total_participants,
+                    es.new_players,
+                    es.returning_players,
+                    es.checked_in_count,
+                    es.startgg_registered_count,
+                    es.startgg_registered_players,
+                    es.no_show_count,
+                    es.no_show_rate,
+                    es.games_breakdown,
+                    COALESCE(pay.payment_valid_count, 0) AS payment_valid_count,
+                    COALESCE(pay.paid_amount_count, 0) AS paid_amount_count
+                FROM event_stats es
+                LEFT JOIN (
+                    SELECT
+                        event_slug,
+                        COUNT(*) FILTER (WHERE payment_valid IS TRUE) AS payment_valid_count,
+                        COUNT(*) FILTER (WHERE COALESCE(payment_amount, 0) > 0) AS paid_amount_count
+                    FROM event_archive
+                    GROUP BY event_slug
+                ) pay ON pay.event_slug = es.event_slug
+                {where_sql}
+                ORDER BY es.archived_at DESC NULLS LAST, es.event_slug ASC
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+    for row in rows:
+        (
+            event_slug,
+            archived_at,
+            total_participants,
+            new_players,
+            returning_players,
+            checked_in_count,
+            startgg_registered_count,
+            startgg_registered_players,
+            no_show_count,
+            no_show_rate,
+            games_breakdown,
+            payment_valid_count,
+            paid_amount_count,
+        ) = row
+
+        no_show_base = int(startgg_registered_players or 0) or int(startgg_registered_count or 0)
+        warnings = _build_event_stats_integrity_warnings(
+            total_participants=int(total_participants or 0),
+            new_players=int(new_players or 0),
+            returning_players=int(returning_players or 0),
+            checked_in_count=int(checked_in_count or 0),
+            no_show_base=int(no_show_base or 0),
+            no_show_count=int(no_show_count or 0),
+            no_show_rate=Decimal(str(no_show_rate or 0)),
+            games_breakdown=(games_breakdown or {}) if isinstance(games_breakdown, dict) else {},
+            payment_valid_count=int(payment_valid_count or 0),
+            paid_amount_count=int(paid_amount_count or 0),
+        )
+
+        if warnings:
+            warnings_rows.append(
+                {
+                    "event_slug": event_slug,
+                    "archived_at": archived_at.isoformat() if archived_at else "",
+                    "warnings_count": len(warnings),
+                    "warnings": warnings,
+                }
+            )
+
+    return warnings_rows
 
 
 def _find_player_uuid(tag: Optional[str], email: Optional[str]) -> Optional[str]:
@@ -1311,11 +2144,32 @@ def _match_or_create_player(
     tag = checkin.get("tag")
     email = checkin.get("email")
 
+    def _to_date(value: Any):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+            try:
+                # datetime.date without importing date directly
+                return value
+            except Exception:
+                return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except Exception:
+            return None
+
+    event_date_obj = _to_date(event_date)
+
     # Try match by tag, then email
     player_row = None
     select_cols = """
         uuid, games_played, total_events, total_paid,
-        events_list, game_counts, first_seen
+        events_list, game_counts, first_seen, last_seen, last_event
     """
 
     if tag:
@@ -1338,8 +2192,15 @@ def _match_or_create_player(
     if player_row:
         # ---- Existing player: update ----
         (
-            p_uuid, p_games, p_total_events, p_total_paid,
-            p_events_list, p_game_counts, p_first_seen,
+            p_uuid,
+            p_games,
+            p_total_events,
+            p_total_paid,
+            p_events_list,
+            p_game_counts,
+            p_first_seen,
+            p_last_seen,
+            p_last_event,
         ) = player_row
 
         p_games = p_games or []
@@ -1367,6 +2228,18 @@ def _match_or_create_player(
         # Only add payment if this is a new event for the player (avoid double-counting)
         payment_to_add = payment if is_new_event else Decimal("0")
 
+        p_last_seen_date = p_last_seen
+        new_last_seen = p_last_seen_date
+        new_last_event = p_last_event
+        if is_new_event:
+            if isinstance(p_last_seen_date, datetime):
+                p_last_seen_date = p_last_seen_date.date()
+            if (p_last_seen_date is None) or (
+                event_date_obj is not None and event_date_obj >= p_last_seen_date
+            ):
+                new_last_seen = event_date_obj or event_date
+                new_last_event = event_slug
+
         cur.execute(
             """
             UPDATE players SET
@@ -1387,13 +2260,17 @@ def _match_or_create_player(
             WHERE uuid = %s
             """,
             (
-                tag, email, checkin.get("name"), checkin.get("telephone"),
+                tag,
+                email,
+                checkin.get("name"),
+                checkin.get("telephone"),
                 updated_games,
                 _Json(p_game_counts),
                 favorite,
                 new_total_events,
                 payment_to_add,
-                event_date, event_slug,
+                new_last_seen,
+                new_last_event,
                 _Json(updated_events),
                 checkin.get("member"),
                 now,
@@ -1427,16 +2304,23 @@ def _match_or_create_player(
             RETURNING uuid
             """,
             (
-                checkin.get("name"), tag, email, checkin.get("telephone"),
+                checkin.get("name"),
+                tag,
+                email,
+                checkin.get("telephone"),
                 new_games or [],
                 _Json(game_counts) if game_counts else _Json({}),
                 favorite,
                 1,
                 payment,
-                event_date, event_date, event_slug, event_slug,
+                event_date,
+                event_date,
+                event_slug,
+                event_slug,
                 _Json([event_slug]),
                 checkin.get("member") or False,
-                now, now,
+                now,
+                now,
             ),
         )
         new_uuid = cur.fetchone()[0]
@@ -1479,13 +2363,36 @@ def archive_event(
 
     # 0. Resolve defaults from settings where parameters are missing
     needs_settings = (
-        not event_date or not event_display_name
-        or not swish_expected_per_game or startgg_snapshot is None
+        not event_date
+        or not event_display_name
+        or not swish_expected_per_game
+        or startgg_snapshot is None
     )
     if needs_settings:
         settings = get_active_settings()
     else:
         settings = None
+
+    existing_stats: Optional[Dict[str, Any]] = None
+    if not event_date or not event_display_name or startgg_snapshot is None:
+        with _get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event_date, event_display_name, startgg_snapshot
+                    FROM event_stats
+                    WHERE event_slug = %s
+                    LIMIT 1
+                    """,
+                    (event_slug,),
+                )
+                row = cur.fetchone()
+                if row:
+                    existing_stats = {
+                        "event_date": row[0],
+                        "event_display_name": row[1],
+                        "startgg_snapshot": row[2],
+                    }
 
     def _coerce_to_iso_date(value: Any) -> Optional[str]:
         if value is None:
@@ -1542,35 +2449,48 @@ def archive_event(
 
         events = snapshot.get("events")
         if isinstance(events, list):
-            selected_event = None
+            selected_dates: List[str] = []
+            all_dates: List[str] = []
+
             for ev in events:
                 if not isinstance(ev, dict):
                     continue
                 ev_slug = str(ev.get("event_slug") or ev.get("slug") or "").strip()
-                if ev_slug and ev_slug == slug:
-                    selected_event = ev
-                    break
-            if selected_event is None:
-                selected_event = next((ev for ev in events if isinstance(ev, dict)), None)
-
-            if isinstance(selected_event, dict):
                 for key in date_keys:
-                    parsed = _coerce_to_iso_date(selected_event.get(key))
+                    parsed = _coerce_to_iso_date(ev.get(key))
                     if parsed:
-                        return parsed
+                        all_dates.append(parsed)
+                        if ev_slug and ev_slug == slug:
+                            selected_dates.append(parsed)
+
+            # Prefer exact slug match when available, otherwise earliest event date in snapshot.
+            if selected_dates:
+                return min(selected_dates)
+            if all_dates:
+                return min(all_dates)
 
         return None
 
+    active_slug = (settings or {}).get("active_event_slug") if isinstance(settings, dict) else None
+    settings_match_slug = bool(active_slug and str(active_slug) == str(event_slug))
+
     if not event_date:
         if settings:
-            ed = settings.get("event_date")
+            ed = settings.get("event_date") if settings_match_slug else None
+            if ed:
+                event_date = ed.isoformat() if hasattr(ed, "isoformat") else str(ed)
+
+        if not event_date and existing_stats:
+            ed = existing_stats.get("event_date")
             if ed:
                 event_date = ed.isoformat() if hasattr(ed, "isoformat") else str(ed)
 
         if not event_date:
             snapshot_for_date = startgg_snapshot
-            if snapshot_for_date is None and settings:
+            if snapshot_for_date is None and settings and settings_match_slug:
                 snapshot_for_date = settings.get("events_json")
+            if snapshot_for_date is None and existing_stats:
+                snapshot_for_date = existing_stats.get("startgg_snapshot")
             event_date = _extract_date_from_snapshot(snapshot_for_date, event_slug)
 
         if not event_date:
@@ -1582,14 +2502,26 @@ def archive_event(
                 event_date,
             )
 
-    if not event_display_name and settings:
+    # Normalize resolved/provided event_date to ISO date string.
+    normalized_event_date = _coerce_to_iso_date(event_date)
+    if not normalized_event_date:
+        raise ValueError(f"Invalid event_date for '{event_slug}': {event_date}")
+    event_date = normalized_event_date
+
+    if not event_display_name and settings and settings_match_slug:
         event_display_name = settings.get("event_display_name") or ""
+
+    if not event_display_name and existing_stats:
+        event_display_name = str(existing_stats.get("event_display_name") or "")
 
     if not swish_expected_per_game and settings:
         swish_expected_per_game = settings.get("swish_expected_per_game") or 0
 
-    if startgg_snapshot is None and settings:
+    if startgg_snapshot is None and settings and settings_match_slug:
         startgg_snapshot = settings.get("events_json")
+
+    if startgg_snapshot is None and existing_stats:
+        startgg_snapshot = existing_stats.get("startgg_snapshot")
 
     now = datetime.now(timezone.utc)
     replaced_rows = 0
@@ -1617,7 +2549,7 @@ def archive_event(
                            member, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
-                           external_id, startgg_event_id, is_guest, added_via
+                           external_id, startgg_event_id, is_guest, added_via, acquisition_source
                     FROM active_event_data
                     WHERE event_slug = %s
                     """,
@@ -1635,9 +2567,7 @@ def archive_event(
                 # 2. Match/create players (returns uuid + new/returning flag)
                 player_results = []
                 for c in checkins:
-                    p_uuid, is_new = _match_or_create_player(
-                        cur, c, event_slug, event_date, now
-                    )
+                    p_uuid, is_new = _match_or_create_player(cur, c, event_slug, event_date, now)
                     player_results.append((p_uuid, is_new))
 
                 # 3. Insert into event_archive (with player_uuid)
@@ -1650,7 +2580,7 @@ def archive_event(
                         payment_amount, payment_expected,
                         swish_expected_per_game,
                         tournament_games_registered, checkin_uuid,
-                        external_id, startgg_event_id, is_guest, added_via,
+                        external_id, startgg_event_id, is_guest, added_via, acquisition_source,
                         archived_at, player_uuid
                     ) VALUES (
                         %s, %s, %s,
@@ -1659,22 +2589,35 @@ def archive_event(
                         %s, %s,
                         %s,
                         %s, %s,
-                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
                         %s, %s
                     )
                     """,
                     [
                         (
-                            event_slug, event_date, event_display_name,
-                            c.get("name"), c.get("tag"), c.get("email"),
-                            c.get("telephone"), c.get("status"),
-                            c.get("member"), c.get("startgg"), c.get("payment_valid"),
-                            c.get("payment_amount"), c.get("payment_expected"),
+                            event_slug,
+                            event_date,
+                            event_display_name,
+                            c.get("name"),
+                            c.get("tag"),
+                            c.get("email"),
+                            c.get("telephone"),
+                            c.get("status"),
+                            c.get("member"),
+                            c.get("startgg"),
+                            c.get("payment_valid"),
+                            c.get("payment_amount"),
+                            c.get("payment_expected"),
                             swish_expected_per_game,
-                            c.get("tournament_games_registered"), c.get("checkin_uuid"),
-                            c.get("external_id"), c.get("startgg_event_id"),
-                            c.get("is_guest"), c.get("added_via"),
-                            now, player_results[i][0],
+                            c.get("tournament_games_registered"),
+                            c.get("checkin_uuid"),
+                            c.get("external_id"),
+                            c.get("startgg_event_id"),
+                            c.get("is_guest"),
+                            c.get("added_via"),
+                            c.get("acquisition_source"),
+                            now,
+                            player_results[i][0],
                         )
                         for i, c in enumerate(checkins)
                     ],
@@ -1687,9 +2630,7 @@ def archive_event(
                 total = stats["total_participants"]
                 returning_players = total - new_players
                 retention_rate = (
-                    (Decimal(returning_players) / Decimal(total) * 100).quantize(
-                        Decimal("0.01")
-                    )
+                    (Decimal(returning_players) / Decimal(total) * 100).quantize(Decimal("0.01"))
                     if total > 0
                     else Decimal("0")
                 )
@@ -1717,9 +2658,7 @@ def archive_event(
                 no_show_base = startgg_registered_players or startgg_registered_count
                 no_show_count = max(no_show_base - checked_in_count, 0)
                 no_show_rate = (
-                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(
-                        Decimal("0.01")
-                    )
+                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(Decimal("0.01"))
                     if no_show_base > 0
                     else Decimal("0")
                 )
@@ -1727,6 +2666,29 @@ def archive_event(
                     logger.info(
                         f"No-show: {no_show_count}/{no_show_base} "
                         f"({'players' if startgg_registered_players else 'slots (legacy)'})"
+                    )
+
+                payment_valid_count = sum(1 for c in checkins if bool(c.get("payment_valid")))
+                paid_amount_count = sum(
+                    1 for c in checkins if Decimal(str(c.get("payment_amount") or 0)) > 0
+                )
+                integrity_warnings = _build_event_stats_integrity_warnings(
+                    total_participants=total,
+                    new_players=new_players,
+                    returning_players=returning_players,
+                    checked_in_count=checked_in_count,
+                    no_show_base=no_show_base,
+                    no_show_count=no_show_count,
+                    no_show_rate=no_show_rate,
+                    games_breakdown=stats.get("games_breakdown") or {},
+                    payment_valid_count=payment_valid_count,
+                    paid_amount_count=paid_amount_count,
+                )
+                if integrity_warnings:
+                    logger.warning(
+                        "archive_event integrity warnings for '%s': %s",
+                        event_slug,
+                        "; ".join(integrity_warnings),
                     )
 
                 # 5. Upsert event_stats (including startgg_snapshot + no-show)
@@ -1778,7 +2740,10 @@ def archive_event(
                         no_show_rate = EXCLUDED.no_show_rate
                     """,
                     (
-                        event_slug, event_date, event_display_name, now,
+                        event_slug,
+                        event_date,
+                        event_display_name,
+                        now,
                         stats["total_participants"],
                         stats["total_revenue"],
                         stats["avg_payment"],
@@ -1831,14 +2796,17 @@ def archive_event(
         audit_action,
         "event_archive",
         target_event=event_slug,
-        details=json.dumps({
-            "participants": stats["total_participants"],
-            "total_revenue": str(stats["total_revenue"]),
-            "new_players": new_players,
-            "returning_players": returning_players,
-            "replaced_rows": replaced_rows,
-            "cleared_active": clear_active,
-        }),
+        details=json.dumps(
+            {
+                "participants": stats["total_participants"],
+                "total_revenue": str(stats["total_revenue"]),
+                "new_players": new_players,
+                "returning_players": returning_players,
+                "replaced_rows": replaced_rows,
+                "cleared_active": clear_active,
+                "integrity_warnings": integrity_warnings,
+            }
+        ),
     )
 
     logger.info(
@@ -1865,6 +2833,7 @@ def archive_event(
         "checked_in_count": checked_in_count,
         "no_show_count": no_show_count,
         "no_show_rate": float(no_show_rate),
+        "integrity_warnings": integrity_warnings,
         "replaced_rows": replaced_rows,
         "cleared_active": deleted_count if clear_active else 0,
     }
@@ -1927,10 +2896,16 @@ def reopen_event(
                 if row:
                     settings_id = row[0]
                 else:
-                    cur.execute("INSERT INTO settings (is_active, created_at, updated_at) VALUES (true, now(), now()) RETURNING id")
+                    cur.execute(
+                        "INSERT INTO settings (is_active, created_at, updated_at) VALUES (true, now(), now()) RETURNING id"
+                    )
                     settings_id = cur.fetchone()[0]
 
-                event_date_value = event_date.isoformat() if event_date is not None and hasattr(event_date, "isoformat") else event_date
+                event_date_value = (
+                    event_date.isoformat()
+                    if event_date is not None and hasattr(event_date, "isoformat")
+                    else event_date
+                )
 
                 cur.execute(
                     """
@@ -1968,7 +2943,7 @@ def reopen_event(
                                 status, member, startgg, payment_valid,
                                 payment_amount, payment_expected,
                                 tournament_games_registered, checkin_uuid,
-                                startgg_event_id, is_guest, added_via, player_uuid,
+                                startgg_event_id, is_guest, added_via, acquisition_source, player_uuid,
                                 created
                             )
                             SELECT
@@ -1990,6 +2965,7 @@ def reopen_event(
                                 startgg_event_id,
                                 is_guest,
                                 COALESCE(NULLIF(added_via, ''), 'reopen_restore'),
+                                acquisition_source,
                                 player_uuid,
                                 %s
                             FROM event_archive
@@ -2387,30 +3363,34 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
             # Load all players
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT uuid, name, tag, email, telephone, total_events
                 FROM players
                 ORDER BY total_events DESC, name
-            """)
+            """
+            )
             players = cur.fetchall()
 
     # Build lookup structures
     player_list = []
     for row in players:
         p_uuid, name, tag, email, telephone, total_events = row
-        player_list.append({
-            "uuid": p_uuid,
-            "name": (name or "").strip(),
-            "tag": (tag or "").strip(),
-            "email": (email or "").strip(),
-            "telephone": (telephone or "").strip(),
-            "total_events": total_events or 0,
-        })
+        player_list.append(
+            {
+                "uuid": p_uuid,
+                "name": (name or "").strip(),
+                "tag": (tag or "").strip(),
+                "email": (email or "").strip(),
+                "telephone": (telephone or "").strip(),
+                "total_events": total_events or 0,
+            }
+        )
 
     seen_pairs = set()
 
     for i, a in enumerate(player_list):
-        for b in player_list[i + 1:]:
+        for b in player_list[i + 1 :]:
             pair_key = tuple(sorted([a["uuid"], b["uuid"]]))
             if pair_key in seen_pairs:
                 continue
@@ -2449,12 +3429,14 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
 
             if reasons:
                 seen_pairs.add(pair_key)
-                candidates.append({
-                    "player_a": a,
-                    "player_b": b,
-                    "reasons": reasons,
-                    "confidence": confidence,
-                })
+                candidates.append(
+                    {
+                        "player_a": a,
+                        "player_b": b,
+                        "reasons": reasons,
+                        "confidence": confidence,
+                    }
+                )
 
             if len(candidates) >= limit:
                 break
@@ -2696,13 +3678,15 @@ def merge_players(
         "players",
         target_player=keep_uuid,
         reason=reason,
-        details=json.dumps({
-            "merge_id": merge_id,
-            "keep_uuid": keep_uuid,
-            "remove_uuid": remove_uuid,
-            "archive_rows_updated": archive_updated,
-            "active_rows_updated": active_updated,
-        }),
+        details=json.dumps(
+            {
+                "merge_id": merge_id,
+                "keep_uuid": keep_uuid,
+                "remove_uuid": remove_uuid,
+                "archive_rows_updated": archive_updated,
+                "active_rows_updated": active_updated,
+            }
+        ),
     )
 
     logger.info(
@@ -2845,13 +3829,15 @@ def undo_merge(
         "player_merge_undone",
         "players",
         target_player=remove_uuid,
-        details=json.dumps({
-            "merge_id": merge_id,
-            "keep_uuid": keep_uuid,
-            "remove_uuid": remove_uuid,
-            "archive_reverted": archive_reverted,
-            "active_reverted": active_reverted,
-        }),
+        details=json.dumps(
+            {
+                "merge_id": merge_id,
+                "keep_uuid": keep_uuid,
+                "remove_uuid": remove_uuid,
+                "archive_reverted": archive_reverted,
+                "active_reverted": active_reverted,
+            }
+        ),
     )
 
     logger.info(
@@ -2892,29 +3878,38 @@ def get_merge_history(limit: int = 50) -> List[Dict[str, Any]]:
     result = []
     for row in rows:
         (
-            mid, merged_at, keep_uuid, remove_uuid,
-            user_name, reason, snapshot,
-            archive_updated, active_updated,
-            undone, undone_at,
+            mid,
+            merged_at,
+            keep_uuid,
+            remove_uuid,
+            user_name,
+            reason,
+            snapshot,
+            archive_updated,
+            active_updated,
+            undone,
+            undone_at,
         ) = row
 
         # Extract display names from snapshot
         removed_name = snapshot.get("name", "") if isinstance(snapshot, dict) else ""
         removed_tag = snapshot.get("tag", "") if isinstance(snapshot, dict) else ""
 
-        result.append({
-            "id": mid,
-            "merged_at": merged_at.isoformat() if merged_at else None,
-            "keep_uuid": keep_uuid,
-            "remove_uuid": remove_uuid,
-            "user_name": user_name,
-            "reason": reason,
-            "removed_name": removed_name,
-            "removed_tag": removed_tag,
-            "archive_rows_updated": archive_updated or 0,
-            "active_rows_updated": active_updated or 0,
-            "undone": undone or False,
-            "undone_at": undone_at.isoformat() if undone_at else None,
-        })
+        result.append(
+            {
+                "id": mid,
+                "merged_at": merged_at.isoformat() if merged_at else None,
+                "keep_uuid": keep_uuid,
+                "remove_uuid": remove_uuid,
+                "user_name": user_name,
+                "reason": reason,
+                "removed_name": removed_name,
+                "removed_tag": removed_tag,
+                "archive_rows_updated": archive_updated or 0,
+                "active_rows_updated": active_updated or 0,
+                "undone": undone or False,
+                "undone_at": undone_at.isoformat() if undone_at else None,
+            }
+        )
 
     return result

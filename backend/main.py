@@ -363,6 +363,7 @@ def get_active_settings() -> dict:
         "require_startgg": fields.get("require_startgg"),
         # Optional features
         "offer_membership": fields.get("offer_membership"),
+        "collect_acquisition_source": fields.get("collect_acquisition_source"),
     }
 
 
@@ -380,13 +381,51 @@ def get_tournament_events(tournament_slug: str) -> list:
     Cache TTL: 10 minutes (events don't change during a tournament)
     Fallback: Returns empty list if API fails or no token configured
     """
+    def _events_from_settings_fallback() -> list:
+        """Build event list from active settings when Start.gg is unavailable."""
+        try:
+            settings = storage_get_active_settings() or {}
+        except Exception:
+            return []
+
+        active_slug = (settings.get("active_event_slug") or "").strip()
+        if active_slug and tournament_slug and active_slug != tournament_slug:
+            return []
+
+        out = []
+        raw_events = settings.get("events_json")
+        events = []
+        if isinstance(raw_events, dict):
+            events = raw_events.get("events") or []
+        elif isinstance(raw_events, list):
+            events = raw_events
+
+        for idx, ev in enumerate(events):
+            if not isinstance(ev, dict):
+                continue
+            name = (ev.get("name") or "").strip()
+            if not name:
+                continue
+            ev_id = ev.get("id")
+            out.append({"id": str(ev_id) if ev_id is not None else f"settings-{idx+1}", "name": name})
+
+        if out:
+            return out
+
+        default_games = settings.get("default_game") or []
+        for idx, game_name in enumerate(default_games):
+            name = str(game_name or "").strip()
+            if name:
+                out.append({"id": f"default-{idx+1}", "name": name})
+        return out
+
     if not tournament_slug:
         logger.warning("No tournament slug provided for event fetch")
         return []
 
     if not STARTGG_API_KEY:
         logger.warning("STARTGG_API_KEY not configured, cannot fetch events")
-        return []
+        return _events_from_settings_fallback()
 
     now = time.time()
 
@@ -434,11 +473,19 @@ def get_tournament_events(tournament_slug: str) -> list:
 
         if "errors" in data:
             logger.error(f"Start.gg GraphQL errors: {data['errors']}")
+            fallback_events = _events_from_settings_fallback()
+            if fallback_events:
+                logger.info("Using settings fallback events after Start.gg GraphQL errors")
+                return fallback_events
             return []
 
         tournament = data.get("data", {}).get("tournament")
         if not tournament:
             logger.warning(f"Tournament not found: {tournament_slug}")
+            fallback_events = _events_from_settings_fallback()
+            if fallback_events:
+                logger.info("Using settings fallback events for missing tournament")
+                return fallback_events
             return []
 
         events = tournament.get("events") or []
@@ -456,9 +503,17 @@ def get_tournament_events(tournament_slug: str) -> list:
 
     except requests.RequestException as e:
         logger.error(f"Start.gg API request failed: {e}")
+        fallback_events = _events_from_settings_fallback()
+        if fallback_events:
+            logger.info("Using settings fallback events after Start.gg request failure")
+            return fallback_events
         return []
     except Exception as e:
         logger.error(f"Error parsing Start.gg response: {e}")
+        fallback_events = _events_from_settings_fallback()
+        if fallback_events:
+            logger.info("Using settings fallback events after parsing error")
+            return fallback_events
         return []
 
 
@@ -715,6 +770,7 @@ async def root(request: Request):
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
         "kiosk": False,
+        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
         # Pass all requirements so frontend can compute missing array correctly
         **requirements,
     })
@@ -732,6 +788,7 @@ async def kiosk_mode(request: Request):
         "request": request,
         "n8n_token": N8N_WEBHOOK_TOKEN or "",
         "kiosk": True,
+        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
         **requirements,
     })
 
@@ -747,6 +804,7 @@ async def register_form(request: Request):
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
+        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
         # Configurable requirements - frontend hides sections that are not required
         **requirements,
     })
@@ -765,6 +823,7 @@ async def register_form_alias(request: Request):
         "swish_number": settings.get("swish_number", "123 456 78 90"),
         "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
         "games": games,
+        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
         # Configurable requirements
         **requirements,
     })
@@ -1359,6 +1418,7 @@ async def orchestrate_checkin(request: Request):
     telefon = sanitized.get("telefon") or sanitized.get("telephone") or ""
     email = sanitized.get("email") or ""
     personnummer = sanitized.get("personnummer") or ""
+    acquisition_source = sanitized.get("acquisition_source")
 
     # 1. begin_checkin (dedupe by tag+slug)
     try:
@@ -1369,6 +1429,7 @@ async def orchestrate_checkin(request: Request):
             "telephone": telefon,
             "status": "Pending",
             "added_via": "startgg_flow",
+            "acquisition_source": acquisition_source,
         })
     except Exception as e:
         logger.exception(f"begin_checkin failed: {e}")
