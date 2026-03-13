@@ -1562,14 +1562,14 @@ def create_layout():
                                             html.Div(
                                                 style={
                                                     "display": "flex",
-                                                    "gap": "1rem",
+                                                    "gap": "0.7rem",
                                                     "flexWrap": "wrap",
                                                     "alignItems": "flex-end",
                                                     "marginBottom": "1rem",
                                                 },
                                                 children=[
                                                     html.Div(
-                                                        style={"flex": "1", "minWidth": "300px"},
+                                                        style={"flex": "1 1 260px", "minWidth": "260px"},
                                                         children=[
                                                             html.Label(
                                                                 "Archived Events",
@@ -1599,7 +1599,7 @@ def create_layout():
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        style={"minWidth": "190px"},
+                                                        style={"minWidth": "160px"},
                                                         children=[
                                                             html.Label(
                                                                 "Period",
@@ -1656,7 +1656,7 @@ def create_layout():
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        style={"minWidth": "240px"},
+                                                        style={"minWidth": "220px"},
                                                         children=[
                                                             html.Label(
                                                                 "Series",
@@ -1688,12 +1688,12 @@ def create_layout():
                                                     html.Div(
                                                         id="insights-custom-range-wrap",
                                                         style={
-                                                            "display": "none",
-                                                            "minWidth": "320px",
+                                                            "display": "block",
+                                                            "minWidth": "290px",
                                                         },
                                                         children=[
                                                             html.Label(
-                                                                "Custom Date Range",
+                                                                "Date Range",
                                                                 style={
                                                                     "fontSize": "0.75rem",
                                                                     "color": COLORS[
@@ -1703,18 +1703,35 @@ def create_layout():
                                                                     "display": "block",
                                                                 },
                                                             ),
-                                                            dcc.DatePickerRange(
-                                                                id="insights-date-range",
-                                                                minimum_nights=0,
-                                                                updatemode="bothdates",
-                                                                display_format="YYYY-MM-DD",
-                                                                start_date=year_start.isoformat(),
-                                                                end_date=today.isoformat(),
+                                                            html.Div(
                                                                 style={
-                                                                    "backgroundColor": COLORS[
-                                                                        "bg_dark"
-                                                                    ]
+                                                                    "display": "flex",
+                                                                    "alignItems": "center",
+                                                                    "gap": "0.35rem",
                                                                 },
+                                                                children=[
+                                                                    dcc.Input(
+                                                                        id="insights-date-start",
+                                                                        type="date",
+                                                                        className="fgc-date-input",
+                                                                        value=year_start.isoformat(),
+                                                                        style={"width": "130px"},
+                                                                    ),
+                                                                    html.Span(
+                                                                        "to",
+                                                                        style={
+                                                                            "color": COLORS["text_muted"],
+                                                                            "fontSize": "0.74rem",
+                                                                        },
+                                                                    ),
+                                                                    dcc.Input(
+                                                                        id="insights-date-end",
+                                                                        type="date",
+                                                                        className="fgc-date-input",
+                                                                        value=today.isoformat(),
+                                                                        style={"width": "130px"},
+                                                                    ),
+                                                                ],
                                                             ),
                                                         ],
                                                     ),

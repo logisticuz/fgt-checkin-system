@@ -1653,8 +1653,8 @@ def register_callbacks(app):
         Input("insights-top-players-limit", "value"),
         Input("insights-top-players-game-filter", "value"),
         Input("insights-top-players-search", "value"),
-        Input("insights-date-range", "start_date"),
-        Input("insights-date-range", "end_date"),
+        Input("insights-date-start", "value"),
+        Input("insights-date-end", "value"),
     )
     def update_insights(
         selected_tab,
