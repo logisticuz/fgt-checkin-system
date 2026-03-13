@@ -19,9 +19,13 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
       "namn": "Deltagarens Fulla Namn",
       "telefon": "0701234567",
       "tag": "PlayerTag123",
-      "personnummer": "YYYYMMDDXXXX"
+      "personnummer": "YYYYMMDDXXXX",
+      "acquisition_source": "discord"
     }
     ```
+*   **Noteringar:**
+    *   `acquisition_source` är valfritt och används när `settings.collect_acquisition_source=true`.
+    *   Backend sätter `added_via="startgg_flow"` automatiskt för detta flöde.
 *   **Validering (på servern):**
     *   Payloaden valideras av `backend/validation.py`.
     *   Fält saneras (t.ex. `personnummer` normaliseras till bara siffror).
@@ -160,6 +164,7 @@ Dessa endpoints är tillgängliga via `backend`-tjänsten.
 
 #### `POST /api/archive/event`
 *   **Beskrivning:** Arkiverar det aktiva eventet. Flyttar alla check-in-rader till `event_archive`, beräknar statistik (inklusive no-show-metrik) och sparar i `event_stats`. Rensar `active_event_data`.
+*   **Notering:** Archive-flödet kör även soft integrity-kontroller och loggar varningar vid mismatch (utan att blockera arkivering).
 *   **Metod:** `POST`
 
 #### `POST /api/archive/reopen`
@@ -185,10 +190,16 @@ Dessa endpoints är avsedda för integrationslager (n8n) där backend/Postgres �
         "name": "Player Name",
         "tag": "PlayerTag",
         "telephone": "0701234567",
-        "email": "player@example.com"
+        "email": "player@example.com",
+        "added_via": "api",
+        "acquisition_source": "friend"
       }
     }
     ```
+*   **Noteringar:**
+    *   `payload.added_via` är valfritt. Tillåtna värden: `manual_dashboard`, `startgg_flow`, `api`, `reopen_restore`, `unknown`.
+    *   Om `added_via` saknas i request sätter backend default till `api`.
+    *   `payload.acquisition_source` normaliseras till tillåtna källor (`friend`, `discord`, `startgg`, `social`, `venue`, `other`) eller ignoreras.
 *   **Svar (JSON):**
     ```json
     {

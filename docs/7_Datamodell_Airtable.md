@@ -25,6 +25,7 @@
 | `require_payment`         | `boolean`        | Om `true`, maste `payment_valid` vara sann for att bli `Ready`.          | `true`                            |
 | `require_membership`      | `boolean`        | Om `true`, maste `member` vara sann for att bli `Ready`.                 | `true`                            |
 | `require_startgg`         | `boolean`        | Om `true`, maste `startgg` vara sann for att bli `Ready`.                | `true`                            |
+| `collect_acquisition_source` | `boolean`     | Om `true`, visas fragan "Hur hittade du eventet?" i check-in-formularet. | `false`                        |
 
 ---
 
@@ -49,11 +50,13 @@
 | `member`                      | `boolean`        | `true` om deltagaren ar verifierad medlem i foreningen (via eBas).       | `true`                                     |
 | `startgg`                     | `boolean`        | `true` om deltagaren ar verifierad registrerad pa Start.gg for eventet.  | `true`                                     |
 | `is_guest`                    | `boolean`        | `true` om spelaren **inte** hittades pa Start.gg. Satts automatiskt.      | `true`                                     |
+| `added_via`                   | `text`           | Kallan till raden (`startgg_flow`, `manual_dashboard`, `api`, `reopen_restore`, `unknown`). | `startgg_flow` |
+| `acquisition_source`          | `text`           | Hur spelaren hittade eventet (om insamling ar aktiv).                     | `discord`                                  |
 | `payment_amount`              | `numeric`        | Belopp som deltagaren har betalat (fran Swish-matchning eller manuellt). | `100`                                      |
 | `payment_expected`            | `numeric`        | Forväntat betalningsbelopp.                                              | `100`                                      |
 | `payment_valid`               | `boolean`        | `true` om betalningen har verifierats och ar korrekt.                     | `true`                                     |
 | `status`                      | `text`           | Overgripande status for deltagaren: `Ready`, `Pending`.                  | `Ready`                                    |
-| `created_at`                  | `timestamptz`    | Tidstampel for nar incheckningsraden skapades.                           | `2025-12-17T11:30:00Z`                     |
+| `created`                     | `timestamptz`    | Tidstampel for nar incheckningsraden skapades.                           | `2025-12-17T11:30:00Z`                     |
 
 ---
 
@@ -70,10 +73,13 @@
 | `email`               | `text`           | Spelarens email.                                               | `anna@example.com`              |
 | `telephone`           | `text`           | Spelarens telefon.                                             | `0701234567`                    |
 | `games_played`        | `text[]`         | Lista over spel spelaren deltagit i.                           | `["Street Fighter 6"]`          |
-| `events_participated` | `integer`        | Antal event spelaren deltagit i.                               | `5`                             |
+| `total_events`        | `integer`        | Antal event spelaren deltagit i.                               | `5`                             |
 | `total_paid`          | `numeric`        | Totalt belopp betalat.                                         | `250`                           |
-| `joined_at`           | `timestamptz`    | Nar spelaren forst registrerades.                              | `2025-12-17T11:30:00Z`          |
+| `first_seen`          | `timestamptz`    | Nar spelaren forst registrerades.                              | `2025-12-17T11:30:00Z`          |
 | `last_seen`           | `timestamptz`    | Senaste aktivitet.                                             | `2026-03-10T18:00:00Z`          |
+| `first_event`         | `text`           | Forsta event-sluggen spelaren syntes i.                        | `fightbox-1`                    |
+| `last_event`          | `text`           | Senaste event-sluggen spelaren syntes i.                       | `fightbox-7`                    |
+| `events_list`         | `jsonb`          | Historiklista over event spelaren deltagit i.                  | `["fightbox-1", "fightbox-2"]` |
 | `notes`               | `text`           | Fritext-anteckningar.                                          | `Sponsor: Razer`                |
 
 ---
@@ -86,6 +92,8 @@
 | Faltnamn              | Typ              | Beskrivning                                                    |
 | :-------------------- | :--------------- | :------------------------------------------------------------- |
 | `player_uuid`         | `text`           | Canonical player UUID — bevaras fran active_event_data vid arkivering och aterstalls vid reopen. |
+| `added_via`           | `text`           | Ursprunglig check-in-kalla bevarad i arkivet.                 |
+| `acquisition_source`  | `text`           | Sparad acquisition-kalla per check-in-rad (om tillganglig).   |
 | `archived_at`         | `timestamptz`    | Tidstampel for nar raden arkiverades.                          |
 
 ---
