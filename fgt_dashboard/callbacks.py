@@ -18,6 +18,7 @@ import os
 import logging
 import json
 import re
+import unicodedata
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from typing import Any, Dict, List
@@ -1650,6 +1651,8 @@ def register_callbacks(app):
         Input("insights-period-dropdown", "value"),
         Input("insights-series-dropdown", "value"),
         Input("insights-top-players-limit", "value"),
+        Input("insights-top-players-game-filter", "value"),
+        Input("insights-top-players-search", "value"),
         Input("insights-date-range", "start_date"),
         Input("insights-date-range", "end_date"),
     )
@@ -1660,6 +1663,8 @@ def register_callbacks(app):
         selected_period,
         selected_series,
         top_players_limit,
+        selected_player_game,
+        top_players_search,
         custom_start_date,
         custom_end_date,
     ):
@@ -1723,14 +1728,14 @@ def register_callbacks(app):
                 "—",
                 "—",
                 "—",
-                "Most popular game: -",
+                "Game highlight: -",
                 "Added via: -",
                 "",
                 "Top attendees",
                 [],
                 "",
                 [],
-                "Most played games",
+                "Game distribution",
                 [],
                 "",
                 {},
@@ -1794,7 +1799,7 @@ def register_callbacks(app):
 
         all_events = list(events)
 
-        selected_period = selected_period or "month"
+        selected_period = selected_period or "custom"
 
         def _as_float(v):
             try:
@@ -1807,6 +1812,12 @@ def register_callbacks(app):
                 return int(v or 0)
             except Exception:
                 return 0
+
+        def _norm_text(value: Any) -> str:
+            txt = unicodedata.normalize("NFKD", str(value or ""))
+            txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+            txt = re.sub(r"[^a-z0-9]+", "", txt.lower())
+            return txt
 
         def _as_date(v):
             if not v:
@@ -2109,6 +2120,10 @@ def register_callbacks(app):
 
         for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
+            ev_checked_in = _as_int(ev.get("checked_in_count"))
+            ev_registered = _as_int(ev.get("startgg_registered_players")) or _as_int(
+                ev.get("startgg_registered_count")
+            )
             ev_member_rate = (
                 (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
             )
@@ -2129,28 +2144,57 @@ def register_callbacks(app):
             manual_stats = manual_by_event.get(ev_slug, {}) if ev_slug else {}
             manual_count = _as_int(manual_stats.get("manual_count"))
             manual_pct = _as_float(manual_stats.get("manual_pct"))
+
+            checked_in_rate = (ev_checked_in / ev_registered * 100) if ev_registered > 0 else 0.0
+            retention_rate = _as_float(ev.get("retention_rate"))
+
+            # Local-event friendly no-show scoring (10-30 players, 1-3 no-shows is normal)
+            if ev_no_show_rate <= 10:
+                no_show_score = 100.0
+            elif ev_no_show_rate <= 20:
+                no_show_score = 100.0 - ((ev_no_show_rate - 10.0) * 2.5)  # 100 -> 75
+            elif ev_no_show_rate <= 30:
+                no_show_score = 75.0 - ((ev_no_show_rate - 20.0) * 2.0)  # 75 -> 55
+            elif ev_no_show_rate <= 40:
+                no_show_score = 55.0 - ((ev_no_show_rate - 30.0) * 2.0)  # 55 -> 35
+            else:
+                no_show_score = max(0.0, 35.0 - ((ev_no_show_rate - 40.0) * 1.5))
+
+            manual_score = max(0.0, min(100.0, 100.0 - (manual_pct * 2.0)))
+            event_quality_score = (
+                0.30 * no_show_score
+                + 0.30 * checked_in_rate
+                + 0.20 * retention_rate
+                + 0.20 * manual_score
+            )
+            if event_quality_score >= 80:
+                quality_level, quality_rank = "Healthy", "4/4"
+            elif event_quality_score >= 65:
+                quality_level, quality_rank = "Stable", "3/4"
+            elif event_quality_score >= 45:
+                quality_level, quality_rank = "Watch", "2/4"
+            else:
+                quality_level, quality_rank = "Critical", "1/4"
+
             table_rows.append(
                 {
                     "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
                     "event_slug": ev_slug,
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
+                    "no_show_rate": round(ev_no_show_rate, 1),
+                    "no_show_count": ev_no_show,
+                    "event_quality": f"{quality_level} [{quality_rank}] ({event_quality_score:.0f})",
                     "checked_in_vs_registered": (
-                        f"{_as_int(ev.get('checked_in_count'))}"
-                        f"/{_as_int(ev.get('startgg_registered_players')) or _as_int(ev.get('startgg_registered_count'))}"
-                        if (
-                            _as_int(ev.get("startgg_registered_players"))
-                            or _as_int(ev.get("startgg_registered_count"))
-                        )
-                        > 0
+                        f"{ev_checked_in}/{ev_registered}"
+                        if ev_registered > 0
                         else "-"
                     ),
+                    "top_game": _normalize_game_name(ev.get("most_popular_game")) or "-",
                     "total_revenue": f"{ev_revenue:.0f} kr",
                     "member_rate": f"{ev_member_rate:.0f}%",
                     "startgg_rate": f"{ev_startgg_rate:.0f}%",
-                    "retention_rate": f"{_as_float(ev.get('retention_rate')):.0f}%",
-                    "no_show_count": ev_no_show,
-                    "no_show_rate": f"{ev_no_show_rate:.0f}%" if ev_no_show_rate > 0 else "-",
+                    "retention_rate": f"{retention_rate:.0f}%",
                     "manual_count": manual_count,
                     "manual_share": f"{manual_pct:.0f}%" if ev_total > 0 else "-",
                 }
@@ -2200,7 +2244,7 @@ def register_callbacks(app):
 
         if metrics["top_game_counts"]:
             top_game = max(metrics["top_game_counts"], key=metrics["top_game_counts"].get)
-            top_game_text = f"Most popular game: {top_game}"
+            top_game_text = f"Game highlight: {top_game}"
         else:
             top_game_text = ""
 
@@ -2442,7 +2486,7 @@ def register_callbacks(app):
             "month": "Last 30 days",
             "quarter": "Last 90 days",
             "year": "Last 365 days",
-            "custom": "Custom range",
+            "custom": "Year to date",
             "all": "All time",
         }.get(selected_period, "Selected period")
 
@@ -2583,23 +2627,46 @@ def register_callbacks(app):
         try:
             top_players_fn = getattr(storage_api, "get_top_players_history", None)
             if top_players_fn:
+                search_query = _norm_text(top_players_search)
                 if top_players_limit == "all":
                     players_limit = 10000
                 else:
                     players_limit = _as_int(top_players_limit) or 15
+                fetch_limit = 10000 if search_query else players_limit
+                selected_player_game = str(selected_player_game or "all").strip() or "all"
+                game_filter = None if selected_player_game == "all" else selected_player_game
                 top_players_rows = (
                     top_players_fn(
                         event_slugs=selected_scope_slugs,
                         start_date=range_start.isoformat() if range_start else None,
                         end_date=range_end.isoformat() if range_end else None,
-                        limit=players_limit,
+                        limit=fetch_limit,
+                        game_filter=game_filter,
                     )
                     or []
                 )
-                shown_label = "all" if top_players_limit == "all" else str(players_limit)
-                top_players_title = (
-                    f"Top attendees ({len(top_players_rows)} shown, target: {shown_label})"
+
+                if search_query:
+                    filtered_rows = []
+                    for row in top_players_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        name_norm = _norm_text(row.get("name"))
+                        tag_norm = _norm_text(row.get("tag"))
+                        if search_query in name_norm or search_query in tag_norm:
+                            filtered_rows.append(row)
+                    top_players_rows = filtered_rows
+
+                scope_label = (
+                    f" in {selected_player_game}"
+                    if selected_player_game and selected_player_game != "all"
+                    else ""
                 )
+                if top_players_limit == "all" or search_query:
+                    count_label = f"{len(top_players_rows)} shown"
+                else:
+                    count_label = f"{len(top_players_rows)} shown of {players_limit}"
+                top_players_title = f"Top attendees{scope_label} ({count_label})"
         except Exception as e:
             logger.warning(f"Failed to load top players leaderboard: {e}")
 
@@ -2746,7 +2813,7 @@ def register_callbacks(app):
             churn_value = "-"
             churn_delta = "N/A (multi-event trend)"
 
-        # Game popularity leaderboard for selected scope
+        # Game distribution leaderboard for selected scope
         game_counts = {}
         configured_games: Dict[str, Dict[str, int]] = {}
         total_entries = 0
@@ -2825,15 +2892,7 @@ def register_callbacks(app):
                     "share": f"{share:.0f}%",
                 }
             )
-        games_title = f"Most played games ({len(games_rows)} shown)"
-
-        total_sets_played = sum(_as_int((configured_games.get(g) or {}).get("sets")) for g in all_games)
-        total_games_played = sum(_as_int((configured_games.get(g) or {}).get("games")) for g in all_games)
-        if total_sets_played > 0 or total_games_played > 0:
-            games_title = (
-                f"Most played games ({len(games_rows)} shown, "
-                f"sets: {total_sets_played}, games: {total_games_played})"
-            )
+        games_title = f"Game distribution ({len(games_rows)} shown)"
 
         # Game trend figure (top games across selected events)
         trend_events = sorted(
@@ -2871,7 +2930,7 @@ def register_callbacks(app):
             ev_name = ev.get("event_display_name") or ev.get("event_slug") or "event"
             ev_date = _as_date(ev.get("event_date"))
             if ev_date:
-                trend_x.append(f"{ev_date.isoformat()} | {ev_name}")
+                trend_x.append(ev_date.isoformat())
                 trend_hover_labels.append(f"{ev_name} ({ev_date.isoformat()})")
             else:
                 trend_x.append(str(ev_name))
@@ -2902,9 +2961,9 @@ def register_callbacks(app):
                 "paper_bgcolor": "#0f172a",
                 "plot_bgcolor": "#0f172a",
                 "font": {"color": "#cbd5e1", "size": 11},
-                "margin": {"l": 36, "r": 12, "t": 24, "b": 48},
+                "margin": {"l": 36, "r": 12, "t": 24, "b": 62},
                 "legend": {"orientation": "h", "y": 1.18, "x": 0},
-                "xaxis": {"showgrid": False, "tickangle": -20},
+                "xaxis": {"showgrid": False, "tickangle": -12, "automargin": True},
                 "yaxis": {"showgrid": True, "gridcolor": "#1e293b", "rangemode": "tozero"},
             },
         }
@@ -3226,6 +3285,651 @@ def register_callbacks(app):
         )
 
     @app.callback(
+        Output("insights-top-players-game-filter", "options"),
+        Output("insights-top-players-game-filter", "value"),
+        Input("insights-games-table", "data"),
+        Input("insights-crossover-table", "data"),
+        Input("insights-events-table", "data"),
+        State("insights-top-players-game-filter", "value"),
+    )
+    def sync_top_players_game_filter_options(games_rows, crossover_rows, events_rows, current_value):
+        games_rows = games_rows or []
+        crossover_rows = crossover_rows or []
+        events_rows = events_rows or []
+        options = [{"label": "All games", "value": "all"}]
+
+        seen = set()
+
+        def _add_option(game_name: Any):
+            game = str(game_name or "").strip()
+            if not game or game in seen or game == "-":
+                return
+            seen.add(game)
+            options.append({"label": game, "value": game})
+
+        for row in games_rows:
+            if not isinstance(row, dict):
+                continue
+            _add_option(row.get("game"))
+
+        for row in crossover_rows:
+            if not isinstance(row, dict):
+                continue
+            _add_option(row.get("game_a"))
+            _add_option(row.get("game_b"))
+
+        for row in events_rows:
+            if not isinstance(row, dict):
+                continue
+            _add_option(row.get("top_game"))
+
+        # Fallback canonical games so dropdown never collapses to only "All games".
+        for fallback_game in [
+            "SSBU Singles",
+            "STREET FIGHTER 6 TOURNAMENT",
+            "TEKKEN 8 TOURNAMENT",
+        ]:
+            _add_option(fallback_game)
+
+        valid_values = {str(o.get("value")) for o in options}
+        selected_value = str(current_value or "all")
+        if selected_value not in valid_values:
+            selected_value = "all"
+
+        return options, selected_value
+
+    @app.callback(
+        Output("insights-games-popularity-wrap", "style"),
+        Output("insights-games-crossover-wrap", "style"),
+        Output("insights-games-trends-wrap", "style"),
+        Input("insights-games-table-view", "value"),
+    )
+    def switch_games_table_view(view_mode):
+        mode = str(view_mode or "distribution").lower()
+        if mode in {"crossovers", "crossover", "crossover_heatmap", "crossover_table"}:
+            return {"display": "none"}, {"display": "block"}, {"display": "none"}
+        if mode == "trends":
+            return {"display": "none"}, {"display": "none"}, {"display": "block"}
+        return {"display": "block"}, {"display": "none"}, {"display": "none"}
+
+    app.clientside_callback(
+        """
+        function(_mode) {
+            var y = window.scrollY || window.pageYOffset || 0;
+            setTimeout(function() { window.scrollTo(0, y); }, 0);
+            setTimeout(function() { window.scrollTo(0, y); }, 120);
+            return "";
+        }
+        """,
+        Output("insights-games-scroll-lock", "children"),
+        Input("insights-games-table-view", "value"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("insights-crossover-heatmap-wrap", "style"),
+        Output("insights-crossover-table-wrap", "style"),
+        Input("insights-games-table-view", "value"),
+    )
+    def switch_crossover_visualization(view_mode):
+        mode = str(view_mode or "distribution").lower()
+        if mode in {"crossovers", "crossover", "crossover_heatmap", "crossover_table"}:
+            return {"display": "block"}, {"display": "block"}
+        return {"display": "none"}, {"display": "none"}
+
+    @app.callback(
+        Output("insights-events-overview-wrap", "style"),
+        Output("insights-events-ops-wrap", "style"),
+        Input("insights-events-table-view", "value"),
+    )
+    def switch_events_table_view(view_mode):
+        mode = str(view_mode or "overview").lower()
+        if mode == "ops_quality":
+            return {"display": "none"}, {"display": "block"}
+        return {"display": "block"}, {"display": "none"}
+
+    @app.callback(
+        Output("insights-events-ops-table", "data"),
+        Input("insights-events-table", "data"),
+    )
+    def build_events_ops_table(rows):
+        rows = rows or []
+
+        def _to_float(value: Any) -> float:
+            text = str(value or "").strip().replace("%", "")
+            try:
+                return float(text) if text else 0.0
+            except Exception:
+                return 0.0
+
+        def _parse_checkin_conversion(value: Any) -> float:
+            text = str(value or "").strip()
+            if "/" not in text:
+                return 0.0
+            left, right = text.split("/", 1)
+            try:
+                checked_in = int(left.strip() or 0)
+                registered = int(right.strip() or 0)
+                return (checked_in / registered * 100.0) if registered > 0 else 0.0
+            except Exception:
+                return 0.0
+
+        def _noshow_band(rate: float) -> str:
+            if rate < 8:
+                return "Low"
+            if rate < 18:
+                return "Normal"
+            if rate < 30:
+                return "Elevated"
+            if rate < 40:
+                return "High"
+            return "Critical"
+
+        ops_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            no_show_rate = _to_float(row.get("no_show_rate"))
+            manual_share = _to_float(row.get("manual_share"))
+            checkin_conversion = _parse_checkin_conversion(row.get("checked_in_vs_registered"))
+
+            flags: List[str] = []
+            if no_show_rate >= 30:
+                flags.append("High no-show")
+            elif no_show_rate >= 18:
+                flags.append("Elevated no-show")
+            if checkin_conversion > 0 and checkin_conversion < 75:
+                flags.append("Low check-in conversion")
+            if manual_share >= 30:
+                flags.append("High manual share")
+            elif manual_share >= 15:
+                flags.append("Elevated manual share")
+
+            ops_rows.append(
+                {
+                    "event_display_name": row.get("event_display_name", ""),
+                    "event_date": row.get("event_date", ""),
+                    "checked_in_vs_registered": row.get("checked_in_vs_registered", "-"),
+                    "no_show_count": row.get("no_show_count", 0),
+                    "no_show_rate": round(no_show_rate, 1),
+                    "no_show_band": _noshow_band(no_show_rate),
+                    "manual_count": row.get("manual_count", 0),
+                    "manual_share": row.get("manual_share", "-"),
+                    "event_quality": row.get("event_quality", "-"),
+                    "ops_flag": " | ".join(flags) if flags else "OK",
+                }
+            )
+
+        return ops_rows
+
+    @app.callback(
+        Output("insights-games-pie", "figure"),
+        Output("insights-games-pie-legend", "children"),
+        Input("insights-games-table", "data"),
+    )
+    def render_games_popularity_pie(rows):
+        rows = rows or []
+
+        def _to_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except Exception:
+                return 0
+
+        labels: List[str] = []
+        entries_values: List[int] = []
+        sets_values: List[int] = []
+        games_values: List[int] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            game_name = str(row.get("game") or "").strip()
+            entries = _to_int(row.get("entries"))
+            if not game_name or entries <= 0:
+                continue
+            labels.append(game_name)
+            entries_values.append(entries)
+            sets_values.append(_to_int(row.get("sets_played")))
+            games_values.append(_to_int(row.get("games_played")))
+
+        total_entries = sum(entries_values)
+        total_sets = sum(sets_values)
+        total_games = sum(games_values)
+
+        if total_entries <= 0:
+            empty_figure = {
+                "data": [],
+                "layout": {
+                    "paper_bgcolor": "#0f172a",
+                    "plot_bgcolor": "#0f172a",
+                    "font": {"color": "#cbd5e1", "size": 11},
+                    "margin": {"l": 10, "r": 10, "t": 28, "b": 10},
+                    "annotations": [
+                        {
+                            "text": "No game data",
+                            "x": 0.5,
+                            "y": 0.5,
+                            "showarrow": False,
+                            "font": {"size": 12, "color": "#64748b"},
+                        }
+                    ],
+                },
+            }
+            empty_legend = html.Div(
+                "No game data in selected scope.",
+                style={"color": "#64748b", "fontSize": "0.8rem"},
+            )
+            return empty_figure, empty_legend
+
+        palette = [
+            "#22d3ee",
+            "#34d399",
+            "#f59e0b",
+            "#f87171",
+            "#a78bfa",
+            "#60a5fa",
+            "#fb7185",
+            "#2dd4bf",
+            "#fbbf24",
+            "#38bdf8",
+        ]
+        colors = [palette[idx % len(palette)] for idx in range(len(labels))]
+
+        hover_texts: List[str] = []
+        for idx, _label in enumerate(labels):
+            share = (entries_values[idx] / total_entries * 100.0) if total_entries > 0 else 0.0
+            hover_texts.append(
+                "<b>{}</b><br>Check-ins: {}<br>Share: {:.1f}%<br>Sets played: {}<br>Games played: {}".format(
+                    labels[idx],
+                    entries_values[idx],
+                    share,
+                    sets_values[idx],
+                    games_values[idx],
+                )
+            )
+
+        figure = {
+            "data": [
+                {
+                    "type": "pie",
+                    "labels": labels,
+                    "values": entries_values,
+                    "hole": 0,
+                    "sort": False,
+                    "direction": "clockwise",
+                    "marker": {
+                        "colors": colors,
+                        "line": {"color": "#0b1220", "width": 1.5},
+                    },
+                    "hovertext": hover_texts,
+                    "textinfo": "percent",
+                    "textfont": {"size": 11, "color": "#e2e8f0"},
+                    "hovertemplate": "%{hovertext}<extra></extra>",
+                    "showlegend": False,
+                }
+            ],
+            "layout": {
+                "paper_bgcolor": "#0f172a",
+                "plot_bgcolor": "#0f172a",
+                "font": {"color": "#cbd5e1", "size": 11},
+                "margin": {"l": 8, "r": 8, "t": 16, "b": 8},
+            },
+        }
+
+        legend_children = [
+            html.Div(
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "0.4rem",
+                    "flexWrap": "wrap",
+                    "marginBottom": "0.65rem",
+                },
+                children=[
+                    html.Span(
+                        f"Total sets: {total_sets}",
+                        style={
+                            "padding": "0.08rem 0.45rem",
+                            "borderRadius": "999px",
+                            "border": "1px solid #334155",
+                            "color": "#93c5fd",
+                            "fontSize": "0.72rem",
+                            "fontWeight": "600",
+                        },
+                    ),
+                    html.Span(
+                        f"Total games: {total_games}",
+                        style={
+                            "padding": "0.08rem 0.45rem",
+                            "borderRadius": "999px",
+                            "border": "1px solid #334155",
+                            "color": "#86efac",
+                            "fontSize": "0.72rem",
+                            "fontWeight": "600",
+                        },
+                    ),
+                ],
+            )
+        ]
+
+        for idx, game in enumerate(labels):
+            share = (entries_values[idx] / total_entries * 100.0) if total_entries > 0 else 0.0
+            legend_children.append(
+                html.Div(
+                    style={
+                        "display": "grid",
+                        "gridTemplateColumns": "12px 1fr auto",
+                        "alignItems": "center",
+                        "gap": "0.5rem",
+                        "padding": "0.22rem 0",
+                        "borderBottom": "1px solid #1e293b",
+                    },
+                    children=[
+                        html.Span(
+                            style={
+                                "display": "inline-block",
+                                "width": "10px",
+                                "height": "10px",
+                                "borderRadius": "999px",
+                                "backgroundColor": colors[idx],
+                            }
+                        ),
+                        html.Span(
+                            game,
+                            style={
+                                "color": "#cbd5e1",
+                                "fontSize": "0.78rem",
+                                "whiteSpace": "nowrap",
+                                "overflow": "hidden",
+                                "textOverflow": "ellipsis",
+                            },
+                            title=game,
+                        ),
+                        html.Span(
+                            f"{share:.0f}% · S{sets_values[idx]} G{games_values[idx]}",
+                            style={
+                                "color": "#94a3b8",
+                                "fontSize": "0.74rem",
+                                "fontVariantNumeric": "tabular-nums",
+                            },
+                        ),
+                    ],
+                )
+            )
+
+        return figure, legend_children
+
+    @app.callback(
+        Output("insights-crossover-heatmap", "figure"),
+        Input("insights-crossover-table", "data"),
+        Input("insights-games-table", "data"),
+    )
+    def render_crossover_heatmap(crossover_rows, games_rows):
+        crossover_rows = crossover_rows or []
+        games_rows = games_rows or []
+
+        def _to_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except Exception:
+                return 0
+
+        game_order: List[str] = []
+        for row in games_rows:
+            if not isinstance(row, dict):
+                continue
+            game_name = str(row.get("game") or "").strip()
+            if game_name and game_name not in game_order:
+                game_order.append(game_name)
+
+        pair_values: Dict[tuple, int] = {}
+        pair_share: Dict[tuple, str] = {}
+        for row in crossover_rows:
+            if not isinstance(row, dict):
+                continue
+            game_a = str(row.get("game_a") or "").strip()
+            game_b = str(row.get("game_b") or "").strip()
+            if not game_a or not game_b or game_a == game_b:
+                continue
+            if game_a not in game_order:
+                game_order.append(game_a)
+            if game_b not in game_order:
+                game_order.append(game_b)
+            key = tuple(sorted([game_a, game_b]))
+            pair_values[key] = max(pair_values.get(key, 0), _to_int(row.get("shared_players")))
+            pair_share[key] = str(row.get("share") or "")
+
+        if not game_order:
+            return {
+                "data": [],
+                "layout": {
+                    "paper_bgcolor": "#0f172a",
+                    "plot_bgcolor": "#0f172a",
+                    "font": {"color": "#cbd5e1", "size": 11},
+                    "margin": {"l": 10, "r": 10, "t": 24, "b": 10},
+                    "annotations": [
+                        {
+                            "text": "No crossover data",
+                            "x": 0.5,
+                            "y": 0.5,
+                            "showarrow": False,
+                            "font": {"size": 12, "color": "#64748b"},
+                        }
+                    ],
+                },
+            }
+
+        game_entries: Dict[str, int] = {}
+        for row in games_rows:
+            if not isinstance(row, dict):
+                continue
+            game_name = str(row.get("game") or "").strip()
+            if not game_name:
+                continue
+            game_entries[game_name] = _to_int(row.get("entries"))
+
+        n = len(game_order)
+        z_matrix: List[List[int]] = [[0 for _ in range(n)] for _ in range(n)]
+        share_matrix: List[List[str]] = [["" for _ in range(n)] for _ in range(n)]
+
+        for i, game_i in enumerate(game_order):
+            z_matrix[i][i] = game_entries.get(game_i, 0)
+            share_matrix[i][i] = ""
+            for j in range(i + 1, n):
+                game_j = game_order[j]
+                key = tuple(sorted([game_i, game_j]))
+                shared = _to_int(pair_values.get(key, 0))
+                share_txt = pair_share.get(key, "")
+                z_matrix[i][j] = shared
+                z_matrix[j][i] = shared
+                share_matrix[i][j] = share_txt
+                share_matrix[j][i] = share_txt
+
+        annotations: List[Dict[str, Any]] = []
+        if n <= 8:
+            for i in range(n):
+                for j in range(n):
+                    value = z_matrix[i][j]
+                    if value <= 0:
+                        continue
+                    annotations.append(
+                        {
+                            "x": game_order[j],
+                            "y": game_order[i],
+                            "text": str(value),
+                            "showarrow": False,
+                            "font": {"size": 10, "color": "#e2e8f0"},
+                        }
+                    )
+
+        return {
+            "data": [
+                {
+                    "type": "heatmap",
+                    "x": game_order,
+                    "y": game_order,
+                    "z": z_matrix,
+                    "customdata": share_matrix,
+                    "colorscale": [
+                        [0.0, "#0b1220"],
+                        [0.2, "#172554"],
+                        [0.4, "#1d4ed8"],
+                        [0.7, "#0891b2"],
+                        [1.0, "#22d3ee"],
+                    ],
+                    "hovertemplate": (
+                        "<b>%{y}</b> + <b>%{x}</b><br>"
+                        "Shared players: %{z}<br>"
+                        "Scope share: %{customdata}"
+                        "<extra></extra>"
+                    ),
+                    "showscale": True,
+                    "colorbar": {
+                        "title": "Shared",
+                        "titlefont": {"size": 10, "color": "#94a3b8"},
+                        "tickfont": {"size": 10, "color": "#94a3b8"},
+                    },
+                }
+            ],
+            "layout": {
+                "paper_bgcolor": "#0f172a",
+                "plot_bgcolor": "#0f172a",
+                "font": {"color": "#cbd5e1", "size": 11},
+                "margin": {"l": 84, "r": 24, "t": 18, "b": 76},
+                "xaxis": {"tickangle": -22, "automargin": True, "side": "bottom"},
+                "yaxis": {"automargin": True, "autorange": "reversed"},
+                "annotations": annotations,
+            },
+        }
+
+    @app.callback(
+        Output("insights-events-noshow-trend", "figure"),
+        Input("insights-events-table", "data"),
+    )
+    def render_events_noshow_trend(rows):
+        rows = rows or []
+
+        points: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            date_text = str(row.get("event_date") or "").strip()
+            if not date_text:
+                continue
+            try:
+                y_val = float(row.get("no_show_rate") or 0.0)
+            except Exception:
+                y_val = 0.0
+            points.append(
+                {
+                    "event": str(row.get("event_display_name") or "event"),
+                    "date": date_text,
+                    "y": y_val,
+                    "count": int(row.get("no_show_count") or 0),
+                    "participants": int(row.get("total_participants") or 0),
+                }
+            )
+
+        points.sort(key=lambda p: p["date"])
+
+        if not points:
+            return {
+                "data": [],
+                "layout": {
+                    "paper_bgcolor": "#0f172a",
+                    "plot_bgcolor": "#0f172a",
+                    "font": {"color": "#cbd5e1", "size": 11},
+                    "margin": {"l": 36, "r": 12, "t": 10, "b": 30},
+                    "annotations": [
+                        {
+                            "text": "No event data",
+                            "x": 0.5,
+                            "y": 0.5,
+                            "showarrow": False,
+                            "font": {"size": 12, "color": "#64748b"},
+                        }
+                    ],
+                },
+            }
+
+        x_vals = [p["date"] for p in points]
+        no_show_vals = [p["y"] for p in points]
+        participant_vals = [p["participants"] for p in points]
+        no_show_hover = [
+            (
+                f"<b>{p['event']}</b><br>Date: {p['date']}"
+                f"<br>No-show: {p['y']:.1f}%<br>No-shows: {p['count']}"
+            )
+            for p in points
+        ]
+        participant_hover = [
+            (
+                f"<b>{p['event']}</b><br>Date: {p['date']}"
+                f"<br>Participants: {p['participants']}<br>No-show: {p['y']:.1f}%"
+            )
+            for p in points
+        ]
+
+        return {
+            "data": [
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "x": x_vals,
+                    "y": no_show_vals,
+                    "line": {"color": "#38bdf8", "width": 2},
+                    "marker": {
+                        "size": 7,
+                        "color": "#0f172a",
+                        "line": {"width": 2, "color": "#38bdf8"},
+                    },
+                    "hovertext": no_show_hover,
+                    "hovertemplate": "%{hovertext}<extra></extra>",
+                    "name": "No-show %",
+                    "yaxis": "y",
+                },
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "x": x_vals,
+                    "y": participant_vals,
+                    "line": {"color": "#34d399", "width": 2},
+                    "marker": {
+                        "size": 6,
+                        "color": "#0f172a",
+                        "line": {"width": 2, "color": "#34d399"},
+                    },
+                    "hovertext": participant_hover,
+                    "hovertemplate": "%{hovertext}<extra></extra>",
+                    "name": "Participants",
+                    "yaxis": "y2",
+                }
+            ],
+            "layout": {
+                "paper_bgcolor": "#0f172a",
+                "plot_bgcolor": "#0f172a",
+                "font": {"color": "#cbd5e1", "size": 11},
+                "margin": {"l": 44, "r": 16, "t": 8, "b": 48},
+                "xaxis": {"showgrid": False, "tickangle": -20, "automargin": True},
+                "yaxis": {
+                    "title": "No-show %",
+                    "ticksuffix": "%",
+                    "rangemode": "tozero",
+                    "showgrid": True,
+                    "gridcolor": "#1e293b",
+                },
+                "yaxis2": {
+                    "title": "Participants",
+                    "overlaying": "y",
+                    "side": "right",
+                    "rangemode": "tozero",
+                    "showgrid": False,
+                },
+                "legend": {"orientation": "h", "x": 0, "y": 1.16, "font": {"size": 10}},
+            },
+        }
+
+    @app.callback(
         Output("insights-view-players", "style"),
         Output("insights-view-games", "style"),
         Output("insights-view-events", "style"),
@@ -3237,7 +3941,7 @@ def register_callbacks(app):
     def toggle_insights_focus_view(view_mode):
         base_visible = {"display": "block"}
         hidden = {"display": "none"}
-        top_game_visible = {"color": "#94a3b8", "marginBottom": "1rem"}
+        top_game_visible = {"display": "none"}
         mode = (view_mode or "").strip().lower()
 
         if mode == "players":
@@ -3302,7 +4006,7 @@ def register_callbacks(app):
             "insights-card-ready": "Ready Rate: ready participants divided by total participants at archive time.",
             "insights-card-member": "Member Rate: members divided by total participants.",
             "insights-card-guest": "Guest Share: guests divided by total participants.",
-            "insights-card-startgg": "Start.gg Rate: Start.gg-verified participants divided by total participants.",
+            "insights-card-startgg": "Start.gg Account Rate (excl guests): (startgg_count - guest_count) divided by total participants.",
             "insights-card-retention": "Retention: returning-player share, weighted by event size.",
             "insights-card-revenue": "Total Revenue: summed event revenue in selected scope.",
             "insights-card-slots": "Checked-in Slots: total game entries for checked-in participants (3 games = 3 slots).",

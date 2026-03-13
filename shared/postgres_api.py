@@ -1558,6 +1558,7 @@ def get_top_players_history(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 15,
+    game_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return top participants by archived event attendance count."""
     conditions: List[str] = []
@@ -1574,6 +1575,46 @@ def get_top_players_history(
     if end_date:
         conditions.append("event_date <= %s")
         params.append(end_date)
+
+    selected_game = str(game_filter or "").strip()
+    if selected_game:
+        game_sql = """
+            EXISTS (
+                SELECT 1
+                FROM unnest(COALESCE(tournament_games_registered, ARRAY[]::TEXT[])) AS g(game_name)
+                WHERE (
+                    (%s = 'SSBU Singles' AND (
+                        LOWER(g.game_name) LIKE '%%ssbu%%'
+                        OR LOWER(g.game_name) LIKE '%%super smash bros ultimate%%'
+                        OR LOWER(g.game_name) = 'smash singles'
+                        OR (LOWER(g.game_name) LIKE '%%smash%%' AND LOWER(g.game_name) LIKE '%%ultimate%%')
+                    ))
+                    OR (%s = 'STREET FIGHTER 6 TOURNAMENT' AND (
+                        LOWER(g.game_name) LIKE '%%street fighter 6%%'
+                        OR LOWER(g.game_name) LIKE '%%sf6%%'
+                        OR regexp_replace(LOWER(g.game_name), '[^a-z0-9]+', '', 'g') IN (
+                            'streetfighter6',
+                            'streetfighter6tournament',
+                            'sf6'
+                        )
+                    ))
+                    OR (%s = 'TEKKEN 8 TOURNAMENT' AND (
+                        LOWER(g.game_name) LIKE '%%tekken 8%%'
+                        OR LOWER(g.game_name) LIKE '%%t8%%'
+                        OR regexp_replace(LOWER(g.game_name), '[^a-z0-9]+', '', 'g') IN (
+                            'tekken8',
+                            'tekken8tournament',
+                            't8'
+                        )
+                    ))
+                    OR (%s NOT IN ('SSBU Singles', 'STREET FIGHTER 6 TOURNAMENT', 'TEKKEN 8 TOURNAMENT')
+                        AND LOWER(g.game_name) = LOWER(%s)
+                    )
+                )
+            )
+        """
+        conditions.append(game_sql)
+        params.extend([selected_game, selected_game, selected_game, selected_game, selected_game])
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

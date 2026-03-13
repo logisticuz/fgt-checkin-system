@@ -247,6 +247,8 @@ def create_layout():
     """
     # Auth state (checked on every page load via session cookie)
     auth_state = _get_auth_state()
+    today = datetime.now().date()
+    year_start = today.replace(month=1, day=1)
 
     # Fetch data
     try:
@@ -1614,7 +1616,7 @@ def create_layout():
                                                                 id="insights-period-dropdown",
                                                                 className="fgc-dropdown",
                                                                 clearable=False,
-                                                                value="month",
+                                                                value="custom",
                                                                 options=[
                                                                     {
                                                                         "label": "Last 24h",
@@ -1637,7 +1639,7 @@ def create_layout():
                                                                         "value": "year",
                                                                     },
                                                                     {
-                                                                        "label": "Custom range",
+                                                                        "label": "Year to date",
                                                                         "value": "custom",
                                                                     },
                                                                     {
@@ -1706,6 +1708,8 @@ def create_layout():
                                                                 minimum_nights=0,
                                                                 updatemode="bothdates",
                                                                 display_format="YYYY-MM-DD",
+                                                                start_date=year_start.isoformat(),
+                                                                end_date=today.isoformat(),
                                                                 style={
                                                                     "backgroundColor": COLORS[
                                                                         "bg_dark"
@@ -2413,7 +2417,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Start.gg Account Rate",
+                                                                "Start.gg Account Rate (excl guests)",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -2731,6 +2735,14 @@ def create_layout():
                                                 id="insights-view-players",
                                                 children=[
                                                     html.Div(
+                                                        id="insights-top-players-title",
+                                                        style={
+                                                            "color": COLORS["text_primary"],
+                                                            "fontWeight": "600",
+                                                            "marginBottom": "0.45rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
                                                         style={
                                                             "display": "flex",
                                                             "justifyContent": "space-between",
@@ -2741,57 +2753,118 @@ def create_layout():
                                                         },
                                                         children=[
                                                             html.Div(
-                                                                id="insights-top-players-title",
                                                                 style={
-                                                                    "color": COLORS["text_primary"],
-                                                                    "fontWeight": "600",
+                                                                    "minWidth": "260px",
                                                                 },
+                                                                children=dcc.Input(
+                                                                    id="insights-top-players-search",
+                                                                    type="text",
+                                                                    placeholder="Search name or tag...",
+                                                                    debounce=False,
+                                                                    style={
+                                                                        "backgroundColor": COLORS["bg_dark"],
+                                                                        "color": COLORS["text_primary"],
+                                                                        "border": f"1px solid {COLORS['border']}",
+                                                                        "borderRadius": "6px",
+                                                                        "padding": "0.45rem 0.6rem",
+                                                                        "fontSize": "0.78rem",
+                                                                        "height": "36px",
+                                                                        "width": "100%",
+                                                                    },
+                                                                ),
                                                             ),
                                                             html.Div(
                                                                 style={
                                                                     "display": "flex",
-                                                                    "flexDirection": "column",
-                                                                    "gap": "0.2rem",
-                                                                    "minWidth": "120px",
+                                                                    "alignItems": "flex-end",
+                                                                    "gap": "0.75rem",
+                                                                    "flexWrap": "wrap",
                                                                 },
                                                                 children=[
                                                                     html.Div(
-                                                                        "Rows shown",
                                                                         style={
-                                                                            "color": COLORS[
-                                                                                "text_muted"
-                                                                            ],
-                                                                            "fontSize": "0.68rem",
-                                                                            "textTransform": "uppercase",
-                                                                            "letterSpacing": "0.04em",
+                                                                            "display": "flex",
+                                                                            "flexDirection": "column",
+                                                                            "gap": "0.2rem",
+                                                                            "minWidth": "240px",
+                                                                            "maxWidth": "240px",
+                                                                            "width": "240px",
                                                                         },
-                                                                    ),
-                                                                    dcc.Dropdown(
-                                                                        id="insights-top-players-limit",
-                                                                        className="fgc-dropdown",
-                                                                        options=[
-                                                                            {
-                                                                                "label": "15",
-                                                                                "value": 15,
-                                                                            },
-                                                                            {
-                                                                                "label": "30",
-                                                                                "value": 30,
-                                                                            },
-                                                                            {
-                                                                                "label": "50",
-                                                                                "value": 50,
-                                                                            },
-                                                                            {
-                                                                                "label": "All",
-                                                                                "value": "all",
-                                                                            },
+                                                                        children=[
+                                                                            html.Div(
+                                                                                "Game filter",
+                                                                                style={
+                                                                                    "color": COLORS[
+                                                                                        "text_muted"
+                                                                                    ],
+                                                                                    "fontSize": "0.68rem",
+                                                                                    "textTransform": "uppercase",
+                                                                                    "letterSpacing": "0.04em",
+                                                                                },
+                                                                            ),
+                                                                            dcc.Dropdown(
+                                                                                id="insights-top-players-game-filter",
+                                                                                className="fgc-dropdown",
+                                                                                options=[
+                                                                                    {
+                                                                                        "label": "All games",
+                                                                                        "value": "all",
+                                                                                    }
+                                                                                ],
+                                                                                value="all",
+                                                                                clearable=False,
+                                                                                style={
+                                                                                    "fontSize": "0.78rem",
+                                                                                    "width": "100%",
+                                                                                },
+                                                                            ),
                                                                         ],
-                                                                        value=15,
-                                                                        clearable=False,
+                                                                    ),
+                                                                    html.Div(
                                                                         style={
-                                                                            "fontSize": "0.78rem",
+                                                                            "display": "flex",
+                                                                            "flexDirection": "column",
+                                                                            "gap": "0.2rem",
+                                                                            "minWidth": "120px",
                                                                         },
+                                                                        children=[
+                                                                            html.Div(
+                                                                                "Rows shown",
+                                                                                style={
+                                                                                    "color": COLORS[
+                                                                                        "text_muted"
+                                                                                    ],
+                                                                                    "fontSize": "0.68rem",
+                                                                                    "textTransform": "uppercase",
+                                                                                    "letterSpacing": "0.04em",
+                                                                                },
+                                                                            ),
+                                                                            dcc.Dropdown(
+                                                                                id="insights-top-players-limit",
+                                                                                className="fgc-dropdown",
+                                                                                options=[
+                                                                                    {
+                                                                                        "label": "15",
+                                                                                        "value": 15,
+                                                                                    },
+                                                                                    {
+                                                                                        "label": "30",
+                                                                                        "value": 30,
+                                                                                    },
+                                                                                    {
+                                                                                        "label": "50",
+                                                                                        "value": 50,
+                                                                                    },
+                                                                                    {
+                                                                                        "label": "All",
+                                                                                        "value": "all",
+                                                                                    },
+                                                                                ],
+                                                                                value=15,
+                                                                                clearable=False,
+                                                                                style={"fontSize": "0.78rem"},
+                                                                            ),
+                                                                        ],
                                                                     ),
                                                                 ],
                                                             ),
@@ -2887,8 +2960,9 @@ def create_layout():
                                                     html.Div(
                                                         style={
                                                             "display": "flex",
-                                                            "justifyContent": "space-between",
+                                                            "justifyContent": "flex-start",
                                                             "alignItems": "center",
+                                                            "flexWrap": "wrap",
                                                             "gap": "0.75rem",
                                                             "marginBottom": "0.6rem",
                                                         },
@@ -2898,166 +2972,256 @@ def create_layout():
                                                                 style={
                                                                     "color": COLORS["text_primary"],
                                                                     "fontWeight": "600",
+                                                                    "minWidth": "160px",
                                                                 },
                                                             ),
                                                             html.Div(
                                                                 id="insights-top-game",
                                                                 style={
-                                                                    "color": COLORS[
-                                                                        "text_secondary"
-                                                                    ],
-                                                                    "fontSize": "0.78rem",
-                                                                    "padding": "0.25rem 0.55rem",
-                                                                    "border": f"1px solid {COLORS['border']}",
-                                                                    "borderRadius": "999px",
-                                                                    "whiteSpace": "nowrap",
+                                                                    "display": "none",
                                                                 },
                                                             ),
                                                             html.Div(
                                                                 id="insights-added-via-summary",
                                                                 style={
-                                                                    "color": COLORS[
-                                                                        "text_secondary"
-                                                                    ],
-                                                                    "fontSize": "0.78rem",
-                                                                    "padding": "0.25rem 0.55rem",
-                                                                    "border": f"1px solid {COLORS['border']}",
-                                                                    "borderRadius": "999px",
-                                                                    "whiteSpace": "nowrap",
+                                                                    "display": "none",
                                                                 },
                                                             ),
                                                         ],
                                                     ),
-                                                    dash_table.DataTable(
-                                                        id="insights-games-table",
-                                                        columns=[
-                                                            {"name": "#", "id": "rank"},
-                                                            {"name": "Game", "id": "game"},
+                                                    dcc.Dropdown(
+                                                        id="insights-games-table-view",
+                                                        className="games-table-view-dropdown",
+                                                        options=[
                                                             {
-                                                                "name": "Check-ins",
-                                                                "id": "entries",
+                                                                "label": "Overview",
+                                                                "value": "distribution",
                                                             },
                                                             {
-                                                                "name": "Registered",
-                                                                "id": "registered",
+                                                                "label": "Crossovers",
+                                                                "value": "crossovers",
                                                             },
                                                             {
-                                                                "name": "Sets played",
-                                                                "id": "sets_played",
+                                                                "label": "Trends",
+                                                                "value": "trends",
                                                             },
-                                                            {
-                                                                "name": "Games played",
-                                                                "id": "games_played",
-                                                            },
-                                                            {
-                                                                "name": "Run status",
-                                                                "id": "run_status",
-                                                            },
-                                                            {"name": "Share", "id": "share"},
                                                         ],
-                                                        data=[],
-                                                        page_size=8,
-                                                        sort_action="native",
-                                                        style_table={
-                                                            "overflowX": "auto",
-                                                            "marginBottom": "1rem",
-                                                        },
-                                                        style_header={
-                                                            "backgroundColor": COLORS["bg_dark"],
-                                                            "color": COLORS["text_primary"],
-                                                            "fontWeight": "600",
-                                                            "fontSize": "0.72rem",
-                                                            "textTransform": "uppercase",
-                                                            "letterSpacing": "0.05em",
-                                                            "padding": "0.7rem",
-                                                            "borderBottom": f"2px solid {COLORS['accent_yellow']}",
-                                                        },
-                                                        style_cell={
-                                                            "backgroundColor": COLORS["bg_card"],
-                                                            "color": COLORS["text_primary"],
-                                                            "border": "none",
-                                                            "borderBottom": f"1px solid {COLORS['border']}",
-                                                            "padding": "0.62rem 0.8rem",
-                                                            "fontSize": "0.78rem",
-                                                            "textAlign": "left",
-                                                        },
-                                                        style_data_conditional=[
-                                                            {
-                                                                "if": {"row_index": "odd"},
-                                                                "backgroundColor": COLORS[
-                                                                    "bg_dark"
+                                                        value="distribution",
+                                                        clearable=False,
+                                                        style={"maxWidth": "280px", "marginBottom": "0.55rem"},
+                                                    ),
+                                                    html.Div(id="insights-games-scroll-lock", style={"display": "none"}),
+                                                    html.Div(
+                                                        id="insights-games-popularity-wrap",
+                                                        children=[
+                                                            dash_table.DataTable(
+                                                                id="insights-games-table",
+                                                                columns=[
+                                                                    {"name": "#", "id": "rank"},
+                                                                    {"name": "Game", "id": "game"},
+                                                                    {
+                                                                        "name": "Check-ins",
+                                                                        "id": "entries",
+                                                                    },
+                                                                    {
+                                                                        "name": "Registered",
+                                                                        "id": "registered",
+                                                                    },
+                                                                    {
+                                                                        "name": "Sets played",
+                                                                        "id": "sets_played",
+                                                                    },
+                                                                    {
+                                                                        "name": "Games played",
+                                                                        "id": "games_played",
+                                                                    },
+                                                                    {
+                                                                        "name": "Run status",
+                                                                        "id": "run_status",
+                                                                    },
+                                                                    {"name": "Share", "id": "share"},
                                                                 ],
-                                                            },
+                                                                data=[],
+                                                                page_size=8,
+                                                                sort_action="native",
+                                                                style_table={
+                                                                    "overflowX": "auto",
+                                                                    "height": "280px",
+                                                                    "overflowY": "auto",
+                                                                    "marginBottom": "1rem",
+                                                                },
+                                                                style_header={
+                                                                    "backgroundColor": COLORS["bg_dark"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "fontSize": "0.72rem",
+                                                                    "textTransform": "uppercase",
+                                                                    "letterSpacing": "0.05em",
+                                                                    "padding": "0.7rem",
+                                                                    "borderBottom": f"2px solid {COLORS['accent_yellow']}",
+                                                                },
+                                                                style_cell={
+                                                                    "backgroundColor": COLORS["bg_card"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "border": "none",
+                                                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                                                    "padding": "0.62rem 0.8rem",
+                                                                    "fontSize": "0.78rem",
+                                                                    "textAlign": "left",
+                                                                },
+                                                                style_data_conditional=[
+                                                                    {
+                                                                        "if": {"row_index": "odd"},
+                                                                        "backgroundColor": COLORS["bg_dark"],
+                                                                    },
+                                                                ],
+                                                            ),
+                                                            html.Div(
+                                                                "Tip: scroll horizontally in table to see all columns.",
+                                                                style={
+                                                                    "color": COLORS["text_secondary"],
+                                                                    "fontSize": "0.72rem",
+                                                                    "marginTop": "-0.5rem",
+                                                                    "marginBottom": "0.65rem",
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                style={
+                                                                    "display": "grid",
+                                                                    "gridTemplateColumns": "minmax(260px, 360px) minmax(220px, 1fr)",
+                                                                    "gap": "0.9rem",
+                                                                    "alignItems": "stretch",
+                                                                    "marginBottom": "0.9rem",
+                                                                },
+                                                                children=[
+                                                                    dcc.Graph(
+                                                                        id="insights-games-pie",
+                                                                        config={"displayModeBar": False},
+                                                                        style={"height": "260px"},
+                                                                    ),
+                                                                    html.Div(
+                                                                        id="insights-games-pie-legend",
+                                                                        style={
+                                                                            "border": f"1px solid {COLORS['border']}",
+                                                                            "borderRadius": "10px",
+                                                                            "padding": "0.75rem 0.85rem",
+                                                                            "backgroundColor": COLORS["bg_dark"],
+                                                                        },
+                                                                    ),
+                                                                ],
+                                                            ),
                                                         ],
                                                     ),
                                                     html.Div(
-                                                        id="insights-game-mover",
-                                                        style={
-                                                            "color": COLORS["text_secondary"],
-                                                            "fontSize": "0.76rem",
-                                                            "marginBottom": "0.5rem",
-                                                        },
-                                                    ),
-                                                    dcc.Graph(
-                                                        id="insights-games-trend",
-                                                        config={"displayModeBar": False},
-                                                        style={
-                                                            "height": "260px",
-                                                            "marginBottom": "0.75rem",
-                                                        },
+                                                        id="insights-games-crossover-wrap",
+                                                        style={"display": "none"},
+                                                        children=[
+                                                            html.Div(
+                                                                id="insights-crossover-title",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "marginBottom": "0.45rem",
+                                                                    "minHeight": "1.2rem",
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                id="insights-crossover-table-wrap",
+                                                                children=[
+                                                                    dash_table.DataTable(
+                                                                        id="insights-crossover-table",
+                                                                        columns=[
+                                                                            {"name": "#", "id": "rank"},
+                                                                            {"name": "Game A", "id": "game_a"},
+                                                                            {"name": "Game B", "id": "game_b"},
+                                                                            {
+                                                                                "name": "Shared players",
+                                                                                "id": "shared_players",
+                                                                            },
+                                                                            {"name": "Share", "id": "share"},
+                                                                        ],
+                                                                        data=[],
+                                                                        page_size=8,
+                                                                        style_table={
+                                                                            "overflowX": "auto",
+                                                                            "height": "280px",
+                                                                            "overflowY": "auto",
+                                                                            "marginBottom": "1rem",
+                                                                        },
+                                                                        style_header={
+                                                                            "backgroundColor": COLORS["bg_dark"],
+                                                                            "color": COLORS["text_primary"],
+                                                                            "fontWeight": "600",
+                                                                            "fontSize": "0.72rem",
+                                                                            "textTransform": "uppercase",
+                                                                            "letterSpacing": "0.05em",
+                                                                            "padding": "0.7rem",
+                                                                            "borderBottom": f"2px solid {COLORS['accent_blue']}",
+                                                                        },
+                                                                        style_cell={
+                                                                            "backgroundColor": COLORS["bg_card"],
+                                                                            "color": COLORS["text_primary"],
+                                                                            "border": "none",
+                                                                            "borderBottom": f"1px solid {COLORS['border']}",
+                                                                            "padding": "0.62rem 0.8rem",
+                                                                            "fontSize": "0.78rem",
+                                                                            "textAlign": "left",
+                                                                        },
+                                                                        style_data_conditional=[
+                                                                            {
+                                                                                "if": {"row_index": "odd"},
+                                                                                "backgroundColor": COLORS[
+                                                                                    "bg_dark"
+                                                                                ],
+                                                                            },
+                                                                        ],
+                                                                    )
+                                                                ],
+                                                            ),
+                                                            html.Div(
+                                                                id="insights-crossover-heatmap-wrap",
+                                                                children=[
+                                                                    dcc.Graph(
+                                                                        id="insights-crossover-heatmap",
+                                                                        config={"displayModeBar": False},
+                                                                        style={
+                                                                            "height": "320px",
+                                                                            "marginBottom": "0.9rem",
+                                                                        },
+                                                                    )
+                                                                ],
+                                                            ),
+                                                        ],
                                                     ),
                                                     html.Div(
-                                                        id="insights-crossover-title",
-                                                        style={
-                                                            "color": COLORS["text_primary"],
-                                                            "fontWeight": "600",
-                                                            "marginBottom": "0.45rem",
-                                                        },
-                                                    ),
-                                                    dash_table.DataTable(
-                                                        id="insights-crossover-table",
-                                                        columns=[
-                                                            {"name": "#", "id": "rank"},
-                                                            {"name": "Game A", "id": "game_a"},
-                                                            {"name": "Game B", "id": "game_b"},
-                                                            {
-                                                                "name": "Shared players",
-                                                                "id": "shared_players",
-                                                            },
-                                                            {"name": "Share", "id": "share"},
-                                                        ],
-                                                        data=[],
-                                                        page_size=8,
-                                                        style_table={
-                                                            "overflowX": "auto",
-                                                            "marginBottom": "1rem",
-                                                        },
-                                                        style_header={
-                                                            "backgroundColor": COLORS["bg_dark"],
-                                                            "color": COLORS["text_primary"],
-                                                            "fontWeight": "600",
-                                                            "fontSize": "0.72rem",
-                                                            "textTransform": "uppercase",
-                                                            "letterSpacing": "0.05em",
-                                                            "padding": "0.7rem",
-                                                            "borderBottom": f"2px solid {COLORS['accent_blue']}",
-                                                        },
-                                                        style_cell={
-                                                            "backgroundColor": COLORS["bg_card"],
-                                                            "color": COLORS["text_primary"],
-                                                            "border": "none",
-                                                            "borderBottom": f"1px solid {COLORS['border']}",
-                                                            "padding": "0.62rem 0.8rem",
-                                                            "fontSize": "0.78rem",
-                                                            "textAlign": "left",
-                                                        },
-                                                        style_data_conditional=[
-                                                            {
-                                                                "if": {"row_index": "odd"},
-                                                                "backgroundColor": COLORS[
-                                                                    "bg_dark"
-                                                                ],
-                                                            },
+                                                        id="insights-games-trends-wrap",
+                                                        style={"display": "none"},
+                                                        children=[
+                                                            html.Div(
+                                                                "Game trends",
+                                                                style={
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "marginBottom": "0.45rem",
+                                                                    "minHeight": "1.2rem",
+                                                                },
+                                                            ),
+                                                            html.Div(
+                                                                id="insights-game-mover",
+                                                                style={
+                                                                    "color": COLORS["text_secondary"],
+                                                                    "fontSize": "0.76rem",
+                                                                    "marginBottom": "0.5rem",
+                                                                },
+                                                            ),
+                                                            dcc.Graph(
+                                                                id="insights-games-trend",
+                                                                config={"displayModeBar": False},
+                                                                style={
+                                                                    "height": "260px",
+                                                                    "marginBottom": "0.75rem",
+                                                                },
+                                                            ),
                                                         ],
                                                     ),
                                                 ],
@@ -3065,90 +3229,260 @@ def create_layout():
                                             html.Div(
                                                 id="insights-view-events",
                                                 children=[
-                                                    dash_table.DataTable(
-                                                        id="insights-events-table",
-                                                        columns=[
+                                                    dcc.Dropdown(
+                                                        id="insights-events-table-view",
+                                                        className="games-table-view-dropdown",
+                                                        options=[
+                                                            {"label": "Event overview", "value": "overview"},
                                                             {
-                                                                "name": "Event",
-                                                                "id": "event_display_name",
-                                                            },
-                                                            {"name": "Slug", "id": "event_slug"},
-                                                            {"name": "Date", "id": "event_date"},
-                                                            {
-                                                                "name": "Participants",
-                                                                "id": "total_participants",
-                                                            },
-                                                            {
-                                                                "name": "Checked-in/Reg",
-                                                                "id": "checked_in_vs_registered",
-                                                            },
-                                                            {
-                                                                "name": "Revenue",
-                                                                "id": "total_revenue",
-                                                            },
-                                                            {
-                                                                "name": "Member %",
-                                                                "id": "member_rate",
-                                                            },
-                                                            {
-                                                                "name": "Start.gg Accounts %",
-                                                                "id": "startgg_rate",
-                                                            },
-                                                            {
-                                                                "name": "Retention %",
-                                                                "id": "retention_rate",
-                                                            },
-                                                            {
-                                                                "name": "No-shows",
-                                                                "id": "no_show_count",
-                                                            },
-                                                            {
-                                                                "name": "No-show %",
-                                                                "id": "no_show_rate",
-                                                            },
-                                                            {
-                                                                "name": "Manual adds",
-                                                                "id": "manual_count",
-                                                            },
-                                                            {
-                                                                "name": "Manual %",
-                                                                "id": "manual_share",
+                                                                "label": "Operations/quality",
+                                                                "value": "ops_quality",
                                                             },
                                                         ],
-                                                        data=[],
-                                                        page_size=10,
-                                                        sort_action="native",
-                                                        style_table={"overflowX": "auto"},
-                                                        style_header={
-                                                            "backgroundColor": COLORS["bg_dark"],
+                                                        value="overview",
+                                                        clearable=False,
+                                                        style={"maxWidth": "280px", "marginBottom": "0.55rem"},
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-events-overview-wrap",
+                                                        children=[
+                                                            dash_table.DataTable(
+                                                                id="insights-events-table",
+                                                                columns=[
+                                                                    {
+                                                                        "name": "Event",
+                                                                        "id": "event_display_name",
+                                                                    },
+                                                                    {"name": "Date", "id": "event_date"},
+                                                                    {
+                                                                        "name": "Participants (excl no-shows)",
+                                                                        "id": "total_participants",
+                                                                    },
+                                                                    {
+                                                                        "name": "Top game",
+                                                                        "id": "top_game",
+                                                                    },
+                                                                    {
+                                                                        "name": "Revenue",
+                                                                        "id": "total_revenue",
+                                                                    },
+                                                                    {
+                                                                        "name": "Retention %",
+                                                                        "id": "retention_rate",
+                                                                    },
+                                                                    {
+                                                                        "name": "Start.gg Accounts (excl guests) %",
+                                                                        "id": "startgg_rate",
+                                                                    },
+                                                                    {
+                                                                        "name": "Member %",
+                                                                        "id": "member_rate",
+                                                                    },
+                                                                ],
+                                                                data=[],
+                                                                page_size=10,
+                                                                sort_action="native",
+                                                                style_table={"overflowX": "auto"},
+                                                                style_header={
+                                                                    "backgroundColor": COLORS["bg_dark"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "fontSize": "0.75rem",
+                                                                    "textTransform": "uppercase",
+                                                                    "letterSpacing": "0.05em",
+                                                                    "padding": "0.75rem",
+                                                                    "borderBottom": f"2px solid {COLORS['accent_blue']}",
+                                                                },
+                                                                style_cell={
+                                                                    "backgroundColor": COLORS["bg_card"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "border": "none",
+                                                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                                                    "padding": "0.55rem 0.75rem",
+                                                                    "fontSize": "0.8rem",
+                                                                    "textAlign": "left",
+                                                                    "maxWidth": "220px",
+                                                                    "overflow": "hidden",
+                                                                    "textOverflow": "ellipsis",
+                                                                },
+                                                                style_data_conditional=[
+                                                                    {
+                                                                        "if": {"row_index": "odd"},
+                                                                        "backgroundColor": COLORS[
+                                                                            "bg_dark"
+                                                                        ],
+                                                                    },
+                                                                ],
+                                                            )
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        id="insights-events-ops-wrap",
+                                                        style={"display": "none"},
+                                                        children=[
+                                                            dash_table.DataTable(
+                                                                id="insights-events-ops-table",
+                                                                columns=[
+                                                                    {
+                                                                        "name": "Event",
+                                                                        "id": "event_display_name",
+                                                                    },
+                                                                    {"name": "Date", "id": "event_date"},
+                                                                    {
+                                                                        "name": "Checked-in/Reg",
+                                                                        "id": "checked_in_vs_registered",
+                                                                    },
+                                                                    {"name": "No-shows", "id": "no_show_count"},
+                                                                    {"name": "No-show %", "id": "no_show_rate"},
+                                                                    {
+                                                                        "name": "No-show band",
+                                                                        "id": "no_show_band",
+                                                                    },
+                                                                    {
+                                                                        "name": "Manual adds",
+                                                                        "id": "manual_count",
+                                                                    },
+                                                                    {
+                                                                        "name": "Manual %",
+                                                                        "id": "manual_share",
+                                                                    },
+                                                                    {
+                                                                        "name": "Attendance/Op quality",
+                                                                        "id": "event_quality",
+                                                                    },
+                                                                    {"name": "Flag", "id": "ops_flag"},
+                                                                ],
+                                                                data=[],
+                                                                page_size=10,
+                                                                sort_action="native",
+                                                                style_table={"overflowX": "auto"},
+                                                                style_header={
+                                                                    "backgroundColor": COLORS["bg_dark"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "fontWeight": "600",
+                                                                    "fontSize": "0.75rem",
+                                                                    "textTransform": "uppercase",
+                                                                    "letterSpacing": "0.05em",
+                                                                    "padding": "0.75rem",
+                                                                    "borderBottom": f"2px solid {COLORS['accent_yellow']}",
+                                                                },
+                                                                style_cell={
+                                                                    "backgroundColor": COLORS["bg_card"],
+                                                                    "color": COLORS["text_primary"],
+                                                                    "border": "none",
+                                                                    "borderBottom": f"1px solid {COLORS['border']}",
+                                                                    "padding": "0.55rem 0.75rem",
+                                                                    "fontSize": "0.8rem",
+                                                                    "textAlign": "left",
+                                                                    "maxWidth": "220px",
+                                                                    "overflow": "hidden",
+                                                                    "textOverflow": "ellipsis",
+                                                                },
+                                                                style_data_conditional=[
+                                                                    {
+                                                                        "if": {"row_index": "odd"},
+                                                                        "backgroundColor": COLORS[
+                                                                            "bg_dark"
+                                                                        ],
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": "{no_show_rate} >= 40",
+                                                                            "column_id": "no_show_rate",
+                                                                        },
+                                                                        "color": "#fca5a5",
+                                                                        "fontWeight": "700",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": "{no_show_rate} >= 30 && {no_show_rate} < 40",
+                                                                            "column_id": "no_show_rate",
+                                                                        },
+                                                                        "color": "#fdba74",
+                                                                        "fontWeight": "700",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": "{no_show_rate} >= 18 && {no_show_rate} < 30",
+                                                                            "column_id": "no_show_rate",
+                                                                        },
+                                                                        "color": "#fde68a",
+                                                                        "fontWeight": "600",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": "{no_show_rate} >= 8 && {no_show_rate} < 18",
+                                                                            "column_id": "no_show_rate",
+                                                                        },
+                                                                        "color": "#93c5fd",
+                                                                        "fontWeight": "600",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": "{no_show_rate} < 8",
+                                                                            "column_id": "no_show_rate",
+                                                                        },
+                                                                        "color": "#86efac",
+                                                                        "fontWeight": "600",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": '{event_quality} contains "Critical"',
+                                                                            "column_id": "event_quality",
+                                                                        },
+                                                                        "color": "#fecaca",
+                                                                        "fontWeight": "700",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": '{event_quality} contains "Watch"',
+                                                                            "column_id": "event_quality",
+                                                                        },
+                                                                        "color": "#fdba74",
+                                                                        "fontWeight": "700",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": '{event_quality} contains "Stable"',
+                                                                            "column_id": "event_quality",
+                                                                        },
+                                                                        "color": "#93c5fd",
+                                                                        "fontWeight": "600",
+                                                                    },
+                                                                    {
+                                                                        "if": {
+                                                                            "filter_query": '{event_quality} contains "Healthy"',
+                                                                            "column_id": "event_quality",
+                                                                        },
+                                                                        "color": "#86efac",
+                                                                        "fontWeight": "700",
+                                                                    },
+                                                                ],
+                                                            )
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        "No-show bands: <8 low, 8-17 normal, 18-29 elevated, 30-39 high, 40+ critical. Attendance/Op quality scale: Critical [1/4], Watch [2/4], Stable [3/4], Healthy [4/4].",
+                                                        style={
+                                                            "color": COLORS["text_secondary"],
+                                                            "fontSize": "0.72rem",
+                                                            "marginTop": "0.38rem",
+                                                            "marginBottom": "0.7rem",
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        "Event trends",
+                                                        style={
                                                             "color": COLORS["text_primary"],
                                                             "fontWeight": "600",
-                                                            "fontSize": "0.75rem",
-                                                            "textTransform": "uppercase",
-                                                            "letterSpacing": "0.05em",
-                                                            "padding": "0.75rem",
-                                                            "borderBottom": f"2px solid {COLORS['accent_blue']}",
+                                                            "marginBottom": "0.45rem",
+                                                            "minHeight": "1.2rem",
                                                         },
-                                                        style_cell={
-                                                            "backgroundColor": COLORS["bg_card"],
-                                                            "color": COLORS["text_primary"],
-                                                            "border": "none",
-                                                            "borderBottom": f"1px solid {COLORS['border']}",
-                                                            "padding": "0.55rem 0.75rem",
-                                                            "fontSize": "0.8rem",
-                                                            "textAlign": "left",
-                                                            "maxWidth": "220px",
-                                                            "overflow": "hidden",
-                                                            "textOverflow": "ellipsis",
-                                                        },
-                                                        style_data_conditional=[
-                                                            {
-                                                                "if": {"row_index": "odd"},
-                                                                "backgroundColor": COLORS[
-                                                                    "bg_dark"
-                                                                ],
-                                                            },
-                                                        ],
+                                                    ),
+                                                    dcc.Graph(
+                                                        id="insights-events-noshow-trend",
+                                                        config={"displayModeBar": False},
+                                                        style={"height": "230px", "marginBottom": "0.75rem"},
                                                     ),
                                                 ],
                                             ),
@@ -3164,7 +3498,7 @@ def create_layout():
                                                             },
                                                             {"name": "Date", "id": "event_date"},
                                                             {
-                                                                "name": "Participants",
+                                                                "name": "Participants (excl no-shows)",
                                                                 "id": "total_participants",
                                                             },
                                                             {

@@ -80,12 +80,30 @@
 #game-filter [class*="singleValue"],
 #game-filter [class*="placeholder"],
 #game-filter [class*="input"],
+#insights-games-table-view [class*="control"],
+#insights-games-table-view [class*="menu"],
+#insights-games-table-view [class*="option"],
+#insights-games-table-view [class*="singleValue"],
+#insights-games-table-view [class*="placeholder"],
+#insights-games-table-view [class*="input"],
+#insights-events-table-view [class*="control"],
+#insights-events-table-view [class*="menu"],
+#insights-events-table-view [class*="option"],
+#insights-events-table-view [class*="singleValue"],
+#insights-events-table-view [class*="placeholder"],
+#insights-events-table-view [class*="input"],
 #insights-top-players-limit [class*="control"],
 #insights-top-players-limit [class*="menu"],
 #insights-top-players-limit [class*="option"],
 #insights-top-players-limit [class*="singleValue"],
 #insights-top-players-limit [class*="placeholder"],
-#insights-top-players-limit [class*="input"] {
+#insights-top-players-limit [class*="input"],
+#insights-top-players-game-filter [class*="control"],
+#insights-top-players-game-filter [class*="menu"],
+#insights-top-players-game-filter [class*="option"],
+#insights-top-players-game-filter [class*="singleValue"],
+#insights-top-players-game-filter [class*="placeholder"],
+#insights-top-players-game-filter [class*="input"] {
     background-color: #0a0a0f !important;
     color: #ffffff !important;
     border-color: #1e293b !important;
@@ -95,9 +113,50 @@
 #event-dropdown [class*="option"],
 #game-filter [class*="menu"],
 #game-filter [class*="option"],
+#insights-games-table-view [class*="menu"],
+#insights-games-table-view [class*="option"],
+#insights-events-table-view [class*="menu"],
+#insights-events-table-view [class*="option"],
 #insights-top-players-limit [class*="menu"],
-#insights-top-players-limit [class*="option"] {
+#insights-top-players-limit [class*="option"],
+#insights-top-players-game-filter [class*="menu"],
+#insights-top-players-game-filter [class*="option"] {
     background-color: #12121a !important;
+}
+
+.games-table-view-dropdown .Select-control,
+.games-table-view-dropdown .Select-menu-outer,
+.games-table-view-dropdown .Select-menu,
+.games-table-view-dropdown .Select-option,
+.games-table-view-dropdown .Select-value-label,
+.games-table-view-dropdown .Select-placeholder,
+.games-table-view-dropdown .Select-input > input {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
+}
+
+#insights-games-table-view,
+#insights-games-table-view > div,
+#insights-games-table-view > div > div,
+#insights-events-table-view,
+#insights-events-table-view > div,
+#insights-events-table-view > div > div,
+#insights-games-table-view [class*="control"],
+#insights-games-table-view [class*="singleValue"],
+#insights-games-table-view [class*="input"],
+#insights-games-table-view [class*="placeholder"],
+#insights-games-table-view [class*="menu"],
+#insights-games-table-view [class*="option"],
+#insights-events-table-view [class*="control"],
+#insights-events-table-view [class*="singleValue"],
+#insights-events-table-view [class*="input"],
+#insights-events-table-view [class*="placeholder"],
+#insights-events-table-view [class*="menu"],
+#insights-events-table-view [class*="option"] {
+    background-color: #0a0a0f !important;
+    color: #ffffff !important;
+    border-color: #1e293b !important;
 }
 
 /* Explicit class-based dropdown theme */
@@ -150,7 +209,13 @@
 #audit-filter-user > div > div,
 #insights-top-players-limit,
 #insights-top-players-limit > div,
-#insights-top-players-limit > div > div {
+#insights-top-players-limit > div > div,
+#insights-top-players-game-filter,
+#insights-top-players-game-filter > div,
+#insights-top-players-game-filter > div > div,
+#insights-events-table-view,
+#insights-events-table-view > div,
+#insights-events-table-view > div > div {
     background-color: #0a0a0f !important;
     color: #ffffff !important;
     border-color: #1e293b !important;
@@ -267,6 +332,36 @@
 
 .dash-filter input::placeholder {
     color: #64748b !important;
+}
+
+/* Insights date range readability */
+#insights-date-range .DateRangePickerInput {
+    background-color: #0a0a0f !important;
+    border: 1px solid #1e293b !important;
+    border-radius: 6px !important;
+}
+
+#insights-date-range .DateInput {
+    background-color: #0a0a0f !important;
+}
+
+#insights-date-range .DateInput_input {
+    background-color: #0a0a0f !important;
+    color: #e2e8f0 !important;
+    -webkit-text-fill-color: #e2e8f0 !important;
+    border-bottom: 1px solid #1e293b !important;
+    font-size: 0.78rem !important;
+}
+
+#insights-date-range .DateInput_input::placeholder {
+    color: #64748b !important;
+    -webkit-text-fill-color: #64748b !important;
+}
+
+#insights-date-range .DateRangePickerInput_arrow,
+#insights-date-range .DateRangePickerInput_arrow_svg {
+    color: #94a3b8 !important;
+    fill: #94a3b8 !important;
 }
 
 /* === Tabs Styling === */
