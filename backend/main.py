@@ -708,8 +708,9 @@ async def status_view(request: Request, name: str, kiosk: bool = False):
     # Use custom display name if set, otherwise convert slug to nice name
     event_name = settings.get("event_display_name") or slug_to_display_name(event_slug)
     return templates.TemplateResponse(
-        template_name,
-        {
+        request=request,
+        name=template_name,
+        context={
             "request": request,
             "name": name,
             "status": status,
@@ -766,14 +767,18 @@ async def api_participant_status(name: str):
 async def root(request: Request):
     settings = get_active_settings()
     requirements = compute_requirements(settings)
-    return templates.TemplateResponse("checkin.html", {
-        "request": request,
-        "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "kiosk": False,
-        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
-        # Pass all requirements so frontend can compute missing array correctly
-        **requirements,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="checkin.html",
+        context={
+            "request": request,
+            "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "kiosk": False,
+            "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
+            # Pass all requirements so frontend can compute missing array correctly
+            **requirements,
+        },
+    )
 
 
 @app.get("/kiosk", response_class=HTMLResponse, tags=["Checkin"])
@@ -784,13 +789,17 @@ async def kiosk_mode(request: Request):
     """
     settings = get_active_settings()
     requirements = compute_requirements(settings)
-    return templates.TemplateResponse("checkin.html", {
-        "request": request,
-        "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "kiosk": True,
-        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
-        **requirements,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="checkin.html",
+        context={
+            "request": request,
+            "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "kiosk": True,
+            "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
+            **requirements,
+        },
+    )
 
 @app.get("/register", response_class=HTMLResponse, tags=["Checkin"])
 async def register_form(request: Request):
@@ -798,16 +807,20 @@ async def register_form(request: Request):
     requirements = compute_requirements(settings)
     tournament_slug = settings.get("active_event_slug", "")
     games = get_tournament_events(tournament_slug)
-    return templates.TemplateResponse("register.html", {
-        "request": request,
-        "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "swish_number": settings.get("swish_number", "123 456 78 90"),
-        "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
-        "games": games,
-        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
-        # Configurable requirements - frontend hides sections that are not required
-        **requirements,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="register.html",
+        context={
+            "request": request,
+            "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "swish_number": settings.get("swish_number", "123 456 78 90"),
+            "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+            "games": games,
+            "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
+            # Configurable requirements - frontend hides sections that are not required
+            **requirements,
+        },
+    )
 
 # Legacy alias so /register.html keeps working (old links/bookmarks)
 @app.get("/register.html", response_class=HTMLResponse, tags=["Checkin"])
@@ -817,16 +830,20 @@ async def register_form_alias(request: Request):
     requirements = compute_requirements(settings)
     tournament_slug = settings.get("active_event_slug", "")
     games = get_tournament_events(tournament_slug)
-    return templates.TemplateResponse("register.html", {
-        "request": request,
-        "n8n_token": N8N_WEBHOOK_TOKEN or "",
-        "swish_number": settings.get("swish_number", "123 456 78 90"),
-        "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
-        "games": games,
-        "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
-        # Configurable requirements
-        **requirements,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="register.html",
+        context={
+            "request": request,
+            "n8n_token": N8N_WEBHOOK_TOKEN or "",
+            "swish_number": settings.get("swish_number", "123 456 78 90"),
+            "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
+            "games": games,
+            "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
+            # Configurable requirements
+            **requirements,
+        },
+    )
 # --- /CHANGED ---
 
 @app.get("/players", tags=["Dashboard"])
