@@ -3,6 +3,7 @@
 import json
 import re
 
+import httpx
 import pytest
 
 from shared import postgres_api as postgres
@@ -391,3 +392,112 @@ def test_integration_endpoint_forwards_degraded_state_and_preserves_startgg(
     stored = pg_db.checkins()[0]
     assert stored["startgg"] is True and stored["is_guest"] is False
     assert stored["status"] == "Ready"
+
+
+@pytest.mark.parametrize("route", ["recheck-startgg", "bulk-recheck-startgg"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_dashboard_recheck_applies_successful_negative_lookup(
+    app_client, pg_db, n8n_stub, route, legacy
+):
+    row = pg_db.seed_checkin(
+        member=True,
+        startgg=True,
+        is_guest=False,
+        status="Ready",
+        tournament_games_registered=["Original synthetic game"],
+        payment_expected=25,
+    )
+    n8n_stub.response = {"isRegistered": False, "events": []}
+    if not legacy:
+        n8n_stub.response.update(ok=True, state="verified_false")
+    response = app_client.post(
+        f"/api/admin/{route}", json={"record_id": row["record_id"]}
+    )
+    assert response.status_code == 200
+    stored = pg_db.checkins()[0]
+    assert stored["startgg"] is False and stored["is_guest"] is True
+    assert stored["tournament_games_registered"] == []
+    assert stored["status"] == "Pending" and stored["payment_expected"] == 0
+    if route == "recheck-startgg":
+        assert (
+            response.json()["startgg"] is False
+            and response.json()["status"] == "Pending"
+        )
+        assert response.json()["events"] == []
+    else:
+        assert response.json()["checked"] == 1 and response.json()["errors"] == []
+    with pg_db.pool.connection() as connection:
+        audit = json.loads(
+            connection.execute("SELECT details FROM audit_log").fetchone()[0]
+        )
+    assert audit["ok"] is True and "startgg" in audit["updated_fields"]
+
+
+@pytest.mark.parametrize("route", ["recheck-startgg", "bulk-recheck-startgg"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "timeout",
+        "http-error",
+        "unavailable",
+        "skipped",
+        "contradictory",
+        "malformed",
+        "string-boolean",
+        "legacy-error",
+    ],
+)
+def test_dashboard_recheck_preserves_stored_fields_on_degraded_lookup(
+    app_client, pg_db, n8n_stub, route, kind
+):
+    row = pg_db.seed_checkin(
+        member=True,
+        startgg=True,
+        is_guest=False,
+        status="Ready",
+        tournament_games_registered=["Original synthetic game"],
+        startgg_event_id="original-event",
+        payment_expected=25,
+        payment_amount=25,
+    )
+    if kind == "timeout":
+
+        def timeout(request):
+            raise httpx.ReadTimeout("Synthetic unavailable provider", request=request)
+
+        n8n_stub.on_call = timeout
+    elif kind == "http-error":
+        n8n_stub.status_code = 503
+    elif kind in {"unavailable", "skipped", "contradictory"}:
+        n8n_stub.response = {
+            "ok": kind == "contradictory",
+            "state": "skipped" if kind == "skipped" else "unavailable",
+            "isRegistered": False,
+            "events": [],
+        }
+    elif kind == "string-boolean":
+        n8n_stub.response = {"ok": True, "isRegistered": "false", "events": []}
+    elif kind == "legacy-error":
+        n8n_stub.response = {"error": True, "isRegistered": False, "events": []}
+    else:
+        n8n_stub.response = {"ok": True, "state": "verified_false"}
+    response = app_client.post(
+        f"/api/admin/{route}", json={"record_id": row["record_id"]}
+    )
+    if route == "recheck-startgg":
+        assert response.status_code == 502
+    else:
+        assert response.status_code == 200
+        assert response.json()["checked"] == 0 and len(response.json()["errors"]) == 1
+    stored = pg_db.checkins()[0]
+    for field in (
+        "startgg",
+        "is_guest",
+        "tournament_games_registered",
+        "startgg_event_id",
+        "email",
+        "status",
+        "payment_expected",
+        "payment_amount",
+    ):
+        assert stored[field] == row[field], field
