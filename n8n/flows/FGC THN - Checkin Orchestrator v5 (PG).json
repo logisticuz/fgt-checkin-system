@@ -26,7 +26,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
+        "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    attempt_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
       },
       "id": "parse-input-v5",
       "name": "Parse Input",
@@ -43,13 +43,14 @@
         "url": "=http://n8n:5678/webhook/ebas/check",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({personnummer: $('Parse Input').first().json.personnummer}) }}",
+        "jsonBody": "={{ JSON.stringify({personnummer: $('Parse Input').first().json.personnummer, attempt_id: $('Parse Input').first().json.attempt_id}) }}",
         "options": {
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 10000
         }
       },
       "id": "ebas-check-v5",
@@ -68,13 +69,14 @@
         "url": "=http://n8n:5678/webhook/startgg/check",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({tag: $('Parse Input').first().json.tag, slug: $('Parse Input').first().json.slug}) }}",
+        "jsonBody": "={{ JSON.stringify({tag: $('Parse Input').first().json.tag, slug: $('Parse Input').first().json.slug, attempt_id: $('Parse Input').first().json.attempt_id}) }}",
         "options": {
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 10000
         }
       },
       "id": "startgg-check-v5",
@@ -100,7 +102,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Combine results from eBas and Start.gg checks\nconst ctx = $('Parse Input').first().json;\n\n// Get eBas result\nlet ebas = { isMember: false };\ntry {\n  const ebasItems = $('eBas Check').all();\n  if (ebasItems.length > 0 && ebasItems[0].json && !ebasItems[0].json.error) {\n    ebas = ebasItems[0].json;\n  }\n} catch (e) { /* treat as not member */ }\n\n// Get Start.gg result\nlet sgg = { isRegistered: false, events: [] };\ntry {\n  const sggItems = $('Start.gg Check').all();\n  if (sggItems.length > 0 && sggItems[0].json && !sggItems[0].json.error) {\n    sgg = sggItems[0].json;\n  }\n} catch (e) { /* treat as not registered */ }\n\nconst isActualMember = ebas.isMember === true;\nconst isActualStartgg = sgg.isRegistered === true;\nconst events = sgg.events || [];\nconst startggEmail = sgg.email || null;\nconst now = new Date().toISOString();\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: isActualMember,\n  startgg: isActualStartgg,\n  events: events,\n  _ebasOk: isActualMember,\n  _startggOk: isActualStartgg,\n  _ebasError: ebas.error || null,\n  _startggError: sgg.error || null,\n  startgg_email: startggEmail,\n  fetched_at: now,\n}}];"
+        "jsCode": "// Successful negative verification is distinct from a failed or skipped check.\nconst ctx = $('Parse Input').first().json;\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const result = $(nodeName).first().json;\n    if (result?.state === 'skipped' || result?.skipped === true) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (!result || result.error || result.ok === false || result.state === 'unavailable' ||\n        typeof result[booleanField] !== 'boolean') return unavailable;\n    return { ok: true, state: result[booleanField] ? 'verified_true' : 'verified_false',\n      value: result[booleanField], events: Array.isArray(result.events) ? result.events : [], error: null };\n  } catch (error) {\n    return unavailable;\n  }\n}\nconst ebas = readResult('eBas Check', ctx._runEbas, 'isMember');\nconst startgg = readResult('Start.gg Check', ctx._runStartgg, 'isRegistered');\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ebas.ok ? ebas.value : null,\n  startgg: startgg.ok ? startgg.value : null,\n  events: startgg.ok ? startgg.events : [],\n  _ebasOk: ebas.ok, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: ebas.ok ? { member: ebas.value } : {},\n  _startggData: startgg.ok ? { registered: startgg.value, events: startgg.events } : {},\n  _ebasError: ebas.error, _startggError: startgg.error,\n  fetched_at: new Date().toISOString(),\n} }];"
       },
       "id": "combine-v5",
       "name": "Combine Results",
@@ -117,13 +119,14 @@
         "url": "http://backend:8000/api/integration/result",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $json.checkin_id,\n  source: 'startgg',\n  ok: $json._startggOk,\n  data: { registered: $json._startggOk, events: $json.events, email: $json.startgg_email || null },\n  error: $json._startggError ? { code: 'api_error', message: String($json._startggError) } : null,\n  fetched_at: $json.fetched_at\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'startgg',\n  ok: $('Combine Results').first().json._startggOk,\n  state: $('Combine Results').first().json._startggState,\n  attempt_id: $('Combine Results').first().json.attempt_id,\n  data: $('Combine Results').first().json._startggData,\n  error: $('Combine Results').first().json._startggError,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
         "options": {
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 10000
         },
         "sendHeaders": true,
         "headerParameters": {
@@ -151,13 +154,14 @@
         "url": "http://backend:8000/api/integration/result",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'ebas',\n  ok: $('Combine Results').first().json._ebasOk,\n  data: { member: $('Combine Results').first().json._ebasOk },\n  error: $('Combine Results').first().json._ebasError ? { code: 'api_error', message: String($('Combine Results').first().json._ebasError) } : null,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'ebas',\n  ok: $('Combine Results').first().json._ebasOk,\n  state: $('Combine Results').first().json._ebasState,\n  attempt_id: $('Combine Results').first().json.attempt_id,\n  data: $('Combine Results').first().json._ebasData,\n  error: $('Combine Results').first().json._ebasError,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
         "options": {
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 10000
         },
         "sendHeaders": true,
         "headerParameters": {
@@ -192,7 +196,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Return summary to the waiting backend orchestrate endpoint\nconst ctx = $('Combine Results').first().json;\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: ctx.member,\n  startgg: ctx.startgg,\n  events: ctx.events,\n  integration_complete: true,\n}}];"
+        "jsCode": "// Retain legacy summary fields and expose per-integration states and correlation.\nconst ctx = $('Combine Results').first().json;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ctx.member, startgg: ctx.startgg, events: ctx.events,\n  results: { ebas: ctx._ebasState, startgg: ctx._startggState, attempt_id: ctx.attempt_id },\n  integration_complete: true,\n} }];"
       },
       "id": "return-v5",
       "name": "Return Results",
@@ -428,7 +432,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
+          "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    attempt_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
         },
         "id": "parse-input-v5",
         "name": "Parse Input",
@@ -445,13 +449,14 @@
           "url": "=http://n8n:5678/webhook/ebas/check",
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ JSON.stringify({personnummer: $('Parse Input').first().json.personnummer}) }}",
+          "jsonBody": "={{ JSON.stringify({personnummer: $('Parse Input').first().json.personnummer, attempt_id: $('Parse Input').first().json.attempt_id}) }}",
           "options": {
             "response": {
               "response": {
                 "neverError": true
               }
-            }
+            },
+            "timeout": 10000
           }
         },
         "id": "ebas-check-v5",
@@ -470,13 +475,14 @@
           "url": "=http://n8n:5678/webhook/startgg/check",
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ JSON.stringify({tag: $('Parse Input').first().json.tag, slug: $('Parse Input').first().json.slug}) }}",
+          "jsonBody": "={{ JSON.stringify({tag: $('Parse Input').first().json.tag, slug: $('Parse Input').first().json.slug, attempt_id: $('Parse Input').first().json.attempt_id}) }}",
           "options": {
             "response": {
               "response": {
                 "neverError": true
               }
-            }
+            },
+            "timeout": 10000
           }
         },
         "id": "startgg-check-v5",
@@ -502,7 +508,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Combine results from eBas and Start.gg checks\nconst ctx = $('Parse Input').first().json;\n\n// Get eBas result\nlet ebas = { isMember: false };\ntry {\n  const ebasItems = $('eBas Check').all();\n  if (ebasItems.length > 0 && ebasItems[0].json && !ebasItems[0].json.error) {\n    ebas = ebasItems[0].json;\n  }\n} catch (e) { /* treat as not member */ }\n\n// Get Start.gg result\nlet sgg = { isRegistered: false, events: [] };\ntry {\n  const sggItems = $('Start.gg Check').all();\n  if (sggItems.length > 0 && sggItems[0].json && !sggItems[0].json.error) {\n    sgg = sggItems[0].json;\n  }\n} catch (e) { /* treat as not registered */ }\n\nconst isActualMember = ebas.isMember === true;\nconst isActualStartgg = sgg.isRegistered === true;\nconst events = sgg.events || [];\nconst startggEmail = sgg.email || null;\nconst now = new Date().toISOString();\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: isActualMember,\n  startgg: isActualStartgg,\n  events: events,\n  _ebasOk: isActualMember,\n  _startggOk: isActualStartgg,\n  _ebasError: ebas.error || null,\n  _startggError: sgg.error || null,\n  startgg_email: startggEmail,\n  fetched_at: now,\n}}];"
+          "jsCode": "// Successful negative verification is distinct from a failed or skipped check.\nconst ctx = $('Parse Input').first().json;\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const result = $(nodeName).first().json;\n    if (result?.state === 'skipped' || result?.skipped === true) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (!result || result.error || result.ok === false || result.state === 'unavailable' ||\n        typeof result[booleanField] !== 'boolean') return unavailable;\n    return { ok: true, state: result[booleanField] ? 'verified_true' : 'verified_false',\n      value: result[booleanField], events: Array.isArray(result.events) ? result.events : [], error: null };\n  } catch (error) {\n    return unavailable;\n  }\n}\nconst ebas = readResult('eBas Check', ctx._runEbas, 'isMember');\nconst startgg = readResult('Start.gg Check', ctx._runStartgg, 'isRegistered');\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ebas.ok ? ebas.value : null,\n  startgg: startgg.ok ? startgg.value : null,\n  events: startgg.ok ? startgg.events : [],\n  _ebasOk: ebas.ok, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: ebas.ok ? { member: ebas.value } : {},\n  _startggData: startgg.ok ? { registered: startgg.value, events: startgg.events } : {},\n  _ebasError: ebas.error, _startggError: startgg.error,\n  fetched_at: new Date().toISOString(),\n} }];"
         },
         "id": "combine-v5",
         "name": "Combine Results",
@@ -519,13 +525,14 @@
           "url": "http://backend:8000/api/integration/result",
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ JSON.stringify({\n  checkin_id: $json.checkin_id,\n  source: 'startgg',\n  ok: $json._startggOk,\n  data: { registered: $json._startggOk, events: $json.events, email: $json.startgg_email || null },\n  error: $json._startggError ? { code: 'api_error', message: String($json._startggError) } : null,\n  fetched_at: $json.fetched_at\n}) }}",
+          "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'startgg',\n  ok: $('Combine Results').first().json._startggOk,\n  state: $('Combine Results').first().json._startggState,\n  attempt_id: $('Combine Results').first().json.attempt_id,\n  data: $('Combine Results').first().json._startggData,\n  error: $('Combine Results').first().json._startggError,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
           "options": {
             "response": {
               "response": {
                 "neverError": true
               }
-            }
+            },
+            "timeout": 10000
           },
           "sendHeaders": true,
           "headerParameters": {
@@ -553,13 +560,14 @@
           "url": "http://backend:8000/api/integration/result",
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'ebas',\n  ok: $('Combine Results').first().json._ebasOk,\n  data: { member: $('Combine Results').first().json._ebasOk },\n  error: $('Combine Results').first().json._ebasError ? { code: 'api_error', message: String($('Combine Results').first().json._ebasError) } : null,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
+          "jsonBody": "={{ JSON.stringify({\n  checkin_id: $('Combine Results').first().json.checkin_id,\n  source: 'ebas',\n  ok: $('Combine Results').first().json._ebasOk,\n  state: $('Combine Results').first().json._ebasState,\n  attempt_id: $('Combine Results').first().json.attempt_id,\n  data: $('Combine Results').first().json._ebasData,\n  error: $('Combine Results').first().json._ebasError,\n  fetched_at: $('Combine Results').first().json.fetched_at\n}) }}",
           "options": {
             "response": {
               "response": {
                 "neverError": true
               }
-            }
+            },
+            "timeout": 10000
           },
           "sendHeaders": true,
           "headerParameters": {
@@ -594,7 +602,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Return summary to the waiting backend orchestrate endpoint\nconst ctx = $('Combine Results').first().json;\n\nreturn [{ json: {\n  checkin_id: ctx.checkin_id,\n  member: ctx.member,\n  startgg: ctx.startgg,\n  events: ctx.events,\n  integration_complete: true,\n}}];"
+          "jsCode": "// Retain legacy summary fields and expose per-integration states and correlation.\nconst ctx = $('Combine Results').first().json;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ctx.member, startgg: ctx.startgg, events: ctx.events,\n  results: { ebas: ctx._ebasState, startgg: ctx._startggState, attempt_id: ctx.attempt_id },\n  integration_complete: true,\n} }];"
         },
         "id": "return-v5",
         "name": "Return Results",

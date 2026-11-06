@@ -887,9 +887,21 @@ async def admin_recheck_startgg(request: Request):
             detail=f"n8n returned {n8n_resp.status_code}: {n8n_resp.text[:200]}",
         )
 
-    n8n_data = n8n_resp.json()
-    # n8n Start.gg Check returns: {isRegistered, events, eventCount, tag, tournament, email}
-    is_registered = bool(n8n_data.get("isRegistered", False))
+    try:
+        n8n_data = n8n_resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Start.gg verification unavailable")
+    if (
+        not isinstance(n8n_data, dict)
+        or n8n_data.get("ok", True) is not True
+        or n8n_data.get("state") in ("unavailable", "skipped")
+        or n8n_data.get("error")
+        or not isinstance(n8n_data.get("isRegistered"), bool)
+    ):
+        raise HTTPException(status_code=502, detail="Start.gg verification unavailable")
+    # A successful negative lookup is a verified result, independent of registration.
+    is_registered = n8n_data["isRegistered"]
+    result_state = "verified_true" if is_registered else "verified_false"
     events = n8n_data.get("events") or []
     startgg_email = n8n_data.get("email") or None
 
@@ -902,8 +914,9 @@ async def admin_recheck_startgg(request: Request):
         apply_fn(
             checkin_id=record_id,
             source="startgg",
-            ok=is_registered,
+            ok=True,
             data=result_data,
+            state=result_state,
         )
 
     # 4. Recompute status
@@ -1013,7 +1026,17 @@ async def admin_bulk_recheck_startgg():
                 continue
 
             n8n_data = n8n_resp.json()
-            is_registered = bool(n8n_data.get("isRegistered", False))
+            if (
+                not isinstance(n8n_data, dict)
+                or n8n_data.get("ok", True) is not True
+                or n8n_data.get("state") in ("unavailable", "skipped")
+                or n8n_data.get("error")
+                or not isinstance(n8n_data.get("isRegistered"), bool)
+            ):
+                errors.append(f"{tag}: Start.gg verification unavailable")
+                continue
+            is_registered = n8n_data["isRegistered"]
+            result_state = "verified_true" if is_registered else "verified_false"
             events = n8n_data.get("events") or []
             startgg_email = n8n_data.get("email") or None
 
@@ -1025,8 +1048,9 @@ async def admin_bulk_recheck_startgg():
             apply_fn(
                 checkin_id=record_id,
                 source="startgg",
-                ok=is_registered,
+                ok=True,
                 data=result_data,
+                state=result_state,
             )
 
             # Recompute status
@@ -1292,6 +1316,7 @@ async def integration_result_endpoint(request: Request):
             data=data,
             error=error,
             fetched_at=fetched_at,
+            state=body.get("state"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
