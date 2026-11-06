@@ -9,7 +9,7 @@ Uses httpx for Start.gg API calls (sync Client for simplicity).
 
 import os
 import logging
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from typing import Optional, Tuple
 
 import httpx
@@ -21,7 +21,7 @@ STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID", "")
 STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET", "")
 
 # Start.gg OAuth endpoints
-STARTGG_AUTH_URL = "https://start.gg/oauth/authorize"
+STARTGG_AUTH_URL = "https://www.start.gg/oauth/authorize"
 STARTGG_TOKEN_URL = "https://api.start.gg/oauth/access_token"
 STARTGG_GRAPHQL_URL = "https://api.start.gg/gql/alpha"
 
@@ -56,7 +56,7 @@ def build_authorize_url(redirect_uri: str) -> str:
         "response_type": "code",
         "scope": OAUTH_SCOPES,
     }
-    return f"{STARTGG_AUTH_URL}?{urlencode(params)}"
+    return f"{STARTGG_AUTH_URL}?{urlencode(params, quote_via=quote)}"
 
 
 def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
@@ -87,13 +87,14 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
         "grant_type": "authorization_code",
         "redirect_uri": redirect_uri,
         "code": code,
+        "scope": OAUTH_SCOPES,
     }
 
     with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
         resp = client.post(
             STARTGG_TOKEN_URL,
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            json=payload,
+            headers={"Content-Type": "application/json"},
         )
         resp.raise_for_status()
         return resp.json()
