@@ -1,10 +1,10 @@
 /**
  * Membership v2 kiosk step: details + consent -> one-time code -> Sverok registration.
  *
- * Contract (T-013 brief, plus the consent booleans from sverok-texts.md):
+ * Contract (docs/contracts.md, T-014):
  *   POST /api/membership/start
  *        {personnummer, email, phone, channel, accepted_bylaws, accepted_privacy,
- *         consent:{bylaws_version, privacy_version}, checkin_id}
+ *         bylaws_version, privacy_version, checkin_id}
  *     -> {ok, state:"code_sent", attempt_id, masked_destination, resend_after_s}
  *   POST /api/membership/verify  {attempt_id, code}
  *     -> {ok, state, error_code?, user_message?, tries_left?}
@@ -317,7 +317,8 @@
       // Strict booleans: the backend rejects anything but `true`.
       accepted_bylaws: el.bylaws.checked === true,
       accepted_privacy: el.privacy.checked === true,
-      consent: { bylaws_version: legalVersion("bylaws"), privacy_version: legalVersion("privacy") },
+      bylaws_version: legalVersion("bylaws"),
+      privacy_version: legalVersion("privacy"),
       checkin_id: params.get("checkin_id") || null,
     };
 

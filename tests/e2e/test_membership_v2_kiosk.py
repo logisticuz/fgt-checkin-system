@@ -71,7 +71,8 @@ def test_happy_path_continues_check_in(kiosk):
         "channel": "sms",
         "accepted_bylaws": True,
         "accepted_privacy": True,
-        "consent": {"bylaws_version": "2026-11-06", "privacy_version": "2026-11-06-ebas+app-v1"},
+        "bylaws_version": "2026-11-06",
+        "privacy_version": "2026-11-06-ebas+app-v1",
         "checkin_id": None,
     }
     assert text(page, "#mv2-destination") == "We sent a code by text message to +46******12."

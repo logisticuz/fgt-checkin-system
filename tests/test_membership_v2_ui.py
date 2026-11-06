@@ -98,6 +98,9 @@ def test_consent_payload_uses_strict_booleans_and_rendered_versions(app_template
     script = SCRIPT.read_text(encoding="utf-8")
     assert "accepted_bylaws: el.bylaws.checked === true" in script
     assert "accepted_privacy: el.privacy.checked === true" in script
+    # Versions are top-level fields (docs/contracts.md), not a nested consent object.
+    assert "bylaws_version: legalVersion(\"bylaws\")," in script
+    assert "consent: {" not in script
 
     html = render_register(app_templates, "v2", membership_year=2026)
     versions = dict(re.findall(r'data-legal-doc="([\w-]+)" data-legal-version="([^"]+)"', html))
