@@ -9,3 +9,4 @@ pyairtable
 httpx==0.27.2
 psycopg[binary]==3.2.6
 psycopg-pool==3.2.6
+cryptography==44.0.0
