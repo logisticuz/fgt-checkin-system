@@ -207,6 +207,27 @@ def test_recheckin_recomputes_status_without_safe_field_changes(pg_db):
     assert pg_db.checkins()[0]["status"] == "Ready"
 
 
+@pytest.mark.parametrize("member", [True, False])
+def test_integration_result_handler_recomputes_status(app_client, pg_db, member):
+    row = pg_db.seed_checkin(
+        member=not member, startgg=True, status="Pending" if member else "Ready"
+    )
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": "ebas",
+            "ok": True,
+            "data": {"member": member},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["updated"] is True
+    stored = pg_db.checkins()[0]
+    assert stored["member"] is member
+    assert stored["status"] == ("Ready" if member else "Pending")
+
+
 @pytest.mark.parametrize("requirements_on", [False, True])
 def test_new_checkin_defaults_and_derived_status(pg_db, requirements_on):
     pg_db.seed_settings(
