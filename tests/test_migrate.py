@@ -2,6 +2,8 @@
 
 import importlib
 import logging
+import runpy
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Barrier
@@ -12,6 +14,11 @@ import psycopg_pool
 import pytest
 
 from shared import migrate
+
+
+@pytest.fixture(autouse=True)
+def isolated_migration_directory(monkeypatch):
+    monkeypatch.delenv("FGT_MIGRATIONS_DIR", raising=False)
 
 
 def write_migration(directory, filename, source):
@@ -41,6 +48,13 @@ def write_migration(directory, filename, source):
         "SELECT '/*'; DROP TABLE fgt_example; SELECT '*/';",
         "SELECT $$--$$; DROP TABLE fgt_example;",
         "DO $$ BEGIN ALTER/* separator */TABLE meetup_events ADD COLUMN x int; END $$;",
+        'ALTER TABLE U&"meetup_review_probe" ADD COLUMN note text;',
+        'ALTER TABLE U&"meetup_\\0072eview_probe" ADD COLUMN note text;',
+        "ALTER TABLE fgt_review_probe ALTER COLUMN mängd TYPE bigint;",
+        "ALTER TABLE fgt_review_probe ALTER mängd TYPE bigint;",
+        'ALTER TABLE "meétup_review_probe" ADD COLUMN note text;',
+        "ALTER TABLE möte ADD COLUMN note text;",
+        'ALTER TABLE "Other Application" ADD COLUMN note text;',
     ],
 )
 def test_lint_rejects_forbidden_changes(source):
@@ -57,6 +71,8 @@ def test_lint_rejects_forbidden_changes(source):
         "ALTER TABLE example ADD COLUMN extra text;",
         "DO $$ BEGIN PERFORM 1; /* DROP TABLE example; */ END $$;",
         "SELECT 'text; COMMIT;';",
+        'ALTER TABLE "players" ADD COLUMN extra text;',
+        'ALTER TABLE "fgt_årlig" ADD COLUMN extra text;',
     ],
 )
 def test_lint_accepts_additive_sql_and_ignores_comments(source):
@@ -91,6 +107,58 @@ def test_files_cannot_override_runner_transaction_boundaries(statement):
         migrate.lint(
             "-- migrate:allow-destructive reviewed fixture change\nSELECT 1; " + statement + ";"
         )
+
+
+@pytest.mark.parametrize("newline", ["\r", "\r\n", "\n"])
+def test_comment_newlines_cannot_hide_destructive_or_transaction_sql(newline):
+    with pytest.raises(migrate.MigrationError, match="DROP"):
+        migrate.lint("-- ordinary comment" + newline + "DROP TABLE fgt_review_probe;")
+    source = (
+        "CREATE TEMP TABLE fgt_migration_commit_probe (id integer); -- comment"
+        + newline
+        + "COMMIT; SELECT 1/0;"
+    )
+    with pytest.raises(migrate.MigrationError, match="transaction boundaries"):
+        migrate.lint(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'ALTER TABLE U&"meetup_review_probe" ADD COLUMN note text;',
+        'ALTER TABLE "meétup_review_probe" ADD COLUMN note text;',
+        'ALTER TABLE "meetup_review_probe" ADD COLUMN note text;',
+    ],
+)
+def test_override_does_not_allow_unsupported_identifiers_or_sibling_tables(source):
+    with pytest.raises(migrate.MigrationError):
+        migrate.lint("-- migrate:allow-destructive synthetic reviewed change\n" + source)
+
+
+@pytest.mark.parametrize("service", ["backend", "dashboard"])
+def test_migrations_are_available_in_shared_only_container_layout(tmp_path, service):
+    shared = tmp_path / service / "shared"
+    shared.mkdir(parents=True)
+    shutil.copy2(migrate.__file__, shared / "migrate.py")
+    shutil.copytree(migrate.MIGRATIONS_DIR, shared / "migrations")
+    packaged = runpy.run_path(str(shared / "migrate.py"))
+    assert not (shared.parent / "db").exists()
+    files = packaged["_load_migrations"](packaged["MIGRATIONS_DIR"])
+    assert [migration.filename for migration in files] == ["000_baseline.sql"]
+
+
+def test_environment_overrides_migration_directory(monkeypatch, tmp_path):
+    write_migration(tmp_path, "007_environment.sql", "SELECT 1;")
+    monkeypatch.setenv("FGT_MIGRATIONS_DIR", str(tmp_path))
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = (None,)
+    assert [state.filename for state in migrate.check(connection)] == ["007_environment.sql"]
+
+
+def test_missing_environment_directory_still_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("FGT_MIGRATIONS_DIR", str(tmp_path / "missing"))
+    with pytest.raises(migrate.MigrationError, match="directory does not exist"):
+        migrate.apply(None)
 
 
 @pytest.mark.parametrize("filename", ["1_short.sql", "001.sql", "1000_long.sql"])
@@ -310,3 +378,66 @@ def test_baseline_records_a_noop(pg_db):
     assert states[0].filename == "000_baseline.sql"
     assert states[0].applied_at is not None
     assert states[0].applied_at.tzinfo is not None
+
+
+@pytest.mark.parametrize("newline", ["\r", "\r\n"])
+def test_cr_comments_cannot_drop_an_existing_table(pg_db, tmp_path, newline):
+    with pg_db.pool.connection() as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS fgt_review_probe (id integer)")
+        connection.execute("INSERT INTO fgt_review_probe VALUES (1)")
+    write_migration(
+        tmp_path,
+        "001_cr_drop.sql",
+        "-- ordinary comment" + newline + "DROP TABLE fgt_review_probe;",
+    )
+    with pytest.raises(migrate.MigrationError, match="DROP"):
+        migrate.apply(pg_db.pool, tmp_path)
+    with pg_db.pool.connection() as connection:
+        assert connection.execute("SELECT count(*) FROM fgt_review_probe").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("newline", ["\r", "\r\n"])
+def test_cr_commit_bypass_is_rejected_without_leaving_committed_changes(pg_db, tmp_path, newline):
+    write_migration(
+        tmp_path,
+        "001_cr_commit.sql",
+        "CREATE TEMP TABLE fgt_migration_commit_probe (id integer); -- comment"
+        + newline
+        + "COMMIT; SELECT 1/0;",
+    )
+    with pg_db.pool.connection() as connection:
+        with pytest.raises(migrate.MigrationError, match="transaction boundaries"):
+            migrate.apply(connection, tmp_path)
+        assert (
+            connection.execute(
+                "SELECT to_regclass('pg_temp.fgt_migration_commit_probe')"
+            ).fetchone()[0]
+            is None
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'ALTER TABLE U&"meetup_review_probe" ADD COLUMN note text;',
+        "ALTER TABLE fgt_review_probe ALTER COLUMN mängd TYPE bigint;",
+    ],
+)
+def test_review_identifier_repros_never_modify_the_database(pg_db, tmp_path, source):
+    with pg_db.pool.connection() as connection:
+        connection.execute('CREATE TABLE IF NOT EXISTS meetup_review_probe (id integer)')
+        connection.execute('CREATE TABLE IF NOT EXISTS fgt_identifier_probe ("mängd" integer)')
+    source = source.replace("fgt_review_probe", "fgt_identifier_probe")
+    write_migration(tmp_path, "001_identifiers.sql", source)
+    with pytest.raises(migrate.MigrationError):
+        migrate.apply(pg_db.pool, tmp_path)
+    with pg_db.pool.connection() as connection:
+        columns = connection.execute(
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name IN ('meetup_review_probe', 'fgt_identifier_probe')"
+        ).fetchall()
+    assert set(columns) == {
+        ("meetup_review_probe", "id", "integer"),
+        ("fgt_identifier_probe", "mängd", "integer"),
+    }

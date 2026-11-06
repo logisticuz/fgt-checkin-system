@@ -11,12 +11,12 @@ from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 LOCK_ID = int.from_bytes(hashlib.sha256(b"fgt-checkin-migrations").digest()[:8], "big", signed=True)
 _FILENAME = re.compile(r"(?P<version>[0-9]{3})_[a-zA-Z][a-zA-Z0-9_-]*\.sql")
 _ALLOW_DESTRUCTIVE = re.compile(r"-- migrate:allow-destructive\s+(\S.*)")
 _DOLLAR_QUOTE = re.compile(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*)?\$")
-_IDENTIFIER = r'(?:"(?:[^"]|"")*"|[a-zA-Z_][a-zA-Z0-9_$]*)'
+_IDENTIFIER = r'(?:"(?:[^"]|"")*"|' r"[a-zA-Z_\u0080-\U0010ffff][a-zA-Z0-9_$\u0080-\U0010ffff]*)"
 _ALTER_TABLE = re.compile(
     rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"
     rf"(?P<table>{_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER})*)",
@@ -27,6 +27,7 @@ _FORBIDDEN = (
     (r"\bTRUNCATE\b", "TRUNCATE"),
     (r"\bDELETE\s+FROM\b", "DELETE FROM"),
     (r"\bRENAME\b", "RENAME"),
+    (r"\bALTER\s+COLUMN\b[^;]*\bTYPE\b", "ALTER COLUMN TYPE"),
     (
         rf"\bALTER\s+(?:COLUMN\s+)?{_IDENTIFIER}\s+(?:SET\s+DATA\s+)?TYPE\b",
         "ALTER COLUMN TYPE",
@@ -117,6 +118,7 @@ def _strip_comments(source: str, mask_literals: bool = False) -> str:
 
 def lint(source: str, filename: str = "<migration>") -> None:
     """Reject destructive changes unless the first line explicitly explains them."""
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
     transaction_control = re.search(
         r"(?:^|;)\s*(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|"
         r"PREPARE\s+TRANSACTION)\b",
@@ -125,21 +127,40 @@ def lint(source: str, filename: str = "<migration>") -> None:
     )
     if transaction_control:
         raise MigrationError(f"{filename}: transaction boundaries belong to the migration runner")
+    cleaned = _strip_comments(source)
+    if re.search(r'\bU&\s*"', cleaned, re.IGNORECASE):
+        raise MigrationError(f"{filename}: U& identifiers are unsupported")
+    for match in _ALTER_TABLE.finditer(cleaned):
+        identifiers = re.findall(_IDENTIFIER, match.group("table"))
+        for identifier in identifiers:
+            unquoted = (
+                identifier[1:-1].replace('""', '"') if identifier.startswith('"') else identifier
+            )
+            if (identifier.startswith('"') or not identifier.isascii()) and not (
+                unquoted.startswith("fgt_") or re.fullmatch(r"[a-z_][a-z0-9_]*", unquoted)
+            ):
+                raise MigrationError(f"{filename}: protected ALTER TABLE target")
+        table = identifiers[-1].strip('"').replace('""', '"').lower()
+        if table.startswith(("meetup_", "card_ids")):
+            raise MigrationError(f"{filename}: sibling table {table} is off-limits")
+
     first_line = source.splitlines()[0] if source.splitlines() else ""
     override = _ALLOW_DESTRUCTIVE.fullmatch(first_line)
     if override:
         logger.warning("DESTRUCTIVE MIGRATION OVERRIDE: %s: %s", filename, override.group(1))
         return
 
-    cleaned = _strip_comments(source)
     for pattern, label in _FORBIDDEN:
         if re.search(pattern, cleaned, re.IGNORECASE):
             raise MigrationError(f"{filename}: additive-only lint rejected {label}")
-    for match in _ALTER_TABLE.finditer(cleaned):
-        identifiers = re.findall(_IDENTIFIER, match.group("table"))
-        table = identifiers[-1].strip('"').replace('""', '"').lower()
-        if table.startswith(("meetup_", "card_ids")):
-            raise MigrationError(f"{filename}: sibling table {table} is off-limits")
+
+
+def _migration_directory(directory: Path | None) -> Path:
+    return (
+        Path(directory)
+        if directory is not None
+        else Path(os.getenv("FGT_MIGRATIONS_DIR", str(MIGRATIONS_DIR)))
+    )
 
 
 def _load_migrations(directory: Path) -> list[Migration]:
@@ -207,9 +228,9 @@ def _statuses(migrations: list[Migration], history: dict) -> list[MigrationStatu
     return statuses
 
 
-def status(source, migrations_dir: Path = MIGRATIONS_DIR) -> list[MigrationStatus]:
+def status(source, migrations_dir: Path | None = None) -> list[MigrationStatus]:
     """Return pending/applied files, rejecting lint or checksum problems without writes."""
-    migrations = _load_migrations(Path(migrations_dir))
+    migrations = _load_migrations(_migration_directory(migrations_dir))
     try:
         with _connection(source) as connection:
             states = _statuses(migrations, _history(connection))
@@ -222,17 +243,17 @@ def status(source, migrations_dir: Path = MIGRATIONS_DIR) -> list[MigrationStatu
         raise MigrationError(f"Cannot read migration status: {error}") from error
 
 
-def check(source, migrations_dir: Path = MIGRATIONS_DIR) -> list[MigrationStatus]:
+def check(source, migrations_dir: Path | None = None) -> list[MigrationStatus]:
     """Lint all files and list pending migrations without creating the history table."""
     return [
         migration for migration in status(source, migrations_dir) if migration.applied_at is None
     ]
 
 
-def apply(source, migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
+def apply(source, migrations_dir: Path | None = None) -> list[str]:
     """Apply each pending file in its own transaction under one session advisory lock."""
     try:
-        migrations = _load_migrations(Path(migrations_dir))
+        migrations = _load_migrations(_migration_directory(migrations_dir))
         with _connection(source) as connection:
             connection.execute("SELECT pg_advisory_lock(%s)", (LOCK_ID,))
             try:
