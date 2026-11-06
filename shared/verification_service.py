@@ -38,7 +38,7 @@ def start_verification(attempt_id, channel, destination, *, code=None):
     A provider-owned challenge will need its own issuance path after the API decision.
     """
     try:
-        attempt = store.get_attempt(attempt_id)
+        attempt = store.get_attempt(attempt_id, decrypt=True)
         if attempt is None:
             raise VerificationServiceError("not_found")
         state = _field(attempt, "state")
@@ -46,6 +46,8 @@ def start_verification(attempt_id, channel, destination, *, code=None):
             raise VerificationServiceError(
                 state if state in ("expired", "locked", "manual_review") else "unavailable"
             )
+        if _field(attempt, "context") is None:
+            raise VerificationServiceError("expired")
         if channel != _field(attempt, "channel") or store.contact_fingerprint(
             channel, destination
         ) != _field(attempt, "contact_fingerprint"):
@@ -60,7 +62,7 @@ def start_verification(attempt_id, channel, destination, *, code=None):
                     raise VerificationServiceError("expired")
                 quota_ok = store.rate_limit_ok(_field(attempt, "contact_fingerprint"))
                 raise VerificationServiceError("rate_limited", 60 if quota_ok else 900)
-            attempt = store.get_attempt(attempt_id)
+            attempt = store.get_attempt(attempt_id, decrypt=True)
         elif _field(attempt, "code_hash") is not None and not crypto.verify_code(
             code, attempt_id, _field(attempt, "code_hash")
         ):

@@ -592,7 +592,7 @@ def test_cleanup_runs_in_every_mode_and_preserves_receipt(
     attempt_id, _ = direct_attempt(membership_db)
     with membership_db.pool.connection() as connection:
         connection.execute(
-            "UPDATE membership_attempts SET created_at = clock_timestamp() - interval '16 minutes', expires_at = clock_timestamp() - interval '1 minute' WHERE id = %s",
+            "UPDATE membership_attempts SET created_at = now() - interval '16 minutes', expires_at = now() - interval '1 minute' WHERE id = %s",
             (attempt_id,),
         )
     monkeypatch.setattr(membership_flow, "_membership_flow", flow)
@@ -640,7 +640,7 @@ def test_uncertain_deadline_becomes_manual_review_without_resubmitting(
     provider.confirm_found = False
     with membership_db.pool.connection() as connection:
         connection.execute(
-            "UPDATE membership_attempts SET created_at = clock_timestamp() - interval '16 minutes', expires_at = clock_timestamp() - interval '1 minute' WHERE id = %s",
+            "UPDATE membership_attempts SET created_at = now() - interval '16 minutes', expires_at = now() - interval '1 minute' WHERE id = %s",
             (attempt_id,),
         )
     store.cleanup_expired()
@@ -658,6 +658,27 @@ def test_uncertain_deadline_becomes_manual_review_without_resubmitting(
             == "manual_review"
         )
     assert_public(response)
+
+
+def test_background_repairs_a_submitted_checkin_without_resubmitting(
+    membership_db, provider, sender, backend_app, monkeypatch
+):
+    attempt_id, details = direct_attempt(membership_db, submitting=True)
+    store.finish_submit(attempt_id, "submitted")
+    monkeypatch.setattr(membership_flow, "_membership_flow", "off")
+    monkeypatch.setattr(api, "BACKGROUND_RECONCILE_TICK_SECONDS", 0.01)
+
+    def member_updated():
+        with membership_db.pool.connection() as connection:
+            return connection.execute(
+                "SELECT member FROM active_event_data WHERE record_id = %s",
+                (details["checkin_id"],),
+            ).fetchone()[0]
+
+    with TestClient(backend_app.app):
+        wait_until(member_updated)
+    assert row(membership_db, attempt_id)["state"] == "submitted"
+    assert provider.calls == []
 
 
 def test_responses_and_logs_never_contain_provider_or_contact_data(
