@@ -157,7 +157,11 @@ def test_register_url_is_unchanged_without_an_id(site):
     page, _, _ = site(orchestrate=NOT_READY)
     check_in(page)
     page.wait_for_url("**/register?**")
-    assert urlparse(page.url).query == "name=Synthetic%20Player&ebas=true&event=synthetic-event"
+    # T-025: tag joins the URL (it no longer lives in localStorage); no id = no checkin_id.
+    assert (
+        urlparse(page.url).query
+        == "name=Synthetic%20Player&ebas=true&event=synthetic-event&tag=synthetic"
+    )
 
 
 def test_ready_checkin_goes_to_status_with_id_and_member_link_keeps_it(site):
