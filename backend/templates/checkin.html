@@ -556,11 +556,16 @@
         }
 
         const data = await response.json();
+        // Opaque check-in id from orchestrate, carried so later steps can address the
+        // check-in by id (never personnummer or contact data in a URL).
+        const checkinIdQ = data.checkin_id
+          ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}`
+          : "";
 
         if (data.ready) {
           // Player is ready - go to success page
-          const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
-          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}${kioskParam}`;
+          const statusQs = [KIOSK_MODE ? "kiosk=true" : "", checkinIdQ].filter(Boolean).join("&");
+          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}${statusQs ? "?" + statusQs : ""}`;
         } else {
           // Store event slug for register page
           if (data.slug) {
@@ -601,7 +606,7 @@
           // Include event slug in URL for register page
           const eventSlug = data.slug ? `&event=${encodeURIComponent(data.slug)}` : "";
           const kioskQ = KIOSK_MODE ? "&kiosk=true" : "";
-          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}${kioskQ}`;
+          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}${kioskQ}${checkinIdQ ? "&" + checkinIdQ : ""}`;
           window.location.href = `/register?${qs}`;
         }
       } catch (err) {

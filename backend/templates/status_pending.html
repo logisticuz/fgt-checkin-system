@@ -752,8 +752,13 @@
           // Cleanup sensitive data on success
           localStorage.removeItem("personnummer");
           localStorage.removeItem("telefon");
-          const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
-          window.location.href = `/status/${encodeURIComponent(name)}${kioskParam}`;
+          // Keep the opaque checkin_id (from this page's URL) for the Ready page's links.
+          const checkinId = new URLSearchParams(window.location.search).get("checkin_id");
+          const statusQs = [
+            KIOSK_MODE ? "kiosk=true" : "",
+            checkinId ? `checkin_id=${encodeURIComponent(checkinId)}` : "",
+          ].filter(Boolean).join("&");
+          window.location.href = `/status/${encodeURIComponent(name)}${statusQs ? "?" + statusQs : ""}`;
           return;
         }
 
