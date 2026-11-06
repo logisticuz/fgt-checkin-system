@@ -694,6 +694,36 @@ def update_checkin(
         return _update_checkin_with_status(conn, record_id, fields)
 
 
+def recompute_active_statuses(event_slug: str) -> int:
+    """Recompute one active event atomically through the canonical status update path."""
+    if not event_slug:
+        raise ValueError("event_slug is required")
+    with _get_pool().connection() as conn, conn.transaction():
+        with conn.cursor() as cur:
+            # Serialize the batch with check-in creation's shared event lock.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))",
+                (event_slug,),
+            )
+            # Keep the requirement snapshot stable throughout the batch.
+            cur.execute(
+                "SELECT id FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1 FOR SHARE"
+            )
+            cur.fetchone()
+            cur.execute(
+                "SELECT record_id FROM active_event_data WHERE event_slug = %s "
+                "ORDER BY record_id FOR UPDATE",
+                (event_slug,),
+            )
+            record_ids = [row[0] for row in cur.fetchall()]
+        for record_id in record_ids:
+            if not _update_checkin_with_status(conn, record_id, {}):
+                raise RuntimeError(
+                    "An active check-in disappeared during status recomputation"
+                )
+    return len(record_ids)
+
+
 def delete_checkin(record_id: str) -> bool:
     """Delete a checkin record."""
     if not record_id:
