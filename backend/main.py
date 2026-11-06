@@ -108,6 +108,7 @@ app = FastAPI(
     redoc_url="/redoc" if os.getenv("FGT_API_DOCS") == "1" else None,
     openapi_url="/openapi.json" if os.getenv("FGT_API_DOCS") == "1" else None,
 )
+app.include_router(__import__("membership_api").router)
 
 
 app.include_router(__import__("status_api").router)
@@ -742,6 +743,7 @@ async def register_form(request: Request):
         context={
             "request": request,
             "membership_flow": get_membership_flow(),
+            **__import__("membership_api").registration_context(request),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
@@ -766,6 +768,7 @@ async def register_form_alias(request: Request):
         context={
             "request": request,
             "membership_flow": get_membership_flow(),
+            **__import__("membership_api").registration_context(request),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),

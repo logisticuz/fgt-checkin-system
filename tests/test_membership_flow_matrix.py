@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
+from membership_api import BYLAWS_VERSION, PRIVACY_VERSION
 
 from shared import membership_flow
 
@@ -43,9 +44,23 @@ def test_membership_mode_route_matrix(
         "email": row["email"],
         "telephone": row["telephone"],
     }
+    if route.startswith("/api/membership/"):
+        payload = {
+            "personnummer": "200001010008",
+            "email": row["email"],
+            "phone": "+46701234567",
+            "channel": "sms",
+            "accepted_bylaws": False,
+            "accepted_privacy": True,
+            "bylaws_version": BYLAWS_VERSION,
+            "privacy_version": PRIVACY_VERSION,
+            "checkin_id": row["record_id"],
+        }
     response = app_client.request(method, route, json=payload if method == "POST" else None)
     is_legacy_endpoint = route == "/api/ebas/register"
     expected_status = {"legacy": 200, "v2": 410, "off": 503}[flow] if is_legacy_endpoint else 404
+    if flow == "v2" and route.startswith("/api/membership/"):
+        expected_status = 400
     assert response.status_code == expected_status
     assert len(n8n_stub.calls) == int(is_legacy_endpoint and flow == "legacy")
     if is_legacy_endpoint and flow != "legacy":
@@ -148,18 +163,21 @@ def test_membership_flow_is_read_once_with_legacy_default(flow):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.xfail(strict=True, reason="v2 endpoints come in 1.1")
 def test_v2_membership_start_is_available(handler_client, monkeypatch):
     monkeypatch.setattr(membership_flow, "_membership_flow", "v2")
     response = handler_client.post(
         "/api/membership/start",
         json={
-            "personnummer": "000000000000",
+            "personnummer": "200001010008",
             "email": "player@example.invalid",
-            "telephone": "0000000000",
+            "phone": "+46701234567",
             "channel": "sms",
-            "consent_bylaws": True,
-            "consent_privacy": True,
+            "accepted_bylaws": False,
+            "accepted_privacy": True,
+            "bylaws_version": BYLAWS_VERSION,
+            "privacy_version": PRIVACY_VERSION,
+            "checkin_id": None,
         },
     )
-    assert response.status_code in (200, 202)
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "consent_required"

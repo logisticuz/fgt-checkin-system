@@ -1,6 +1,7 @@
 """Durable membership verification; callers submit externally only after begin_submit commits."""
 
 import hashlib
+import math
 import re
 import uuid
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ OUTCOME_ERROR_CODES = frozenset(
         "invalid_details",
         "consent_required",
         "stale_texts",
+        "year_changed",
         "internal_error",
     }
 )
@@ -66,6 +68,7 @@ class MembershipAttempt:
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
+    membership_year: int
     pnr_fingerprint: str | None = field(repr=False)
     contact_fingerprint: str = field(repr=False)
     pnr_enc: bytes | None = field(repr=False)
@@ -387,6 +390,12 @@ def get_attempt(attempt_id: str | uuid.UUID, decrypt: bool = False) -> Membershi
             return None
         values = {name: row[name] for name in MembershipAttempt.__dataclass_fields__ if name in row}
         values["id"] = str(row["id"])
+        receipt = connection.execute(
+            "SELECT year FROM membership_receipts WHERE attempt_id = %s", (attempt_id,)
+        ).fetchone()
+        if receipt is None:
+            raise MembershipStoreError("Membership consent year is unavailable")
+        values["membership_year"] = receipt[0]
         now = connection.execute("SELECT clock_timestamp()").fetchone()[0]
         if (
             decrypt
@@ -518,17 +527,42 @@ def rate_limit_ok(contact_fingerprint: str, window_min: int = 15, max_codes: int
         return _rate_limit_ok(connection, contact_fingerprint, window_min, max_codes)
 
 
-def cleanup_expired(now: datetime | None = None) -> int:
-    now = _aware(now) if now is not None else datetime.now(timezone.utc)
+def recover_abandoned_submitting(older_than_s: int | float) -> int:
+    """Recover durable abandoned claims for confirmation only; never authorize a resubmit."""
+    if (
+        type(older_than_s) not in (int, float)
+        or not math.isfinite(older_than_s)
+        or older_than_s < 0
+    ):
+        raise MembershipStoreError("Invalid abandoned membership submission interval")
     with _transaction() as connection:
+        rows = connection.execute(
+            """UPDATE membership_attempts SET state = 'outcome_unknown',
+               outcome_error_code = NULL, updated_at = clock_timestamp()
+               WHERE state = 'submitting'
+                 AND submit_started_at < clock_timestamp() - %s * interval '1 second'
+               RETURNING id""",
+            (older_than_s,),
+        ).fetchall()
+        for (attempt_id,) in rows:
+            _receipt_outcome(connection, attempt_id, "outcome_unknown")
+    return len(rows)
+
+
+def cleanup_expired(now: datetime | None = None) -> int:
+    now = _aware(now) if now is not None else None
+    with _transaction() as connection:
+        if now is None:
+            now = connection.execute("SELECT clock_timestamp()").fetchone()[0]
         rows = connection.execute(
             """UPDATE membership_attempts SET pnr_enc = NULL, context_enc = NULL, code_hash = NULL,
                state = CASE WHEN state = 'code_sent' THEN 'expired'
-                            WHEN state = 'outcome_unknown' THEN 'manual_review' ELSE state END,
+                            WHEN state IN ('submitting', 'outcome_unknown')
+                              THEN 'manual_review' ELSE state END,
                updated_at = %s
                WHERE expires_at <= %s
                  AND (pnr_enc IS NOT NULL OR context_enc IS NOT NULL OR code_hash IS NOT NULL
-                      OR state IN ('code_sent', 'outcome_unknown'))
+                      OR state IN ('code_sent', 'submitting', 'outcome_unknown'))
                RETURNING id, state""",
             (now, now),
         ).fetchall()
