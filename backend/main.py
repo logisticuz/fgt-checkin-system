@@ -1549,6 +1549,60 @@ async def orchestrate_checkin(request: Request):
     }
 
 
+EBAS_REGISTER_WAIT_SECONDS = 25.0
+# One backend worker is required: both this registry and the SSE manager are per process.
+_ebas_registrations = {}
+_ebas_registration_lock = asyncio.Lock()
+_ebas_registration_tasks = set()
+
+
+def _ebas_registration_response(status_code, **data):
+    return Response(
+        content=json.dumps(data), status_code=status_code, media_type="application/json"
+    )
+
+
+async def _submit_legacy_ebas(checkin_id, started_at, payload):
+    """Finish one upstream request even after its browser request returns processing."""
+    try:
+        headers = {"Content-Type": "application/json"}
+        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+            import base64
+
+            token = base64.b64encode(
+                f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
+            ).decode()
+            headers["authorization"] = f"Basic {token}"
+
+        response = await httpx_client.post(
+            f"{N8N_INTERNAL}/webhook/ebas/register-v2",
+            json=payload,
+            headers=headers,
+            timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+        )
+        if response.status_code < 400:
+            return response.json()
+
+        import re
+
+        # Redact before truncation so a cutoff cannot leave a partial personal ID in logs.
+        safe_body = re.sub(r"\d(?:[\s-]*\d){9,}", "[redacted]", response.text)[:200]
+        logger.warning("n8n eBas registration returned %s: %s", response.status_code, safe_body)
+        return _ebas_registration_response(502, detail="eBas registration service error")
+    except httpx.TimeoutException:
+        # n8n may still finish the request and report membership through its callback.
+        logger.info("n8n eBas registration is still processing after the upstream timeout")
+        return _ebas_registration_response(202, success=True, state="processing")
+    except Exception as error:
+        # Exception strings can contain request bodies; log only the exception type.
+        logger.warning("n8n eBas registration failed (%s)", type(error).__name__)
+        return _ebas_registration_response(502, detail="eBas registration service unavailable")
+    finally:
+        async with _ebas_registration_lock:
+            if _ebas_registrations.get(checkin_id) == started_at:
+                _ebas_registrations.pop(checkin_id, None)
+
+
 @app.post("/api/ebas/register", tags=["Checkin"])
 async def ebas_register(request: Request):
     """
@@ -1567,6 +1621,9 @@ async def ebas_register(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
     # Sanitize
     sanitized = sanitize_checkin_payload(body)
 
@@ -1576,19 +1633,19 @@ async def ebas_register(request: Request):
     tag = (sanitized.get("tag") or "").strip().lower()
     slug = sanitized.get("slug") or ""
 
+    # Find checkin_id by tag+slug (for n8n v2 callback)
+    checkin = get_checkin_by_tag(tag, slug) if tag and slug else None
+    if checkin and checkin.get("fields", {}).get("member") is True:
+        return {"success": True, "already_member": True}
+    checkin_id = (checkin or {}).get("record_id")
+    if not checkin_id:
+        raise HTTPException(status_code=400, detail="Check in before registering membership")
     if not personnummer:
         raise HTTPException(status_code=400, detail="Personnummer is required")
 
-    # Find checkin_id by tag+slug (for n8n v2 callback)
-    checkin_id = None
-    if tag and slug:
-        checkin = get_checkin_by_tag(tag, slug)
-        if checkin:
-            checkin_id = checkin.get("record_id")
-
     # Forward to n8n eBas Register v2
     n8n_payload = {
-        "checkin_id": checkin_id or "",
+        "checkin_id": checkin_id,
         "personnummer": personnummer,
         "email": email,
         "telephone": telephone,
@@ -1596,32 +1653,23 @@ async def ebas_register(request: Request):
         "slug": slug,
     }
 
-    n8n_url = f"{N8N_INTERNAL}/webhook/ebas/register-v2"
+    async with _ebas_registration_lock:
+        started_at = time.monotonic()
+        expires_after = EBAS_REGISTER_TIMEOUT_SECONDS + 120
+        for registered_id, registered_at in list(_ebas_registrations.items()):
+            if started_at - registered_at >= expires_after:
+                _ebas_registrations.pop(registered_id, None)
+        if checkin_id in _ebas_registrations:
+            return _ebas_registration_response(202, success=True, state="processing")
+        _ebas_registrations[checkin_id] = started_at
+        task = asyncio.create_task(_submit_legacy_ebas(checkin_id, started_at, n8n_payload))
+        _ebas_registration_tasks.add(task)
+        task.add_done_callback(_ebas_registration_tasks.discard)
 
     try:
-        n8n_headers = {"Content-Type": "application/json"}
-        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
-            import base64
-            token = base64.b64encode(
-                f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
-            ).decode()
-            n8n_headers["authorization"] = f"Basic {token}"
-
-        n8n_resp = await httpx_client.post(
-            n8n_url,
-            json=n8n_payload,
-            headers=n8n_headers,
-            timeout=httpx.Timeout(30.0, connect=5.0),
-        )
-
-        if n8n_resp.status_code < 400:
-            return n8n_resp.json()
-        else:
-            logger.warning(f"n8n eBas v2 returned {n8n_resp.status_code}: {n8n_resp.text}")
-            raise HTTPException(status_code=502, detail="eBas registration service error")
-    except httpx.HTTPError as e:
-        logger.error(f"n8n eBas v2 call failed: {e}")
-        raise HTTPException(status_code=502, detail=f"eBas registration service unavailable: {e}")
+        return await asyncio.wait_for(asyncio.shield(task), timeout=EBAS_REGISTER_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        return _ebas_registration_response(202, success=True, state="processing")
 
 
 @app.patch("/api/player/games", tags=["Checkin"])
