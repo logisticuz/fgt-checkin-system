@@ -4,6 +4,8 @@ import logging
 import math
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
@@ -18,6 +20,7 @@ except ModuleNotFoundError as error:
     from validation import validate_personnummer
 
 logger = logging.getLogger(__name__)
+_PRIVATE_TRANSPORT_LOGS = ContextVar("ebas_private_transport_logs", default=False)
 _DIGITS = re.compile(r"\d{10,}")
 _PNR = re.compile(r"[0-9]{12}")
 _DUPLICATE_MESSAGE = (
@@ -51,6 +54,51 @@ def _safe_log(message: str, api_key: str) -> None:
     if api_key:
         message = message.replace(api_key, "[redacted]")
     logger.info("%s", _DIGITS.sub("[redacted]", message))
+
+
+class _TransportPrivacyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        transport = record.name in ("httpx", "httpcore") or record.name.startswith(
+            ("httpx.", "httpcore.")
+        )
+        return not (transport and _PRIVATE_TRANSPORT_LOGS.get())
+
+
+@contextmanager
+def _private_transport_logging():
+    """Suppress provider-controlled diagnostics only in the current eBas call context.
+
+    Handler filters also cover descendant loggers first created during a request:
+    parent logger filters alone are not applied to propagated child records.
+    """
+    transport_loggers = {logging.getLogger("httpx"), logging.getLogger("httpcore")}
+    transport_loggers.update(
+        item
+        for item in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(item, logging.Logger) and item.name.startswith(("httpx.", "httpcore."))
+    )
+    handlers = set()
+    for transport_logger in transport_loggers:
+        ancestor = transport_logger
+        while ancestor is not None:
+            handlers.update(ancestor.handlers)
+            ancestor = ancestor.parent
+    if logging.lastResort is not None:
+        handlers.add(logging.lastResort)
+    privacy_filter = _TransportPrivacyFilter()
+    token = _PRIVATE_TRANSPORT_LOGS.set(True)
+    try:
+        for transport_logger in transport_loggers:
+            transport_logger.addFilter(privacy_filter)
+        for handler in handlers:
+            handler.addFilter(privacy_filter)
+        yield
+    finally:
+        for transport_logger in transport_loggers:
+            transport_logger.removeFilter(privacy_filter)
+        for handler in handlers:
+            handler.removeFilter(privacy_filter)
+        _PRIVATE_TRANSPORT_LOGS.reset(token)
 
 
 def _validate_pnr(pnr: str) -> None:
@@ -236,12 +284,13 @@ class EbasClient:
 
     def _post(self, action: str, payload: dict, timeout: float) -> tuple[object, str | None]:
         try:
-            response = self._client.post(
-                f"{self.config.base_url.rstrip('/')}/{action}.json",
-                json=payload,
-                timeout=httpx.Timeout(timeout, connect=min(timeout, 15.0)),
-                follow_redirects=False,
-            )
+            with _private_transport_logging():
+                response = self._client.post(
+                    f"{self.config.base_url.rstrip('/')}/{action}.json",
+                    json=payload,
+                    timeout=httpx.Timeout(timeout, connect=min(timeout, 15.0)),
+                    follow_redirects=False,
+                )
         except httpx.ReadTimeout:
             return None, "read_timeout"
         except Exception:

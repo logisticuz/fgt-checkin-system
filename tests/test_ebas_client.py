@@ -3,8 +3,10 @@
 import json
 import logging
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import date, datetime
+from threading import Barrier
 from unittest.mock import MagicMock
 
 import httpx
@@ -453,3 +455,92 @@ def test_owned_client_disables_environment_proxy_credentials_and_is_closed(monke
         assert client.config.api_key == API_KEY
     factory.assert_called_once_with(trust_env=False)
     transport.close.assert_called_once()
+
+
+@pytest.mark.parametrize("operation", ["validate", "submit", "confirm"])
+def test_provider_reason_phrase_and_transport_diagnostics_are_private(caplog, operation):
+    echo = f"Provider echo {PNR} {API_KEY} {SPAR_NAME}"
+    transport_loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    original_levels = [item.level for item in transport_loggers]
+    original_filters = [list(item.filters) for item in transport_loggers]
+
+    def handle(request):
+        for name in ("httpx", "httpcore", "httpcore.http11", "httpcore.new_ebas_diagnostic"):
+            logging.getLogger(name).warning("Provider-controlled metadata: %s", echo)
+        logging.getLogger("unrelated.application").info("Unrelated application logging preserved")
+        return httpx.Response(
+            400,
+            json={
+                "stored_member": True,
+                "request_result": "success",
+                "response": {"member_found": True, "request_result": "success"},
+            },
+            extensions={"reason_phrase": echo.encode("ascii")},
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        with httpx.Client(transport=httpx.MockTransport(handle)) as transport:
+            client = EbasClient(EbasConfig(API_KEY), transport)
+            if operation == "validate":
+                result = client.validate_member(MEMBER)
+            elif operation == "submit":
+                result = client.submit_member_with_lookup(MEMBER, RENEWED)
+            else:
+                result = client.confirm_membership(PNR, 2026)
+        assert_private(result, caplog)
+        assert "Unrelated application logging preserved" in caplog.messages
+        assert not any(record.name.startswith(("httpx", "httpcore")) for record in caplog.records)
+        assert [item.level for item in transport_loggers] == original_levels
+        assert [item.filters for item in transport_loggers] == original_filters
+        logging.getLogger("httpx").warning("Outside eBas logging preserved")
+        assert "Outside eBas logging preserved" in caplog.messages
+
+
+def test_transport_logging_is_restored_after_request_failure(make_client, caplog):
+    client, _ = make_client(error=httpx.ReadTimeout)
+    with caplog.at_level(logging.DEBUG):
+        result = client.submit_member_with_lookup(MEMBER, RENEWED)
+        assert result.state == "outcome_unknown"
+        assert_private(result, caplog)
+        logging.getLogger("httpcore.connection").warning("Post-failure transport logging preserved")
+    assert "Post-failure transport logging preserved" in caplog.messages
+
+
+def test_unrelated_thread_httpx_logging_is_preserved_during_ebas_call(caplog):
+    def handle(request):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(
+                logging.getLogger("httpx").warning, "Other thread logging preserved"
+            ).result(timeout=5)
+        logging.getLogger("httpcore.http11").warning("Echo %s %s %s", PNR, API_KEY, SPAR_NAME)
+        return httpx.Response(200, json={"response": {"member_found": True}})
+
+    with caplog.at_level(logging.DEBUG):
+        with httpx.Client(transport=httpx.MockTransport(handle)) as transport:
+            result = EbasClient(EbasConfig(API_KEY), transport).confirm_membership(PNR, 2026)
+    assert "Other thread logging preserved" in caplog.messages
+    assert_private(result, caplog)
+
+
+def test_concurrent_ebas_calls_do_not_leak_provider_metadata(caplog):
+    barrier = Barrier(2)
+    echo = f"Echo {PNR} {API_KEY} {SPAR_NAME}"
+
+    def handle(request):
+        barrier.wait(timeout=5)
+        logging.getLogger("httpcore.http11").warning("Provider metadata: %s", echo)
+        return httpx.Response(
+            400,
+            json={"response": {"member_found": True}},
+            extensions={"reason_phrase": echo.encode("ascii")},
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        with httpx.Client(transport=httpx.MockTransport(handle)) as transport:
+            client = EbasClient(EbasConfig(API_KEY), transport)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(client.confirm_membership, PNR, 2026) for _ in range(2)]
+                results = [future.result(timeout=10) for future in futures]
+    assert all(result == ConfirmResult(True) for result in results)
+    for result in results:
+        assert_private(result, caplog)
