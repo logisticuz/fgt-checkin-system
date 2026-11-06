@@ -1,0 +1,169 @@
+{#
+  Membership v2: Sverok-style one-time-code flow (rendered only when membership_flow == "v2").
+  Keeps the id "section-ebas" so register.html's existing show/hide logic drives this section.
+  UI copy is English for now (sverok-texts.md); Swedish appears only as the binding originals
+  behind the "Show Swedish original" toggles. membership_v2.js only ever uses textContent.
+  The consent versions sent to the API are read from the rendered legal partials
+  (data-legal-version), so a receipt always names the text that was actually shown.
+#}
+<style>
+  /* Author display rules (e.g. flex) would otherwise beat the UA style for [hidden]. */
+  #section-ebas [hidden] { display: none !important; }
+  .mv2-hint { color: #aaa; font-size: 0.9rem; margin-bottom: 1rem; }
+  .mv2-field-error { color: #f44336; font-size: 0.8rem; min-height: 1.1rem; margin: -0.5rem 0 0.5rem; }
+  .mv2-channels { display: flex; gap: 0.5rem; margin-bottom: 1rem; border: 0; flex-wrap: wrap; }
+  .mv2-channels legend { font-size: 0.85rem; color: #58aaff; margin-bottom: 0.4rem; font-weight: 500; }
+  .mv2-channels .game-checkbox { flex: 1; justify-content: center; }
+  .mv2-channels input[type="radio"] { width: 20px; height: 20px; margin: 0; accent-color: #58aaff; }
+  .mv2-consents { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.5rem; }
+  .mv2-consents .game-checkbox span { font-size: 0.95rem; }
+  .mv2-more { margin: 0 0 0.5rem; font-size: 0.85rem; color: #aaa; }
+  .mv2-more summary { cursor: pointer; color: #58aaff; padding: 0.35rem 0; }
+  .mv2-more .legal-text {
+    max-height: 40vh; overflow-y: auto; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;
+    border-left: 2px solid rgba(88, 170, 255, 0.3);
+  }
+  .mv2-more .legal-text:focus-visible { outline: 2px solid #58aaff; }
+  .mv2-more .legal-text h4 { color: #ddd; font-size: 0.9rem; margin: 0.75rem 0 0.25rem; }
+  .mv2-more .legal-text p, .mv2-more .legal-text li { margin-bottom: 0.4rem; line-height: 1.4; }
+  .mv2-more .legal-text ol { padding-left: 1.5rem; margin-bottom: 0.4rem; }
+  .mv2-more .legal-note { font-style: italic; color: #8aa0b6; }
+  .mv2-more details { margin-left: 0.75rem; }
+  .legal-todo { background: rgba(255, 152, 0, 0.25); color: #ffb74d; padding: 0 0.2em; border-radius: 3px; }
+  .mv2-intro p { margin-bottom: 0.5rem; line-height: 1.4; }
+  .mv2-code-input { font-size: 1.75rem; letter-spacing: 0.5em; text-align: center; font-variant-numeric: tabular-nums; }
+  .mv2-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem; }
+  #section-ebas input[aria-invalid="true"] { border-color: #f44336; }
+  .mv2-busy {
+    display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+    color: #58aaff; font-size: 1.05rem; text-align: left; padding: 1rem 0 0.75rem;
+  }
+  .mv2-busy .spinner { flex-shrink: 0; width: 28px; height: 28px; border-width: 3px; margin: 0; }
+  #mv2-step-busy .mv2-hint { text-align: center; }
+  .mv2-step h3 { color: #fff; font-size: 1.05rem; margin-bottom: 0.75rem; }
+  .mv2-step h3:focus { outline: none; }
+</style>
+
+<section id="section-ebas" class="section hidden" data-membership-flow="v2"
+         data-idle-ms="90000" data-poll-ms="5000" data-poll-max-ms="240000">
+  <h2>Become a member of FGC Trollhättan</h2>
+
+  {# Errors use an assertive alert; progress is announced by the polite region in each step. #}
+  <div id="mv2-status" class="message info" role="status" aria-live="polite" hidden></div>
+  <div id="mv2-error" class="message error" role="alert" hidden></div>
+
+  {# Step 1: details + consent #}
+  <form id="mv2-step-form" class="mv2-step" novalidate>
+    <p class="mv2-hint">
+      Membership is free and supports our tournaments and events. FGC Trollhättan is affiliated
+      with Sverok, Sweden's national gaming federation. As a member you also join Sverok.
+    </p>
+    <details class="mv2-more mv2-intro">
+      <summary>Read more</summary>
+      <p>FGC Trollhättan is a non-profit esports association dedicated to fighting games, founded in 2016. Membership is free, and it helps us keep running tournaments and events.</p>
+      <p>FGC Trollhättan is affiliated with Sverok, the Swedish gaming federation. When you become a member of FGC Trollhättan you also become a member of Sverok. If you are between 6 and 25 years old, the association receives a grant for your membership, which funds our activities. Your membership is registered for {% if membership_year %}{{ membership_year }}{% else %}<mark class="legal-todo">[membership year]</mark>{% endif %}.</p>
+    </details>
+
+    <label for="mv2-pnr">Personal ID</label>
+    <input type="text" id="mv2-pnr" name="mv2-pnr" inputmode="numeric" autocomplete="off"
+           maxlength="13" placeholder="YYYYMMDDXXXX" spellcheck="false"
+           aria-describedby="mv2-pnr-error" required>
+    <div id="mv2-pnr-error" class="mv2-field-error"></div>
+
+    <label for="mv2-email">Email</label>
+    <input type="email" id="mv2-email" name="mv2-email" autocomplete="off" inputmode="email"
+           placeholder="name@example.com" aria-describedby="mv2-email-error" required>
+    <div id="mv2-email-error" class="mv2-field-error"></div>
+
+    <label for="mv2-phone">Phone</label>
+    <input type="tel" id="mv2-phone" name="mv2-phone" autocomplete="off" inputmode="tel"
+           placeholder="070 123 45 67" aria-describedby="mv2-phone-error" required>
+    <div id="mv2-phone-error" class="mv2-field-error"></div>
+
+    <fieldset class="mv2-channels">
+      <legend>Send my one-time code by</legend>
+      <label class="game-checkbox" for="mv2-channel-sms">
+        <input type="radio" id="mv2-channel-sms" name="mv2-channel" value="sms" checked>
+        <span>Text message (SMS)</span>
+      </label>
+      <label class="game-checkbox" for="mv2-channel-email">
+        <input type="radio" id="mv2-channel-email" name="mv2-channel" value="email">
+        <span>Email</span>
+      </label>
+    </fieldset>
+
+    <div class="mv2-consents">
+      <label class="game-checkbox" for="mv2-consent-bylaws">
+        <input type="checkbox" id="mv2-consent-bylaws">
+        <span>I accept the association's bylaws</span>
+      </label>
+      <details class="mv2-more">
+        <summary>Read bylaws</summary>
+        {% include "legal/bylaws.en.html" %}
+        <details>
+          <summary>Show Swedish original</summary>
+          {% include "legal/bylaws.sv.html" %}
+        </details>
+      </details>
+
+      <label class="game-checkbox" for="mv2-consent-privacy">
+        <input type="checkbox" id="mv2-consent-privacy">
+        <span>I accept how my personal data is handled</span>
+      </label>
+      <details class="mv2-more">
+        <summary>Read more</summary>
+        {% include "legal/privacy.en.html" %}
+        {% include "legal/app-data.en.html" %}
+        <details>
+          <summary>Show Swedish original</summary>
+          {% include "legal/privacy.sv.html" %}
+        </details>
+      </details>
+    </div>
+
+    <button type="submit" id="mv2-start" class="btn btn-primary" disabled
+            aria-describedby="mv2-consent-hint">Become a member</button>
+    <p id="mv2-consent-hint" class="mv2-hint" style="margin: 0.5rem 0 0;">Tick both boxes to continue.</p>
+  </form>
+
+  {# Step 2: one-time code #}
+  <form id="mv2-step-code" class="mv2-step" novalidate hidden>
+    <h3 id="mv2-code-heading" tabindex="-1">Enter your code</h3>
+    <p id="mv2-destination" class="mv2-hint"></p>
+
+    <label for="mv2-code">One-time code (6 digits)</label>
+    <input type="text" id="mv2-code" name="mv2-code" class="mv2-code-input" inputmode="numeric"
+           autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="••••••"
+           spellcheck="false" aria-describedby="mv2-destination mv2-code-error" required>
+    <div id="mv2-code-error" class="mv2-field-error"></div>
+
+    <button type="submit" id="mv2-verify" class="btn btn-primary">Confirm code</button>
+    <div class="mv2-actions">
+      <button type="button" id="mv2-resend" class="btn btn-secondary" disabled>Send again</button>
+      <button type="button" id="mv2-edit" class="btn btn-secondary">Change my details</button>
+    </div>
+  </form>
+
+  {# Step 3: waiting for Sverok (submitting / outcome_unknown polling) #}
+  <div id="mv2-step-busy" class="mv2-step" hidden>
+    <p class="mv2-busy" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span><span id="mv2-busy-text"></span>
+    </p>
+    <p class="mv2-hint">Please don't close this page.</p>
+  </div>
+
+  {# Step 4: terminal problem, a TO has to help #}
+  <div id="mv2-step-help" class="mv2-step" hidden>
+    <h3 id="mv2-help-heading" tabindex="-1"></h3>
+    <p id="mv2-help-text" class="mv2-hint"></p>
+  </div>
+
+  {# Always available (label switches to "Next person" while Sverok works): wipe everything. #}
+  <div class="mv2-actions" id="mv2-reset-row">
+    <button type="button" id="mv2-reset" class="btn btn-secondary">Cancel and clear</button>
+  </div>
+</section>
+
+{# Loaded here (before the page's inline script) so stale PII in localStorage is wiped
+   before register.html reads it. #}
+<script src="/static/js/membership_v2.js"></script>
