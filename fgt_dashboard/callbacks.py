@@ -5153,99 +5153,36 @@ def register_callbacks(app):
     # Re-check Start.gg - re-validate registration + sync games for selected player
     # -------------------------------------------------------------------------
     @app.callback(
-        Output("confirm-recheck-dialog", "displayed"),
-        Output("confirm-recheck-dialog", "message"),
-        Output("pending-recheck-row-ids", "data"),
         Output("recheck-startgg-feedback", "children", allow_duplicate=True),
         Input("btn-recheck-startgg", "n_clicks"),
         State("checkins-table", "selected_row_ids"),
-        State("checkins-table", "data"),
-        prevent_initial_call=True,
-    )
-    def show_recheck_confirmation(n_clicks, selected_row_ids, table_data):
-        """Capture the selected identity before opening the re-check dialog."""
-        if not n_clicks:
-            return False, "", [], no_update
-
-        if not selected_row_ids:
-            return (
-                False,
-                "",
-                [],
-                html.Span("Select a player row first.", style={"color": "#f59e0b"}),
-            )
-
-        if len(selected_row_ids) > 1:
-            return (
-                False,
-                "",
-                [],
-                html.Span(
-                    "Select only one player at a time for re-check.", style={"color": "#f59e0b"}
-                ),
-            )
-
-        row = _find_checkin_row(table_data, selected_row_ids[0])
-        if row is None:
-            return (
-                False,
-                "",
-                [],
-                html.Span(
-                    "Selected player is no longer in the table. Refresh and select again.",
-                    style={"color": "#f59e0b"},
-                ),
-            )
-
-        player_name = row.get("name") or row.get("tag") or "Unknown"
-        return (
-            True,
-            f"Re-check Start.gg registration and sync games for {player_name}?",
-            [row["record_id"]],
-            no_update,
-        )
-
-    @app.callback(
-        Output("recheck-startgg-feedback", "children", allow_duplicate=True),
-        Output("pending-recheck-row-ids", "data", allow_duplicate=True),
-        Input("confirm-recheck-dialog", "submit_n_clicks"),
-        State("pending-recheck-row-ids", "data"),
         State("checkins-table", "data"),
         State("event-dropdown", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def recheck_startgg(n_clicks, captured_row_ids, table_data, selected_slug, auth_state):
+    def recheck_startgg(n_clicks, selected_row_ids, table_data, selected_slug, auth_state):
         """Re-validate Start.gg registration and sync games for a selected player."""
         if not n_clicks:
-            return no_update, no_update
+            return no_update
 
-        if not captured_row_ids:
-            return (
-                html.Span(
-                    "Select a player row first.",
-                    style={"color": "#f59e0b"},
-                ),
-                [],
+        if not selected_row_ids or len(selected_row_ids) == 0:
+            return html.Span(
+                "Select a player row first.",
+                style={"color": "#f59e0b"},
             )
 
-        if len(captured_row_ids) > 1:
-            return (
-                html.Span(
-                    "Select only one player at a time for re-check.",
-                    style={"color": "#f59e0b"},
-                ),
-                [],
+        if len(selected_row_ids) > 1:
+            return html.Span(
+                "Select only one player at a time for re-check.",
+                style={"color": "#f59e0b"},
             )
 
-        row = _find_checkin_row(table_data, captured_row_ids[0])
+        row = _find_checkin_row(table_data, selected_row_ids[0])
         if row is None:
-            return (
-                html.Span(
-                    "Selected player is no longer in the table. Refresh and select again.",
-                    style={"color": "#f59e0b"},
-                ),
-                [],
+            return html.Span(
+                "Selected player is no longer in the table. Refresh and select again.",
+                style={"color": "#f59e0b"},
             )
 
         record_id = row.get("record_id")
@@ -5253,15 +5190,12 @@ def register_callbacks(app):
         player_tag = row.get("tag") or ""
 
         if not record_id:
-            return html.Span("No record_id for selected row.", style={"color": "#ef4444"}), []
+            return html.Span("No record_id for selected row.", style={"color": "#ef4444"})
 
         if not player_tag:
-            return (
-                html.Span(
-                    f"{player_name}: no tag set — add a tag first.",
-                    style={"color": "#f59e0b"},
-                ),
-                [],
+            return html.Span(
+                f"{player_name}: no tag set — add a tag first.",
+                style={"color": "#f59e0b"},
             )
 
         # Save previous state for audit
@@ -5281,12 +5215,9 @@ def register_callbacks(app):
                     if resp.headers.get("content-type", "").startswith("application/json")
                     else resp.text[:200]
                 )
-                return (
-                    html.Span(
-                        f"Re-check failed: {error_detail}",
-                        style={"color": "#ef4444"},
-                    ),
-                    [],
+                return html.Span(
+                    f"Re-check failed: {error_detail}",
+                    style={"color": "#ef4444"},
                 )
 
             data = resp.json()
@@ -5323,38 +5254,26 @@ def register_callbacks(app):
                 logger.warning(f"Failed to write audit log for recheck: {e}")
 
             if startgg:
-                return (
-                    html.Span(
-                        f"Re-checked {player_name}: Start.gg verified, Games: {events_str}, Status: {status}",
-                        style={"color": "#10b981"},
-                    ),
-                    [],
+                return html.Span(
+                    f"Re-checked {player_name}: Start.gg verified, Games: {events_str}, Status: {status}",
+                    style={"color": "#10b981"},
                 )
             else:
-                return (
-                    html.Span(
-                        f"Re-checked {player_name}: not found on Start.gg, Status: {status}",
-                        style={"color": "#f59e0b"},
-                    ),
-                    [],
+                return html.Span(
+                    f"Re-checked {player_name}: not found on Start.gg, Status: {status}",
+                    style={"color": "#f59e0b"},
                 )
 
         except requests.exceptions.Timeout:
-            return (
-                html.Span(
-                    "Re-check timed out — Start.gg or n8n may be slow. Try again.",
-                    style={"color": "#ef4444"},
-                ),
-                [],
+            return html.Span(
+                "Re-check timed out — Start.gg or n8n may be slow. Try again.",
+                style={"color": "#ef4444"},
             )
         except Exception as e:
             logger.exception(f"Re-check Start.gg failed for '{player_name}': {e}")
-            return (
-                html.Span(
-                    f"Re-check failed: {e}",
-                    style={"color": "#ef4444"},
-                ),
-                [],
+            return html.Span(
+                f"Re-check failed: {e}",
+                style={"color": "#ef4444"},
             )
 
     # -------------------------------------------------------------------------

@@ -169,18 +169,11 @@ def test_delete_keeps_confirmed_ids_when_new_checkin_changes_positions(dashboard
     assert pending == []
 
 
-def test_recheck_keeps_confirmed_id_after_refresh(dashboard):
+def test_recheck_resolves_selected_id_after_refresh(dashboard):
     rows = [make_row(0), make_row(1)]
     selected = ["record-1"]
-    displayed, message, captured, _ = dashboard.callbacks["show_recheck_confirmation"](
-        1, selected, rows
-    )
-    assert displayed is True
-    assert "Player 1" in message
-    selected[:] = ["record-99"]
-
-    _, pending = dashboard.callbacks["recheck_startgg"](
-        1, captured, [make_row(99), *reversed(rows)], "test-event", {}
+    feedback = dashboard.callbacks["recheck_startgg"](
+        1, selected, [make_row(99), *reversed(rows)], "test-event", {}
     )
 
     dashboard.post.assert_called_once_with(
@@ -188,31 +181,34 @@ def test_recheck_keeps_confirmed_id_after_refresh(dashboard):
         json={"record_id": "record-1"},
         timeout=20,
     )
-    assert pending == []
+    assert "Player 1" in feedback.children
 
 
-@pytest.mark.parametrize("action", ["delete", "recheck"])
-def test_unknown_selected_id_does_not_open_dialog(dashboard, action):
-    result = dashboard.callbacks[f"show_{action}_confirmation"](
-        1, ["vanished-record"], [make_row(0)]
-    )
+def test_unknown_selected_id_does_not_open_delete_dialog(dashboard):
+    result = dashboard.callbacks["show_delete_confirmation"](1, ["vanished-record"], [make_row(0)])
     assert result[0] is False
-    assert result[3 if action == "delete" else 2] == []
+    assert result[3] == []
     dashboard.storage.delete_checkin.assert_not_called()
     dashboard.post.assert_not_called()
 
 
-@pytest.mark.parametrize("action", ["delete", "recheck"])
 @pytest.mark.parametrize("refreshed", [[], [make_row(99)]], ids=["empty", "replaced"])
-def test_vanished_id_at_confirmation_is_a_noop(dashboard, action, refreshed):
-    opened = dashboard.callbacks[f"show_{action}_confirmation"](1, ["record-0"], [make_row(0)])
-    captured = opened[3 if action == "delete" else 2]
-    handler = "delete_selected_player" if action == "delete" else "recheck_startgg"
-    result = dashboard.callbacks[handler](1, captured, refreshed, "test-event", {})
+def test_vanished_id_at_delete_confirmation_is_a_noop(dashboard, refreshed):
+    opened = dashboard.callbacks["show_delete_confirmation"](1, ["record-0"], [make_row(0)])
+    result = dashboard.callbacks["delete_selected_player"](
+        1, opened[3], refreshed, "test-event", {}
+    )
 
     assert "no longer" in result[0].children
     assert result[-1] == []
     dashboard.storage.delete_checkin.assert_not_called()
+    dashboard.post.assert_not_called()
+
+
+@pytest.mark.parametrize("rows", [[], [make_row(99)]], ids=["empty", "replaced"])
+def test_unknown_recheck_id_is_a_noop(dashboard, rows):
+    feedback = dashboard.callbacks["recheck_startgg"](1, ["record-0"], rows, "test-event", {})
+    assert "no longer" in feedback.children
     dashboard.post.assert_not_called()
 
 
@@ -228,18 +224,21 @@ def test_delete_skips_vanished_id_and_deletes_only_remaining_confirmed_id(dashbo
     assert "Failed: 1" in feedback.children
 
 
-@pytest.mark.parametrize("action", ["delete", "recheck"])
-def test_callbacks_wire_selection_to_capture_and_confirmation_to_store(dashboard, action):
-    opening = dashboard.definitions[f"show_{action}_confirmation"]
+def test_delete_wires_selection_to_capture_and_confirmation_to_store(dashboard):
+    opening = dashboard.definitions["show_delete_confirmation"]
     assert {"id": "checkins-table", "property": "selected_row_ids"} in opening["state"]
-    handler = "delete_selected_player" if action == "delete" else "recheck_startgg"
-    confirming = dashboard.definitions[handler]
-    assert confirming["inputs"] == [
-        {"id": f"confirm-{action}-dialog", "property": "submit_n_clicks"}
-    ]
-    assert {"id": f"pending-{action}-row-ids", "property": "data"} in confirming["state"]
+    confirming = dashboard.definitions["delete_selected_player"]
+    assert confirming["inputs"] == [{"id": "confirm-delete-dialog", "property": "submit_n_clicks"}]
+    assert {"id": "pending-delete-row-ids", "property": "data"} in confirming["state"]
     assert all(state["property"] != "selected_rows" for state in confirming["state"])
     assert all(state["property"] != "selected_row_ids" for state in confirming["state"])
+
+
+def test_recheck_keeps_one_click_behavior_with_selected_ids(dashboard):
+    definition = dashboard.definitions["recheck_startgg"]
+    assert definition["inputs"] == [{"id": "btn-recheck-startgg", "property": "n_clicks"}]
+    assert {"id": "checkins-table", "property": "selected_row_ids"} in definition["state"]
+    assert all(state["property"] != "selected_rows" for state in definition["state"])
 
 
 def test_table_refresh_assigns_record_identity_after_filtering(dashboard):

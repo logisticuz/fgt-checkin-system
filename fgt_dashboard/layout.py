@@ -1539,11 +1539,6 @@ def create_layout():
                                     # Download component for CSV export
                                     dcc.Download(id="download-guests-csv"),
                                     dcc.Store(id="pending-delete-row-ids", data=[]),
-                                    dcc.Store(id="pending-recheck-row-ids", data=[]),
-                                    dcc.ConfirmDialog(
-                                        id="confirm-recheck-dialog",
-                                        message="Re-check the selected player's Start.gg registration?",
-                                    ),
                                     # Confirmation dialog for delete
                                     dcc.ConfirmDialog(
                                         id="confirm-delete-dialog",
