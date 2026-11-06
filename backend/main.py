@@ -103,7 +103,11 @@ class SSEManager:
 sse_manager = SSEManager()
 
 # === App ===
-app = FastAPI()
+app = FastAPI(
+    docs_url="/docs" if os.getenv("FGT_API_DOCS") == "1" else None,
+    redoc_url="/redoc" if os.getenv("FGT_API_DOCS") == "1" else None,
+    openapi_url="/openapi.json" if os.getenv("FGT_API_DOCS") == "1" else None,
+)
 
 
 @app.on_event("startup")

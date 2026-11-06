@@ -13,6 +13,7 @@ since the mount at "/" catches all remaining requests.
 import os
 import logging
 import json
+import uuid
 
 import html as html_mod
 
@@ -28,7 +29,7 @@ from auth import (
     is_event_admin,
     check_event_admin,
 )
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 import re
 from shared.storage import (
     create_session,
@@ -65,14 +66,22 @@ OAUTH_REDIRECT_URI = os.getenv("STARTGG_REDIRECT_URI", "")
 SESSION_COOKIE_NAME = "fgc_session"
 
 # Create FastAPI app
-app = FastAPI()
+app = FastAPI(
+    docs_url="/docs" if os.getenv("FGT_API_DOCS") == "1" else None,
+    redoc_url="/redoc" if os.getenv("FGT_API_DOCS") == "1" else None,
+    openapi_url="/openapi.json" if os.getenv("FGT_API_DOCS") == "1" else None,
+)
 
 
-def _render_waiting_redirect_page(title: str, message: str, next_url: str, delay_ms: int = 1200) -> str:
+def _render_waiting_redirect_page(
+    title: str, message: str, next_url: str, delay_ms: int = 1200
+) -> str:
     """Simple transition page shown after OAuth callback before redirecting."""
-    safe_title = title.replace("<", "").replace(">", "")
-    safe_message = message.replace("<", "").replace(">", "")
-    safe_next = next_url.replace("'", "")
+    safe_title = html_mod.escape(title, quote=True)
+    safe_message = html_mod.escape(message, quote=True)
+    safe_next = (
+        json.dumps(next_url).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    )
     return f"""
     <!doctype html>
     <html>
@@ -108,7 +117,7 @@ def _render_waiting_redirect_page(title: str, message: str, next_url: str, delay
           <p>{safe_message}</p>
         </div>
         <script>
-          setTimeout(function() {{ window.location.href = '{safe_next}'; }}, {int(delay_ms)});
+          setTimeout(function() {{ window.location.href = {safe_next}; }}, {int(delay_ms)});
         </script>
       </body>
     </html>
@@ -265,6 +274,8 @@ def _render_dashboard_landing_page(login_url: str) -> str:
 async def require_dashboard_auth(request: Request, call_next):
     """Require authenticated session for dashboard pages and APIs."""
     path = request.url.path
+    if path in {"/docs", "/redoc", "/openapi.json"} and app.openapi_url is None:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
 
     # Public routes
     if path in {"/auth/login", "/auth/callback", "/auth/callback/finalize", "/health"} or path.startswith("/assets/"):
@@ -321,34 +332,26 @@ async def auth_login():
         url = build_authorize_url(OAUTH_REDIRECT_URI)
         return RedirectResponse(url=url)
     except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        error_id = uuid.uuid4().hex[:8]
+        # Preserve traceback frames without provider exception strings that can contain secrets.
+        safe_error = RuntimeError(f"{type(e).__name__}: authentication details redacted")
+        logger.error(
+            "OAuth login failed log_id=%s",
+            error_id,
+            exc_info=(RuntimeError, safe_error, e.__traceback__),
+        )
+        return JSONResponse(
+            {"error": "Unable to start authentication.", "log_id": error_id}, status_code=500
+        )
 
 
 @app.get("/auth/callback")
 async def auth_callback(code: str = ""):
-    """
-    OAuth callback bridge shown immediately after Start.gg approve.
-
-    This avoids a blank/uncertain wait while token exchange and auth checks run.
-    """
-    if not code:
-        return JSONResponse({"error": "Missing authorization code"}, status_code=400)
-
-    # Show instant waiting page, then finalize in a second request.
-    finalize_path = (
-        f"/auth/callback/finalize?code={code}"
-        if IS_PROD
-        else f"/admin/auth/callback/finalize?code={code}"
-    )
-    return HTMLResponse(
-        _render_waiting_redirect_page(
-            "Start.gg approval received",
-            "Finalizing sign-in... please wait.",
-            finalize_path,
-            delay_ms=80,
-        ),
-        status_code=200,
-    )
+    """Validate the OAuth code and redirect without placing it in HTML or JavaScript."""
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
+        return JSONResponse({"error": "Invalid authorization code"}, status_code=400)
+    finalize_path = "/auth/callback/finalize" if IS_PROD else "/admin/auth/callback/finalize"
+    return RedirectResponse(url=f"{finalize_path}?{urlencode({'code': code})}", status_code=302)
 
 
 @app.get("/auth/callback/finalize")
@@ -362,7 +365,9 @@ async def auth_callback_finalize(code: str = ""):
         token_data = exchange_code_for_token(code, OAUTH_REDIRECT_URI)
         access_token = token_data.get("access_token")
         if not access_token:
-            logger.error(f"Token exchange returned no access_token: {token_data}")
+            logger.error(
+                "Token exchange returned no access_token; response keys=%s", sorted(token_data.keys())
+            )
             return JSONResponse({"error": "Token exchange failed"}, status_code=500)
 
         # Step 2: Get user info from Start.gg
@@ -468,9 +473,16 @@ async def auth_callback_finalize(code: str = ""):
         return response
 
     except Exception as e:
-        logger.error(f"OAuth callback error: {e}", exc_info=True)
+        error_id = uuid.uuid4().hex[:8]
+        # Preserve traceback frames without provider exception strings that can contain secrets.
+        safe_error = RuntimeError(f"{type(e).__name__}: authentication details redacted")
+        logger.error(
+            "OAuth callback failed log_id=%s",
+            error_id,
+            exc_info=(RuntimeError, safe_error, e.__traceback__),
+        )
         return JSONResponse(
-            {"error": f"Authentication failed: {str(e)}"},
+            {"error": "Authentication failed.", "log_id": error_id},
             status_code=500,
         )
 
