@@ -788,6 +788,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,))
             cur.execute(
                 "SELECT require_membership, require_payment, require_startgg "
                 "FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1"
@@ -2411,6 +2412,10 @@ def _match_or_create_player(
         return (new_uuid, True)
 
 
+class ArchiveError(ValueError):
+    """Archiving cannot complete without discarding or guessing event data."""
+
+
 def archive_event(
     event_slug: str,
     *,
@@ -2613,29 +2618,22 @@ def archive_event(
     with _get_pool().connection() as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                # Replace mode: keep one current archive snapshot per event_slug
-                cur.execute(
-                    "SELECT COUNT(*) FROM event_archive WHERE event_slug = %s",
-                    (event_slug,),
-                )
-                existing_archive_rows = cur.fetchone()[0] or 0
-                if existing_archive_rows > 0:
-                    cur.execute(
-                        "DELETE FROM event_archive WHERE event_slug = %s",
-                        (event_slug,),
-                    )
-                    replaced_rows = cur.rowcount or 0
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (event_slug,))
+                # Player totals and merge/undo snapshots must not interleave.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
 
                 # 1. Read active checkins for this slug
                 cur.execute(
                     """
-                    SELECT name, tag, email, telephone, status,
+                    SELECT record_id, name, tag, email, telephone, status,
                            member, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
                            external_id, startgg_event_id, is_guest, added_via, acquisition_source
                     FROM active_event_data
                     WHERE event_slug = %s
+                    ORDER BY record_id
+                    FOR UPDATE
                     """,
                     (event_slug,),
                 )
@@ -2643,10 +2641,16 @@ def archive_event(
                 raw_rows = cur.fetchall()
 
                 if not raw_rows:
-                    logger.warning(f"⚠️ No checkins found for slug '{event_slug}'")
-                    return {"archived": 0, "event_slug": event_slug}
+                    raise ArchiveError("no active rows")
 
                 checkins = [_row_to_dict(columns, row) for row in raw_rows]
+                archived_record_ids = [row["record_id"] for row in checkins]
+                cur.execute(
+                    """SELECT count(*) FROM event_archive
+                       WHERE event_slug = %s AND source_record_id = ANY(%s)""",
+                    (event_slug, archived_record_ids),
+                )
+                replaced_rows = cur.fetchone()[0]
 
                 # 2. Match/create players (returns uuid + new/returning flag)
                 player_results = []
@@ -2658,7 +2662,7 @@ def archive_event(
                 cur.executemany(
                     """
                     INSERT INTO event_archive (
-                        event_slug, event_date, event_display_name,
+                        event_slug, event_date, event_display_name, source_record_id,
                         name, tag, email, telephone, status,
                         member, startgg, payment_valid,
                         payment_amount, payment_expected,
@@ -2667,7 +2671,7 @@ def archive_event(
                         external_id, startgg_event_id, is_guest, added_via, acquisition_source,
                         archived_at, player_uuid
                     ) VALUES (
-                        %s, %s, %s,
+                        %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
                         %s, %s,
@@ -2676,12 +2680,31 @@ def archive_event(
                         %s, %s, %s, %s, %s,
                         %s, %s
                     )
+                    ON CONFLICT (event_slug, source_record_id)
+                        WHERE source_record_id IS NOT NULL
+                    DO UPDATE SET
+                        event_date = EXCLUDED.event_date,
+                        event_display_name = EXCLUDED.event_display_name,
+                        name = EXCLUDED.name, tag = EXCLUDED.tag,
+                        email = EXCLUDED.email, telephone = EXCLUDED.telephone,
+                        status = EXCLUDED.status, member = EXCLUDED.member,
+                        startgg = EXCLUDED.startgg, payment_valid = EXCLUDED.payment_valid,
+                        payment_amount = EXCLUDED.payment_amount,
+                        payment_expected = EXCLUDED.payment_expected,
+                        swish_expected_per_game = EXCLUDED.swish_expected_per_game,
+                        tournament_games_registered = EXCLUDED.tournament_games_registered,
+                        checkin_uuid = EXCLUDED.checkin_uuid, external_id = EXCLUDED.external_id,
+                        startgg_event_id = EXCLUDED.startgg_event_id, is_guest = EXCLUDED.is_guest,
+                        added_via = EXCLUDED.added_via,
+                        acquisition_source = EXCLUDED.acquisition_source,
+                        archived_at = EXCLUDED.archived_at, player_uuid = EXCLUDED.player_uuid
                     """,
                     [
                         (
                             event_slug,
                             event_date,
                             event_display_name,
+                            c["record_id"],
                             c.get("name"),
                             c.get("tag"),
                             c.get("email"),
@@ -2854,8 +2877,8 @@ def archive_event(
                 deleted_count = 0
                 if clear_active:
                     cur.execute(
-                        "DELETE FROM active_event_data WHERE event_slug = %s",
-                        (event_slug,),
+                        "DELETE FROM active_event_data WHERE record_id = ANY(%s)",
+                        (archived_record_ids,),
                     )
                     deleted_count = cur.rowcount
 
@@ -3588,14 +3611,15 @@ def merge_players(
         with conn.transaction():
             with conn.cursor() as cur:
                 # 1. Load both players
-                cur.execute("SELECT * FROM players WHERE uuid = %s", (keep_uuid,))
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+                cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (keep_uuid,))
                 keep_row = cur.fetchone()
                 if not keep_row:
                     raise ValueError(f"Keep player not found: {keep_uuid}")
                 keep_cols = [desc[0] for desc in cur.description]
                 keep_player = _row_to_dict(keep_cols, keep_row)
 
-                cur.execute("SELECT * FROM players WHERE uuid = %s", (remove_uuid,))
+                cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (remove_uuid,))
                 remove_row = cur.fetchone()
                 if not remove_row:
                     raise ValueError(f"Remove player not found: {remove_uuid}")
@@ -3616,17 +3640,19 @@ def merge_players(
 
                 # 3. Re-point event_archive rows
                 cur.execute(
-                    "UPDATE event_archive SET player_uuid = %s WHERE player_uuid = %s",
+                    "UPDATE event_archive SET player_uuid = %s WHERE player_uuid = %s RETURNING id",
                     (keep_uuid, remove_uuid),
                 )
-                archive_updated = cur.rowcount or 0
+                moved_archive_ids = sorted(row[0] for row in cur.fetchall())
+                archive_updated = len(moved_archive_ids)
 
                 # 4. Re-point active_event_data rows
                 cur.execute(
-                    "UPDATE active_event_data SET player_uuid = %s WHERE player_uuid = %s",
+                    "UPDATE active_event_data SET player_uuid = %s WHERE player_uuid = %s RETURNING record_id",
                     (keep_uuid, remove_uuid),
                 )
-                active_updated = cur.rowcount or 0
+                moved_active_ids = sorted(row[0] for row in cur.fetchall())
+                active_updated = len(moved_active_ids)
 
                 # 5. Merge stats into keep player
                 keep_events = keep_player.get("events_list") or []
@@ -3733,13 +3759,32 @@ def merge_players(
 
                 # 7. Write to merge_log
                 cur.execute(
+                    "SELECT md5(to_jsonb(p)::text) FROM players p WHERE uuid = %s",
+                    (keep_uuid,),
+                )
+                after_state = {"player": cur.fetchone()[0]}
+                cur.execute(
+                    """SELECT id, md5(to_jsonb(a)::text) FROM event_archive a
+                       WHERE player_uuid = %s ORDER BY id FOR UPDATE""",
+                    (keep_uuid,),
+                )
+                after_state["archive"] = [list(row) for row in cur.fetchall()]
+                cur.execute(
+                    """SELECT record_id, md5(to_jsonb(a)::text) FROM active_event_data a
+                       WHERE player_uuid = %s ORDER BY record_id FOR UPDATE""",
+                    (keep_uuid,),
+                )
+                after_state["active"] = [list(row) for row in cur.fetchall()]
+                before_totals = {"keep": keep_player, "remove": remove_player, "after": after_state}
+                cur.execute(
                     """
                     INSERT INTO merge_log (
                         keep_uuid, remove_uuid,
                         user_id, user_name, reason,
                         removed_player_snapshot,
-                        archive_rows_updated, active_rows_updated
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        archive_rows_updated, active_rows_updated,
+                        moved_archive_ids, moved_active_ids, before_totals
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -3751,6 +3796,9 @@ def merge_players(
                         _Json(snapshot),
                         archive_updated,
                         active_updated,
+                        moved_archive_ids,
+                        moved_active_ids,
+                        _Json(before_totals, dumps=lambda value: json.dumps(value, default=str)),
                     ),
                 )
                 merge_id = cur.fetchone()[0]
@@ -3796,118 +3844,110 @@ def undo_merge(
     *,
     user: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Undo a player merge by restoring the removed player and reverting UUID pointers.
+    """Undo only the newest unchanged merge using exact row IDs and player snapshots."""
+    from psycopg import sql
+    from psycopg.types.json import Json as _Json
 
-    1. Reads the merge_log entry to get the removed player snapshot
-    2. Re-creates the removed player from snapshot
-    3. Reverts event_archive rows back to the removed UUID
-    4. Reverts active_event_data rows back to the removed UUID
-    5. Marks the merge_log entry as undone
-    """
-    from psycopg.types.json import Json as _Json  # type: ignore
-
+    try:
+        merge_id = int(merge_id)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid merge id") from None
     undo_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
 
-    with _get_pool().connection() as conn:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                # 1. Load merge log entry
-                cur.execute(
-                    "SELECT * FROM merge_log WHERE id = %s",
-                    (merge_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    raise ValueError(f"Merge log entry not found: {merge_id}")
-                cols = [desc[0] for desc in cur.description]
-                entry = _row_to_dict(cols, row)
+    with _get_pool().connection() as conn, conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+            cur.execute("SELECT * FROM merge_log WHERE id = %s FOR UPDATE", (merge_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Merge log entry not found")
+            entry = _row_to_dict([column[0] for column in cur.description], row)
+            if entry.get("undone"):
+                raise ValueError("Merge has already been undone")
+            cur.execute("SELECT id FROM merge_log ORDER BY id DESC LIMIT 1")
+            if cur.fetchone()[0] != merge_id:
+                raise ValueError("Only the newest merge can be undone")
 
-                if entry.get("undone"):
-                    raise ValueError(f"Merge {merge_id} has already been undone")
+            keep_uuid, remove_uuid = entry["keep_uuid"], entry["remove_uuid"]
+            before = entry.get("before_totals")
+            moved_archive_ids = entry.get("moved_archive_ids")
+            moved_active_ids = entry.get("moved_active_ids")
+            if (
+                not isinstance(before, dict)
+                or not all(isinstance(before.get(key), dict) for key in ("keep", "remove", "after"))
+                or not isinstance(moved_archive_ids, list)
+                or not isinstance(moved_active_ids, list)
+            ):
+                raise ValueError("Exact undo metadata is unavailable for this merge")
+            keep_before, snapshot, after = before["keep"], before["remove"], before["after"]
+            if keep_before.get("uuid") != keep_uuid or snapshot.get("uuid") != remove_uuid:
+                raise ValueError("Merge snapshots do not match the players")
 
-                keep_uuid = entry["keep_uuid"]
-                remove_uuid = entry["remove_uuid"]
-                snapshot = entry["removed_player_snapshot"]
+            cur.execute(
+                """SELECT uuid, md5(to_jsonb(p)::text) FROM players p
+                   WHERE uuid = ANY(%s) ORDER BY uuid FOR UPDATE""",
+                ([keep_uuid, remove_uuid],),
+            )
+            if cur.fetchall() != [(keep_uuid, after.get("player"))]:
+                raise ValueError("Players changed after this merge")
+            cur.execute(
+                """SELECT id, md5(to_jsonb(a)::text) FROM event_archive a
+                   WHERE player_uuid = ANY(%s) ORDER BY id FOR UPDATE""",
+                ([keep_uuid, remove_uuid],),
+            )
+            if [list(row) for row in cur.fetchall()] != after.get("archive"):
+                raise ValueError("Player archive rows changed after this merge")
+            cur.execute(
+                """SELECT record_id, md5(to_jsonb(a)::text) FROM active_event_data a
+                   WHERE player_uuid = ANY(%s) ORDER BY record_id FOR UPDATE""",
+                ([keep_uuid, remove_uuid],),
+            )
+            if [list(row) for row in cur.fetchall()] != after.get("active"):
+                raise ValueError("Player active rows changed after this merge")
+            cur.execute("SELECT 1 FROM players WHERE id = %s", (snapshot.get("id"),))
+            if cur.fetchone() is not None:
+                raise ValueError("Removed player row identifier is no longer available")
 
-                if not isinstance(snapshot, dict):
-                    raise ValueError(f"Invalid snapshot for merge {merge_id}")
+            def adapt(column, value):
+                if column in {"game_counts", "events_list", "member_history"} and value is not None:
+                    return _Json(value)
+                return value
 
-                # 2. Re-create the removed player from snapshot
-                cur.execute(
-                    """
-                    INSERT INTO players (
-                        uuid, name, tag, email, telephone,
-                        games_played, game_counts, favorite_game,
-                        total_events, total_paid,
-                        first_seen, last_seen, first_event, last_event,
-                        events_list, is_member, created_at, updated_at
-                    ) VALUES (
-                        %s, %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s, now()
+            columns = list(snapshot)
+            cur.execute(
+                sql.SQL("INSERT INTO players ({}) VALUES ({})").format(
+                    sql.SQL(", ").join(map(sql.Identifier, columns)),
+                    sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+                ),
+                [adapt(column, snapshot[column]) for column in columns],
+            )
+            columns = [column for column in keep_before if column not in {"id", "uuid"}]
+            cur.execute(
+                sql.SQL("UPDATE players SET {} WHERE uuid = %s").format(
+                    sql.SQL(", ").join(
+                        sql.SQL("{} = %s").format(sql.Identifier(column)) for column in columns
                     )
-                    """,
-                    (
-                        remove_uuid,
-                        snapshot.get("name"),
-                        snapshot.get("tag"),
-                        snapshot.get("email"),
-                        snapshot.get("telephone"),
-                        snapshot.get("games_played") or [],
-                        _Json(snapshot.get("game_counts") or {}),
-                        snapshot.get("favorite_game"),
-                        snapshot.get("total_events") or 0,
-                        snapshot.get("total_paid") or 0,
-                        snapshot.get("first_seen"),
-                        snapshot.get("last_seen"),
-                        snapshot.get("first_event"),
-                        snapshot.get("last_event"),
-                        _Json(snapshot.get("events_list") or []),
-                        snapshot.get("is_member") or False,
-                        snapshot.get("created_at"),
-                    ),
-                )
+                ),
+                [*[adapt(column, keep_before[column]) for column in columns], keep_uuid],
+            )
+            cur.execute(
+                "UPDATE event_archive SET player_uuid = %s WHERE id = ANY(%s) AND player_uuid = %s",
+                (remove_uuid, moved_archive_ids, keep_uuid),
+            )
+            archive_reverted = cur.rowcount
+            cur.execute(
+                "UPDATE active_event_data SET player_uuid = %s WHERE record_id = ANY(%s) AND player_uuid = %s",
+                (remove_uuid, moved_active_ids, keep_uuid),
+            )
+            active_reverted = cur.rowcount
+            if archive_reverted != len(moved_archive_ids) or active_reverted != len(
+                moved_active_ids
+            ):
+                raise ValueError("Moved rows no longer match the merge")
+            cur.execute(
+                "UPDATE merge_log SET undone = true, undone_at = now() WHERE id = %s", (merge_id,)
+            )
 
-                # 3. Figure out which archive rows belonged to the removed player
-                # Use the removed player's events_list to identify which rows to revert
-                remove_events = snapshot.get("events_list") or []
-                archive_reverted = 0
-                if remove_events:
-                    cur.execute(
-                        """
-                        UPDATE event_archive
-                        SET player_uuid = %s
-                        WHERE player_uuid = %s
-                          AND event_slug = ANY(%s)
-                        """,
-                        (remove_uuid, keep_uuid, remove_events),
-                    )
-                    archive_reverted = cur.rowcount or 0
-
-                # 4. Revert active_event_data (use tag match as heuristic)
-                active_reverted = 0
-                remove_tag = snapshot.get("tag")
-                if remove_tag:
-                    cur.execute(
-                        """
-                        UPDATE active_event_data
-                        SET player_uuid = %s
-                        WHERE player_uuid = %s AND LOWER(tag) = LOWER(%s)
-                        """,
-                        (remove_uuid, keep_uuid, remove_tag),
-                    )
-                    active_reverted = cur.rowcount or 0
-
-                # 5. Mark as undone
-                cur.execute(
-                    "UPDATE merge_log SET undone = true, undone_at = now() WHERE id = %s",
-                    (merge_id,),
-                )
-
-    # Audit
     log_action(
         undo_user,
         "player_merge_undone",
@@ -3923,12 +3963,9 @@ def undo_merge(
             }
         ),
     )
-
     logger.info(
-        f"↩️ Undid merge #{merge_id}: restored {remove_uuid[:8]}… "
-        f"(archive={archive_reverted}, active={active_reverted})"
+        "Undid merge #%s (archive=%s, active=%s)", merge_id, archive_reverted, active_reverted
     )
-
     return {
         "merge_id": merge_id,
         "undone": True,
