@@ -46,7 +46,8 @@ services:
   backend:
     build:
       context: ./backend
-    ports: ["8000:8000"]
+    # Keep local debugging access while preventing LAN clients from bypassing nginx.
+    ports: ["127.0.0.1:8000:8000"]
     env_file: [.env]
     environment:
       - PYTHONPATH=/app:/app/shared
@@ -75,7 +76,8 @@ services:
     build:
       context: .
       dockerfile: fgt_dashboard/Dockerfile
-    ports: ["8050:8050"]
+    # Keep local debugging access while preventing LAN clients from bypassing nginx.
+    ports: ["127.0.0.1:8050:8050"]
     env_file: [.env]
     environment:
       - PYTHONPATH=/app:/app/shared
