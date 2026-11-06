@@ -1,8 +1,8 @@
 # main.py
 
 # Import FastAPI, templating, static files, and other dependencies
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi import Depends, FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
 import logging
+import secrets
 import time
 import asyncio
-from urllib.parse import quote
 from typing import Set
 from contextlib import asynccontextmanager
 
@@ -48,13 +48,7 @@ logger = logging.getLogger(__name__)
 
 # === Config ===
 DATA_BACKEND = os.getenv("DATA_BACKEND", "postgres").lower().strip()
-STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID")
-STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET")
-STARTGG_REDIRECT_URI = os.getenv(
-    "STARTGG_REDIRECT_URI", "https://checkin.fgctrollhattan.se/auth/callback"
-)
-OAUTH_TOKEN_PATH = "/app/data/startgg_token.json"  # stored in mounted backend/data
-OAUTH_ADMIN_KEY = os.getenv("OAUTH_ADMIN_KEY", "supersecret")  # simple protection
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 INTEGRATION_ENGINE = os.getenv("INTEGRATION_ENGINE", "n8n").lower().strip()
 EBAS_REGISTER_TIMEOUT_SECONDS = float(os.getenv("EBAS_REGISTER_TIMEOUT_SECONDS", "75"))
@@ -63,7 +57,7 @@ SSE_TOKEN = os.getenv("SSE_TOKEN")  # token for SSE authentication (used instead
 ADMIN_AUTH_COOKIE_TOKEN = os.getenv("ADMIN_AUTH_COOKIE_TOKEN")
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")  # for fetching tournament events
 
-# If n8n is protected with Basic Auth, set these for proxy + health
+# Basic Auth for internal n8n calls and health checks.
 N8N_BASIC_AUTH_USER = os.getenv("N8N_BASIC_AUTH_USER")
 N8N_BASIC_AUTH_PASSWORD = os.getenv("N8N_BASIC_AUTH_PASSWORD")
 
@@ -109,6 +103,25 @@ sse_manager = SSEManager()
 
 # === App ===
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def warn_missing_internal_token():
+    if not INTERNAL_API_TOKEN:
+        logger.warning("INTERNAL_API_TOKEN is unset; internal token monitoring is disabled.")
+
+
+async def require_internal_soft(request: Request):
+    """Observe missing/invalid internal tokens while allowing existing callers."""
+    if not INTERNAL_API_TOKEN:
+        return
+    supplied = request.headers.get("X-Internal-Token", "")
+    if not secrets.compare_digest(supplied.encode("utf-8"), INTERNAL_API_TOKEN.encode("utf-8")):
+        logger.warning(
+            "Internal request has a missing or invalid token: path=%s client=%s",
+            request.url.path,
+            request.client.host if request.client else "unknown",
+        )
 
 # CORS – strict in prod, allow localhost in dev
 app.add_middleware(
@@ -250,97 +263,6 @@ def compute_ready_and_missing(status: dict, requirements: dict) -> tuple:
     ready = len(missing) == 0
     return ready, missing
 # --- /CHANGED ---
-
-# === n8n proxy ===
-@app.api_route("/n8n/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-async def proxy_n8n(path: str, request: Request):
-    """
-    Simple pass-through proxy to the internal n8n service.
-    - Do NOT stream the upstream response (avoid chunk/encoding mismatch).
-    - Drop hop-by-hop and now-invalid headers (Content-Length, Content-Encoding, ETag, Date, etc).
-    - Inject Basic Auth when configured and no Authorization header present.
-    - Optional: enforce a shared webhook token if N8N_WEBHOOK_TOKEN is set.
-    """
-    url = f"{N8N_INTERNAL}/{path}"
-
-    # Copy incoming headers but never forward Host
-    headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
-
-    # Force identity encoding so upstream returns plain bytes (safer for proxying)
-    headers["accept-encoding"] = "identity"
-
-    # Inject Basic Auth to n8n if configured and not already present
-    if (
-        N8N_BASIC_AUTH_USER
-        and N8N_BASIC_AUTH_PASSWORD
-        and "authorization" not in {k.lower() for k in headers.keys()}
-    ):
-        import base64
-        token = base64.b64encode(f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()).decode()
-        headers["authorization"] = f"Basic {token}"
-
-    # Optional shared secret for webhook endpoints
-    if N8N_WEBHOOK_TOKEN:
-        # Only enforce for webhook paths to avoid breaking UI API calls
-        if path.startswith("webhook") or "/webhook" in path:
-            supplied = request.query_params.get("token") or request.headers.get("x-n8n-token")
-            if supplied != N8N_WEBHOOK_TOKEN:
-                raise HTTPException(status_code=401, detail="Invalid webhook token")
-
-    body = await request.body()
-
-    # Validate and sanitize JSON payloads for webhook POST requests
-    if request.method == "POST" and body and (path.startswith("webhook") or "/webhook" in path):
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            try:
-                payload = json.loads(body)
-
-                # Only validate check-in webhooks (not eBas, startgg, etc.)
-                is_checkin_webhook = "checkin" in path.lower()
-
-                if is_checkin_webhook:
-                    # Validate check-in payload
-                    errors = validate_checkin_payload(payload)
-                    if errors:
-                        logger.warning(f"Validation errors: {errors}")
-                        raise HTTPException(status_code=400, detail={"errors": errors})
-
-                # Sanitize all webhook payloads (phone, personnummer, etc.)
-                sanitized = sanitize_checkin_payload(payload)
-                body = json.dumps(sanitized).encode("utf-8")
-
-                # Update content-length header
-                headers["content-length"] = str(len(body))
-                logger.debug(f"Sanitized payload for {path}: {sanitized}")
-
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid JSON payload")
-
-    try:
-        resp = await httpx_client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            content=body,
-            params=dict(request.query_params),
-        )
-
-        # Drop hop-by-hop + headers that can be invalid after proxying
-        drop = {
-            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-            "te", "trailers", "transfer-encoding", "upgrade",
-            "content-length", "content-encoding", "etag", "date",
-        }
-        out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in drop}
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=out_headers,
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"n8n proxy error: {e}")
 
 # === Domain logic ===
 def get_active_settings() -> dict:
@@ -1293,7 +1215,7 @@ async def delete_archived_event_endpoint(request: Request):
     return {"success": True, **result}
 
 
-@app.post("/api/checkin/begin", tags=["Integrations"])
+@app.post("/api/checkin/begin", tags=["Integrations"], dependencies=[Depends(require_internal_soft)])
 async def begin_checkin_endpoint(request: Request):
     """Start or upsert a check-in attempt and return checkin_id."""
     begin_fn = getattr(storage_api, "begin_checkin", None)
@@ -1326,7 +1248,9 @@ async def begin_checkin_endpoint(request: Request):
     return {"success": True, **result}
 
 
-@app.post("/api/integration/result", tags=["Integrations"])
+@app.post(
+    "/api/integration/result", tags=["Integrations"], dependencies=[Depends(require_internal_soft)]
+)
 async def integration_result_endpoint(request: Request):
     """Apply integration result from n8n/external checks to a checkin."""
     apply_fn = getattr(storage_api, "apply_integration_result", None)
@@ -1366,7 +1290,11 @@ async def integration_result_endpoint(request: Request):
     return {"success": True, **result}
 
 
-@app.post("/api/checkin/{checkin_id}/member-status", tags=["Integrations"])
+@app.post(
+    "/api/checkin/{checkin_id}/member-status",
+    tags=["Integrations"],
+    dependencies=[Depends(require_internal_soft)],
+)
 async def checkin_member_status_endpoint(checkin_id: str, request: Request):
     """Thin endpoint for eBas flow to set member status by checkin_id."""
     try:
@@ -1677,102 +1605,6 @@ async def update_player_games(request: Request):
     return {"success": True, "tag": tag, "games": games, "payment_expected": payment_expected}
 
 
-@app.patch("/api/player/member", tags=["Checkin"])
-async def update_player_member(request: Request):
-    """
-    Update member status for a player after successful eBas registration.
-    Called by frontend after n8n eBas webhook returns success.
-
-    Body: { "tag": "playertag", "slug": "tournament-slug", "member": true }
-
-    This separates concerns:
-    - n8n handles external API (Sverok eBas)
-    - Backend handles internal database (storage backend)
-    """
-    try:
-        body = await request.json()
-        tag = (body.get("tag") or "").strip().lower()
-        slug = body.get("slug") or ""
-        member = body.get("member", True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    if not tag or not slug:
-        raise HTTPException(status_code=400, detail="tag and slug are required")
-
-    # Find the player record by tag + slug using shared storage backend
-    checkin = get_checkin_by_tag(tag, slug)
-    if not checkin:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    record_id = checkin["record_id"]
-
-    # Update the record with member status
-    result = update_checkin(record_id, {"member": member})
-
-    if not result:
-        raise HTTPException(status_code=500, detail="Storage update failed")
-
-    # Broadcast SSE update for dashboard
-    await sse_manager.broadcast("update", {
-        "type": "member_updated",
-        "record_id": record_id,
-        "tag": tag,
-        "member": member,
-    })
-
-    logger.info(f"Updated member status for {tag}: {member}")
-    return {"success": True, "tag": tag, "member": member}
-
-
-# === Start.gg OAuth (Admin Only) ===
-@app.get("/login", tags=["OAuth"])
-async def login(admin_key: str):
-    if admin_key != OAUTH_ADMIN_KEY:
-        return HTMLResponse("<h1>❌ Unauthorized</h1>", status_code=401)
-    if not STARTGG_CLIENT_ID:
-        return HTMLResponse("<h1>❌ Missing STARTGG_CLIENT_ID</h1>", status_code=500)
-
-    scopes = "public.identity tournament.read event.read attendee.read"
-    auth_url = (
-        "https://start.gg/oauth/authorize"
-        f"?client_id={STARTGG_CLIENT_ID}"
-        f"&redirect_uri={quote(STARTGG_REDIRECT_URI)}"
-        "&response_type=code"
-        f"&scope={quote(scopes)}"
-    )
-    return RedirectResponse(url=auth_url)
-
-@app.get("/auth/callback", tags=["OAuth"])
-async def auth_callback(code: str, admin_key: str):
-    if admin_key != OAUTH_ADMIN_KEY:
-        return HTMLResponse("<h1>❌ Unauthorized</h1>", status_code=401)
-    if not all([STARTGG_CLIENT_ID, STARTGG_CLIENT_SECRET]):
-        return HTMLResponse("<h1>❌ Missing OAuth credentials</h1>", status_code=500)
-
-    token_url = "https://api.start.gg/oauth/token"
-    payload = {
-        "client_id": STARTGG_CLIENT_ID,
-        "client_secret": STARTGG_CLIENT_SECRET,
-        "grant_type": "authorization_code",
-        "redirect_uri": STARTGG_REDIRECT_URI,
-        "code": code,
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-    try:
-        resp = SESSION.post(token_url, data=payload, headers=headers, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        return HTMLResponse(f"<h1>❌ Token exchange failed</h1><pre>{e}</pre>", status_code=500)
-
-    tokens = resp.json()
-    os.makedirs(os.path.dirname(OAUTH_TOKEN_PATH), exist_ok=True)
-    with open(OAUTH_TOKEN_PATH, "w") as f:
-        json.dump(tokens, f, indent=2)
-
-    return HTMLResponse("<h1>✅ OAuth success</h1><p>Token saved successfully.</p>")
-
 # === SSE Endpoints ===
 @app.get("/api/events/stream", tags=["SSE"])
 async def sse_stream(request: Request, token: str = None):
@@ -1823,7 +1655,7 @@ async def sse_stream(request: Request, token: str = None):
     )
 
 
-@app.post("/api/notify/checkin", tags=["SSE"])
+@app.post("/api/notify/checkin", tags=["SSE"], dependencies=[Depends(require_internal_soft)])
 async def notify_checkin(request: Request):
     """
     Endpoint for n8n to call after a check-in is saved.
@@ -1847,7 +1679,7 @@ async def notify_checkin(request: Request):
     return {"success": True, "clients_notified": len(sse_manager.clients)}
 
 
-@app.post("/api/notify/update", tags=["SSE"])
+@app.post("/api/notify/update", tags=["SSE"], dependencies=[Depends(require_internal_soft)])
 async def notify_update(request: Request):
     """
     Generic update notification endpoint.
