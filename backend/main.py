@@ -110,6 +110,8 @@ app = FastAPI(
 )
 
 
+app.include_router(__import__("status_api").router)
+
 @app.on_event("startup")
 async def warn_missing_internal_token():
     if not INTERNAL_API_TOKEN:
@@ -637,6 +639,7 @@ async def status_view(request: Request, name: str, kiosk: bool = False):
         context={
             "request": request,
             "name": name,
+            **__import__("status_api").status_context(request),
             "status": status,
             "tag": details.get("tag", name),
             "event_name": event_name,
@@ -1480,6 +1483,7 @@ async def orchestrate_checkin(request: Request):
         "name": name,
         "tag": tag,
         "checkin_id": checkin_id,
+        "status_token": __import__("status_api").capability_token(checkin_id),
     }
 
 

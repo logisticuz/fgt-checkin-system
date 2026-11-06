@@ -33,3 +33,26 @@ their application handlers do not exist yet. Future v2 handlers must remain unav
 Unknown resources can return 404 and invalid payloads can return 400 independently of mode.
 The existing `/register.html` backend alias receives the same template mode as `/register`.
 The eventual public proxy rejects routes outside this table; internal routes use their own auth.
+
+## Status by id
+
+`POST /api/checkin/orchestrate` additionally returns `status_token` for its `checkin_id`.
+The kiosk stores that capability in its session and uses
+`GET /api/checkin/{checkin_id}/status?t={status_token}`.
+A successful lookup returns only `{found,ready,missing,member,startgg,payment_ok,games,status}`.
+The server looks up the exact record ID in the active event and uses the canonical check-in
+status computation; stored status text and name/tag fallbacks do not authorize this endpoint.
+Email, phone and personal ID fields are never returned.
+
+Tokens contain the check-in ID, an expiry and an HMAC-SHA256 signature, encoded as unpadded
+base64url. Their default lifetime is six hours. Missing, invalid, tampered, expired or
+different-ID tokens return 403 `{found:false,ready:false}` before storage is queried.
+A correctly signed token for an unknown or non-active-event ID returns 200 with the same false flags.
+`STATUS_TOKEN_KEY` selects a persistent signing key. If absent, the server derives a distinct
+status key from a configured private server secret. If none exists, a random per-process key
+is generated with a WARNING that capabilities do not survive restarts.
+
+`/status/{name}` accepts optional `checkin_id` and `t` query parameters and adds template
+context `checkin_id`/`status_token` only when the capability verifies for that ID.
+The legacy name-based `/api/participant/{name}/status` is deprecated for the kiosk;
+its behavior remains available while the pages switch to the capability endpoint.
