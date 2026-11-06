@@ -367,6 +367,17 @@ def create_layout():
             ),  # Current filter: all, pending, ready, no-payment
             dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
             dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
+            # T-029: destructive event actions need a confirmation that names both the current
+            # and the target event. The target is captured when the dialog opens, so the action
+            # runs on exactly what was confirmed even if a dropdown changes meanwhile.
+            dcc.ConfirmDialog(id="confirm-archive-event-dialog", message=""),
+            dcc.ConfirmDialog(id="confirm-reopen-event-dialog", message=""),
+            dcc.ConfirmDialog(id="confirm-fetch-event-dialog", message=""),
+            dcc.Store(id="pending-archive-target", data=None),
+            dcc.Store(id="pending-reopen-target", data=None),
+            dcc.Store(id="pending-fetch-target", data=None),
+            # T-029: games changed on an already paid player -> "paid the difference?" prompt
+            dcc.Store(id="pending-games-payment", data=None),
             dcc.Store(id="auth-store", data=auth_state),  # Current user auth state
             dcc.Store(
                 id="requirements-store",
@@ -1533,6 +1544,65 @@ def create_layout():
                                     ),
                                     html.Div(
                                         id="manual-checkin-feedback", style={"marginTop": "0.5rem"}
+                                    ),
+                                    # T-029: "paid the difference?" prompt (hidden until needed)
+                                    html.Div(
+                                        id="games-payment-modal",
+                                        # Inline (shown right under the manual check-in
+                                        # feedback), so not aria-modal.
+                                        role="alertdialog",
+                                        **{"aria-labelledby": "games-payment-title"},
+                                        style={"display": "none"},
+                                        children=html.Div(
+                                            style={
+                                                **STYLES["card"],
+                                                "maxWidth": "460px",
+                                                "margin": "0 auto",
+                                                "border": f"2px solid {COLORS['accent_yellow']}",
+                                            },
+                                            children=[
+                                                html.H3(
+                                                    "Har hen betalat mellanskillnaden?",
+                                                    id="games-payment-title",
+                                                    style=STYLES["section_title"],
+                                                ),
+                                                html.P(
+                                                    id="games-payment-text",
+                                                    style={"color": COLORS["text_secondary"]},
+                                                ),
+                                                html.Div(
+                                                    style={
+                                                        "display": "flex",
+                                                        "gap": "0.6rem",
+                                                        "flexWrap": "wrap",
+                                                        "marginTop": "1rem",
+                                                    },
+                                                    children=[
+                                                        html.Button(
+                                                            "Ja, uppdatera beloppet",
+                                                            id="btn-games-paid-yes",
+                                                            n_clicks=0,
+                                                            style=STYLES["button_primary"],
+                                                        ),
+                                                        html.Button(
+                                                            "Nej, markera som obetald",
+                                                            id="btn-games-paid-no",
+                                                            n_clicks=0,
+                                                            style=STYLES["button_secondary"],
+                                                        ),
+                                                        html.Button(
+                                                            "Avbryt (ändra inga spel)",
+                                                            id="btn-games-paid-cancel",
+                                                            n_clicks=0,
+                                                            style={
+                                                                **STYLES["button_secondary"],
+                                                                "opacity": 0.8,
+                                                            },
+                                                        ),
+                                                    ],
+                                                ),
+                                            ],
+                                        ),
                                     ),
                                     html.Div(id="delete-feedback", style={"marginTop": "0.5rem"}),
                                     html.Div(id="export-feedback", style={"marginTop": "0.5rem"}),
