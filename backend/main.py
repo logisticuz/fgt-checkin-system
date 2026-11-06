@@ -43,6 +43,7 @@ except ImportError:
 import shared.storage as storage_api
 from shared.membership_flow import get_membership_flow
 from validation import sanitize_checkin_payload, validate_checkin_payload
+from status_api import lookup_checkin_status, status_context
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -622,13 +623,36 @@ def get_participant_details(namn: str) -> dict:
 
 @app.get("/status/{name}", response_class=HTMLResponse, tags=["Checkin"])
 async def status_view(request: Request, name: str, kiosk: bool = False):
-    status = check_participant_status(name)
-    details = get_participant_details(name)
-    settings = get_active_settings()
-
-    # Task 1.3: Use centralized READY calculation for template selection
-    requirements = compute_requirements(settings)
-    ready, _ = compute_ready_and_missing(status, requirements)
+    capability = status_context(request)
+    status_context_fields = {}
+    if capability:
+        try:
+            canonical = lookup_checkin_status(capability["checkin_id"], include_display=True)
+        except Exception:
+            logger.warning("Capability status page lookup is temporarily unavailable")
+            canonical = {"found": False, "ready": False}
+        ready = canonical.get("found") is True and canonical.get("ready") is True
+        status = {
+            **canonical,
+            "member": canonical.get("member", False),
+            "payment": canonical.get("payment_ok", False),
+            "startgg": canonical.get("startgg", False),
+            "summary": canonical.get("status", "Not found"),
+        }
+        details = {"tag": canonical.get("tag", ""), "games": canonical.get("games", [])}
+        status_context_fields = {
+            "found": canonical.get("found", False),
+            "ready": ready,
+            "missing": canonical.get("missing", []),
+        }
+        settings = get_active_settings()
+        requirements = compute_requirements(settings)
+    else:
+        status = check_participant_status(name)
+        details = get_participant_details(name)
+        settings = get_active_settings()
+        requirements = compute_requirements(settings)
+        ready, _ = compute_ready_and_missing(status, requirements)
 
     template_name = "status_ready.html" if ready else "status_pending.html"
     event_slug = settings.get("active_event_slug", "")
@@ -640,7 +664,8 @@ async def status_view(request: Request, name: str, kiosk: bool = False):
         context={
             "request": request,
             "name": name,
-            **__import__("status_api").status_context(request),
+            **capability,
+            **status_context_fields,
             "status": status,
             "tag": details.get("tag", name),
             "event_name": event_name,
