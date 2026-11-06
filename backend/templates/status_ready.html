@@ -315,7 +315,14 @@
       // Add countdown indicator
       const footer = document.querySelector("footer p");
       if (footer) {
-        footer.innerHTML = `Good luck! <br><span id="kiosk-countdown" style="color: #58aaff; font-size: 0.8rem;">Returning to check-in in ${countdown}s...</span>`;
+        const countdownText = document.createElement("span");
+        countdownText.id = "kiosk-countdown";
+        countdownText.style.color = "#58aaff";
+        countdownText.style.fontSize = "0.8rem";
+        countdownText.textContent = `Returning to check-in in ${countdown}s...`;
+        footer.replaceChildren(
+          document.createTextNode("Good luck! "), document.createElement("br"), countdownText
+        );
       }
 
       // Update countdown every second

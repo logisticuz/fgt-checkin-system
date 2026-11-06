@@ -520,7 +520,7 @@
 
   <script>
     // Name is passed from backend template
-    const name = "{{ name }}";
+    const name = {{ name | tojson }};
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
@@ -546,8 +546,15 @@
     }
 
     // Swish config (from settings)
-    const SWISH_NUMBER = "{{ swish_number | default('1234567890') | replace('-', '') | replace(' ', '') }}";
-    const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) }};
+    const SWISH_NUMBER = {{ swish_number | default('1234567890') | replace('-', '') | replace(' ', '') | tojson }};
+    const SWISH_PRICE_PER_GAME = {{ swish_expected_per_game | default(25) | tojson }};
+
+    function el(tag, text, className = "") {
+      const element = document.createElement(tag);
+      element.textContent = text;
+      if (className) element.className = className;
+      return element;
+    }
 
     // Mobile detection
     function isMobile() {
@@ -578,8 +585,9 @@
         const amount = data.payment_expected || (gamesCount * SWISH_PRICE_PER_GAME);
 
         // Update amount display
-        document.getElementById("swish-amount").innerHTML =
-          `<span>Amount to pay</span>${amount} kr`;
+        document.getElementById("swish-amount").replaceChildren(
+          el("span", "Amount to pay"), document.createTextNode(`${amount} kr`)
+        );
 
         // Show mobile or desktop UI
         if (isMobile()) {
@@ -682,13 +690,13 @@
       const ready = items.filter(i => i.ok);
       const missing = items.filter(i => !i.ok);
 
-      readyList.innerHTML = ready.length > 0
-        ? ready.map(i => `<li>${i.name}</li>`).join("")
-        : '<li class="empty">—</li>';
+      readyList.replaceChildren(...(ready.length > 0
+        ? ready.map(i => el("li", i.name))
+        : [el("li", "—", "empty")]));
 
-      missingList.innerHTML = missing.length > 0
-        ? missing.map(i => `<li>${i.name}</li>`).join("")
-        : '<li class="empty">—</li>';
+      missingList.replaceChildren(...(missing.length > 0
+        ? missing.map(i => el("li", i.name))
+        : [el("li", "—", "empty")]));
 
       // UX: hide the Ready column entirely until something is actually ready.
       if (readyCol && missingCol) {
@@ -791,13 +799,12 @@
         const eventsList = document.getElementById("matched-events-list");
         if (Array.isArray(data?.startgg_events) && data.startgg_events.length > 0) {
           eventsList.classList.remove("hidden");
-          eventsList.innerHTML =
-            `<h3>Registered for</h3><ul>` +
-            data.startgg_events.map(ev => `<li>${ev}</li>`).join("") +
-            `</ul>`;
+          const gamesList = document.createElement("ul");
+          data.startgg_events.forEach(game => gamesList.appendChild(el("li", game)));
+          eventsList.replaceChildren(el("h3", "Registered for"), gamesList);
         } else {
           eventsList.classList.add("hidden");
-          eventsList.innerHTML = "";
+          eventsList.replaceChildren();
         }
 
         // Update Swish payment section
