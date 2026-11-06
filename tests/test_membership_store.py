@@ -2,11 +2,12 @@
 
 import base64
 import importlib
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import psycopg
 import pytest
@@ -105,19 +106,86 @@ def test_missing_or_invalid_key_fails_on_first_use_without_plaintext(monkeypatch
     assert PNR not in str(caught.value)
 
 
-@pytest.mark.parametrize("operation", ["personal_id", "attempt_id", "error_code", "ciphertext"])
+@pytest.mark.parametrize("operation", ["personal_id", "attempt_id", "ciphertext"])
 def test_invalid_input_exception_messages_never_echo_the_personal_id(operation, caplog):
     with pytest.raises(ValueError) as caught:
         if operation == "personal_id":
             make_attempt(pnr=PNR + "invalid")
         elif operation == "attempt_id":
             store.begin_submit(PNR, CODE)
-        elif operation == "error_code":
-            store.finish_submit(uuid.uuid4(), "failed", error_code=PNR)
         else:
             crypto.decrypt_pnr(PNR.encode(), uuid.uuid4())
     assert PNR not in str(caught.value)
     assert PNR not in caplog.text
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("state", ["submitted", "failed", "outcome_unknown"])
+@pytest.mark.parametrize("error_code", ["provider_" + PNR, PNR, {"message": PNR}])
+def test_all_persisted_outcomes_replace_prefixed_personal_id_error_codes(
+    membership_db, state, error_code
+):
+    attempt_id = make_attempt()
+    assert store.begin_submit(attempt_id, CODE).status == "submitting"
+    assert store.finish_submit(attempt_id, state, error_code=error_code)
+    row = attempt_row(membership_db, attempt_id)
+    assert row["outcome_error_code"] == "internal_error"
+    assert PNR not in row["outcome_error_code"]
+
+
+@pytest.mark.db
+def test_stable_whitelisted_outcome_error_code_is_preserved(membership_db):
+    attempt_id = make_attempt()
+    assert store.begin_submit(attempt_id, CODE).status == "submitting"
+    assert store.finish_submit(attempt_id, "failed", error_code="ebas_unavailable")
+    assert attempt_row(membership_db, attempt_id)["outcome_error_code"] == "ebas_unavailable"
+
+
+@pytest.mark.db
+def test_resend_rechecks_expiry_after_contact_lock_contention(membership_db, monkeypatch):
+    attempt_id = make_attempt()
+    fingerprint = attempt_row(membership_db, attempt_id)["contact_fingerprint"]
+    new_hash = crypto.hash_code("654321", attempt_id)
+    reached_lock = Event()
+    original_lock = store._lock_fingerprint
+    timing = []
+
+    def observed_lock(connection, fingerprint, domain):
+        started = connection.execute("SELECT clock_timestamp()").fetchone()[0]
+        if domain == "contact":
+            reached_lock.set()
+        original_lock(connection, fingerprint, domain)
+        timing.append((started, connection.execute("SELECT clock_timestamp()").fetchone()[0]))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with membership_db.pool.connection() as blocker:
+            with blocker.transaction():
+                original_lock(blocker, fingerprint, "contact")
+                expires_at = blocker.execute(
+                    """UPDATE membership_attempts SET
+                       code_sent_at = clock_timestamp() - interval '61 seconds',
+                       expires_at = clock_timestamp() + interval '3 seconds'
+                       WHERE id = %s RETURNING expires_at""",
+                    (attempt_id,),
+                ).fetchone()[0]
+            # Commit the timestamps, then hold only the advisory lock so the worker
+            # can reach it before the expiration and cooldown checks.
+            with blocker.transaction():
+                original_lock(blocker, fingerprint, "contact")
+                monkeypatch.setattr(store, "_lock_fingerprint", observed_lock)
+                resend = executor.submit(store.resend_code, attempt_id, new_hash)
+                assert reached_lock.wait(timeout=5)
+                deadline = time.monotonic() + 15
+                while blocker.execute("SELECT clock_timestamp() < %s", (expires_at,)).fetchone()[0]:
+                    assert time.monotonic() < deadline, "Test database clock did not reach expiry"
+                    time.sleep(0.05)
+                assert not resend.done(), timing
+        assert resend.result(timeout=5) is False, timing
+    assert timing and timing[0][1] >= expires_at
+    row = attempt_row(membership_db, attempt_id)
+    assert crypto.verify_code(CODE, attempt_id, row["code_hash"])
+    with membership_db.pool.connection() as connection:
+        assert connection.execute("SELECT count(*) FROM membership_code_sends").fetchone()[0] == 1
 
 
 @pytest.mark.db

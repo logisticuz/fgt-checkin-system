@@ -15,6 +15,24 @@ from shared import membership_crypto as crypto, postgres_api
 CODE_LIFETIME = timedelta(minutes=10)
 ATTEMPT_LIFETIME = timedelta(minutes=15)
 RESEND_DELAY = timedelta(seconds=60)
+OUTCOME_ERROR_CODES = frozenset(
+    {
+        "wrong_code",
+        "locked",
+        "expired",
+        "rate_limited",
+        "send_failed",
+        "rejected",
+        "in_progress",
+        "outcome_unknown",
+        "unavailable",
+        "ebas_unavailable",
+        "invalid_details",
+        "consent_required",
+        "stale_texts",
+        "internal_error",
+    }
+)
 
 
 class MembershipStoreError(ValueError):
@@ -275,10 +293,12 @@ def begin_submit(attempt_id: str | uuid.UUID, code: str) -> BeginSubmitResult:
 def finish_submit(attempt_id: str | uuid.UUID, state: str, error_code: str | None = None) -> bool:
     if state not in ("submitted", "failed", "outcome_unknown"):
         raise MembershipStoreError("Invalid membership submission outcome")
-    if error_code is not None and (
-        not isinstance(error_code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error_code) is None
-    ):
-        raise MembershipStoreError("Invalid membership outcome error code")
+    if error_code is not None:
+        error_code = (
+            error_code
+            if isinstance(error_code, str) and error_code in OUTCOME_ERROR_CODES
+            else "internal_error"
+        )
     attempt_id = _id(attempt_id)
     with _transaction() as connection:
         row = _locked_person_attempt(connection, attempt_id)
@@ -304,6 +324,12 @@ def resend_code(attempt_id: str | uuid.UUID, new_code_hash: str) -> bool:
         raise MembershipStoreError("Invalid membership verification hash")
     attempt_id = _id(attempt_id)
     with _transaction() as connection:
+        found = connection.execute(
+            "SELECT contact_fingerprint FROM membership_attempts WHERE id = %s", (attempt_id,)
+        ).fetchone()
+        if found is None:
+            return False
+        _lock_fingerprint(connection, found[0], "contact")
         row = _attempt(connection, attempt_id)
         if row is None or row["state"] != "code_sent":
             return False
@@ -312,15 +338,20 @@ def resend_code(attempt_id: str | uuid.UUID, new_code_hash: str) -> bool:
             return False
         if row["code_hash"] == new_code_hash:
             return False
-        _lock_fingerprint(connection, row["contact_fingerprint"], "contact")
         if not _rate_limit_ok(connection, row["contact_fingerprint"]):
             return False
-        connection.execute(
-            """UPDATE membership_attempts SET code_hash = %s, code_sent_at = %s,
-               code_expires_at = %s, updated_at = %s WHERE id = %s""",
-            (new_code_hash, now, min(now + CODE_LIFETIME, row["expires_at"]), now, attempt_id),
-        )
-        _record_send(connection, attempt_id, row["contact_fingerprint"], now)
+        updated = connection.execute(
+            """UPDATE membership_attempts SET code_hash = %s, code_sent_at = clock_timestamp(),
+               code_expires_at = LEAST(clock_timestamp() + interval '10 minutes', expires_at),
+               updated_at = clock_timestamp()
+               WHERE id = %s AND state = 'code_sent' AND expires_at > clock_timestamp()
+                 AND code_sent_at <= clock_timestamp() - interval '60 seconds'
+               RETURNING code_sent_at""",
+            (new_code_hash, attempt_id),
+        ).fetchone()
+        if updated is None:
+            return False
+        _record_send(connection, attempt_id, row["contact_fingerprint"], updated[0])
     return True
 
 
