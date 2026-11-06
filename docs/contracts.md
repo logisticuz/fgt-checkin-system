@@ -136,3 +136,37 @@ It never retries submission. Failed worker creation marks the claim uncertain im
 At the fixed fifteen-minute deadline, both submitting and outcome_unknown become manual_review
 and their secrets are erased; cleanup uses database time. A retained worker claim cannot submit
 after the store's hard deadline. Started worker/maintenance tasks are drained on graceful shutdown.
+
+## Orchestrate response: integrations/degraded
+
+`POST /api/checkin/orchestrate` additionally returns:
+
+```json
+{"integrations":{"ebas":"ok","startgg":"ok"},"degraded":false}
+```
+
+Each integration is `ok` (a provider result is available, including a verified negative),
+`unavailable` (the call failed or its result is ambiguous), or `skipped` (it did not run).
+`degraded` is true when any source is unavailable. With `INTEGRATION_ENGINE=none`, both
+sources are `skipped` and `degraded` is explicitly true because integrations are disabled.
+Timeouts, HTTP failures and malformed summaries report both sources unavailable.
+Availability reporting performs no additional provider calls or writes to provider flags.
+
+The T-028 n8n summary's `results.ebas` and `results.startgg` states take precedence over
+other explicit per-source `integrations` values and transport-based legacy inference.
+`results.attempt_id` is correlation metadata and is not exposed in the availability response.
+Source reports under `ebas`/`startgg` (or under `results`/`integrations`) may contain a `state` field:
+`verified_true` and `verified_false` both map to `ok`; `unavailable` and `skipped` retain
+their meanings. Unknown or malformed explicit states are unavailable. A source skipped because
+it is not required does not itself make the response degraded. No database state shape is required.
+For legacy summaries, `integration_complete:true` with a positive `member`/`startgg` result
+establishes availability; a negative is ambiguous because the old workflow also emits false
+on errors. Without a personal ID, a non-explicit eBas result is skipped.
+
+The check-in UI derives the membership signup hint from `member === false` or `"Membership"`
+in `missing`. When eBas is unavailable or skipped, the response uses `member:null` for an
+unverified stored membership and omits `"Membership"` from the response's `missing` array.
+A previously verified `member:true` remains true. Clients must treat null as unknown and
+use `degraded`/`integrations` to offer a retry or TO assistance rather than membership signup.
+These response hints do not change canonical readiness, stored status, or stored flags;
+`ready:false` may therefore accompany an empty response `missing` array during an outage.

@@ -1356,6 +1356,49 @@ async def checkin_member_status_endpoint(checkin_id: str, request: Request):
 # === Orchestration endpoints (n8n migration) ===
 
 
+def _orchestrate_integrations(response, data, payload):
+    """Describe this run without inferring provider availability from stored flags."""
+    sources = ("ebas", "startgg")
+    if INTEGRATION_ENGINE != "n8n":
+        return dict.fromkeys(sources, "skipped"), True
+
+    integrations = dict.fromkeys(sources, "unavailable")
+    if not isinstance(data, dict):
+        return integrations, True
+
+    results = data.get("results")
+    reported = data.get("integrations")
+    transport_ok = response is not None and 200 <= response.status_code < 300
+    states = {
+        "ok": "ok",
+        "verified_true": "ok",
+        "verified_false": "ok",
+        "unavailable": "unavailable",
+        "skipped": "skipped",
+    }
+    for source in sources:
+        if isinstance(results, dict) and source in results:
+            report = results[source]
+        elif isinstance(reported, dict) and source in reported:
+            report = reported[source]
+        elif isinstance(data.get(source), dict):
+            report = data[source]
+        else:
+            # Legacy summaries conflate provider failures with negative results. Only
+            # a positive result establishes availability without explicit telemetry.
+            if transport_ok and data.get("integration_complete") is True:
+                key = "member" if source == "ebas" else "startgg"
+                if source == "ebas" and not payload.get("personnummer"):
+                    integrations[source] = "skipped"
+                elif data.get(key) is True:
+                    integrations[source] = "ok"
+            continue
+        state = report.get("state") if isinstance(report, dict) else report
+        if isinstance(state, str):
+            integrations[source] = states.get(state, "unavailable")
+    return integrations, "unavailable" in integrations.values()
+
+
 @app.post("/api/checkin/orchestrate", tags=["Checkin"])
 async def orchestrate_checkin(request: Request):
     """
@@ -1500,11 +1543,18 @@ async def orchestrate_checkin(request: Request):
     })
 
     # 7. Return response compatible with checkin.html
+    integrations, degraded = _orchestrate_integrations(
+        locals().get("n8n_resp"), n8n_response_data, n8n_payload
+    )
+    membership_unknown = integrations["ebas"] != "ok"
+    response_missing = [
+        item for item in missing if not (membership_unknown and item == "Membership")
+    ]
     return {
         "ready": ready,
         "slug": slug,
-        "missing": missing,
-        "member": member_ok,
+        "missing": response_missing,
+        "member": member_ok if member_ok or not membership_unknown else None,
         "payment_valid": payment_ok,
         "startgg": startgg_ok,
         "status": final_status,
@@ -1512,6 +1562,8 @@ async def orchestrate_checkin(request: Request):
         "tag": tag,
         "checkin_id": checkin_id,
         "status_token": __import__("status_api").capability_token(checkin_id),
+        "integrations": integrations,
+        "degraded": degraded,
     }
 
 
