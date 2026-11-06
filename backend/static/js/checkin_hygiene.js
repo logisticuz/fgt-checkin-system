@@ -1,7 +1,8 @@
 /**
  * Kiosk hygiene for the check-in page (T-025). Same pattern as the membership v2 step:
- *   - Personal data that older flows left in localStorage is removed on load, so the next
- *     person on a shared kiosk never inherits it.
+ *   - Personal data left in localStorage (by older flows, or by register.html after this page
+ *     loaded) is purged on load, on a back/forward-cache restore, on every idle reset and
+ *     before each redirect, so the next person on a shared kiosk never inherits it.
  *   - A page restored from the back/forward cache (someone pressing Back) is reset, because
  *     the browser would otherwise show the previous person's filled-in form.
  *   - In kiosk mode a half-filled form is cleared after 90 s without input, even while a
@@ -11,15 +12,25 @@
 (function () {
   "use strict";
 
-  // Keys written by earlier versions of checkin.html / register.html.
+  // Keys written by earlier versions of checkin.html and (still) by register.html.
   const STALE_KEYS = ["namn", "telefon", "tag", "eventSlug", "personnummer", "selectedGames"];
-  STALE_KEYS.forEach(function (key) {
-    try { localStorage.removeItem(key); } catch (e) { /* storage disabled */ }
-  });
+
+  function purgePersonalStorage() {
+    STALE_KEYS.forEach(function (key) {
+      try { localStorage.removeItem(key); } catch (e) { /* storage disabled */ }
+    });
+  }
+
+  purgePersonalStorage();
 
   function install(options) {
-    const reset = options.reset;
     const idleMs = options.idleMs || 90000;
+    // Every reset boundary (Back restore, idle, next person) also purges storage: other pages
+    // in the flow can write these keys after this page has loaded.
+    function reset() {
+      purgePersonalStorage();
+      options.reset();
+    }
 
     window.addEventListener("pageshow", function (event) {
       if (event.persisted) reset();
@@ -37,5 +48,9 @@
     bump();
   }
 
-  window.CheckinHygiene = { install: install, staleKeys: STALE_KEYS.slice() };
+  window.CheckinHygiene = {
+    install: install,
+    purgePersonalStorage: purgePersonalStorage,
+    staleKeys: STALE_KEYS.slice(),
+  };
 })();

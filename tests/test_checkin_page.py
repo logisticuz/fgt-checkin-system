@@ -46,6 +46,10 @@ def test_no_personal_data_is_written_to_local_storage(checkin_html):
     for key in ("namn", "telefon", "tag", "eventSlug", "personnummer", "selectedGames"):
         assert f'"{key}"' in hygiene
     assert checkin_html.index("checkin_hygiene.js") < checkin_html.index("CheckinHygiene.install")
+    # Purged at every boundary, not only on first load (T-025 review).
+    assert "function purgePersonalStorage()" in hygiene
+    assert hygiene.count("purgePersonalStorage();") >= 2  # on load + inside reset()
+    assert "CheckinHygiene.purgePersonalStorage();" in checkin_html  # before redirects
 
 
 def test_unused_webhook_token_is_gone(checkin_html):

@@ -606,6 +606,7 @@
 
     function leaveTo(url) {
       clearFields();  // so a Back/bfcache restore can't show this person's details
+      CheckinHygiene.purgePersonalStorage();
       window.location.href = url;
     }
 

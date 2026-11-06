@@ -301,3 +301,33 @@ def test_kiosk_mode_uses_larger_text(checkin):
     size = page.evaluate("parseFloat(getComputedStyle(document.querySelector('label')).fontSize)")
     assert size >= 16
     shot(page, "04-kiosk-form")
+
+
+SEED_LATE_KEYS = (
+    "localStorage.setItem('tag', 'late_tag'); localStorage.setItem('selectedGames', '[1]')"
+)
+
+
+def test_keys_written_after_load_are_purged_on_a_back_restore(checkin):
+    # register.html can write these after the check-in page has loaded (T-025 review P2).
+    page, _ = checkin([(200, NOT_READY)], path="/kiosk")
+    page.evaluate(SEED_LATE_KEYS)
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    assert page.evaluate("localStorage.getItem('tag')") is None
+    assert page.evaluate("localStorage.getItem('selectedGames')") is None
+
+
+def test_keys_written_after_load_are_purged_on_kiosk_idle(checkin):
+    page, _ = checkin([(200, NOT_READY)], path="/kiosk", clock=True)
+    page.evaluate(SEED_LATE_KEYS)
+    page.clock.run_for(91_000)
+    assert page.evaluate("localStorage.length") == 0
+
+
+def test_storage_is_purged_right_before_the_redirect(checkin):
+    page, calls = checkin([(200, NOT_READY)], path="/kiosk")
+    fill_basics(page)
+    page.evaluate(SEED_LATE_KEYS)
+    page.click(".btn-submit")
+    page.wait_for_selector("#next-page")
+    assert page.evaluate("localStorage.length") == 0
