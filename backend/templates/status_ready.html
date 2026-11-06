@@ -261,6 +261,9 @@
     </div>
     {% endif %}
 
+    <div id="status-check-notice" role="status" aria-live="polite" hidden
+         style="background: rgba(244, 67, 54, 0.15); border: 1px solid #f44336; color: #ff8a80; border-radius: 8px; padding: 0.9rem; margin: 1rem 0; font-size: 1rem;"></div>
+
     <div class="thank-you">
       Thanks <strong>{{ name }}</strong> for joining
       <span class="event-name">{{ event_name | default('the tournament') }}</span>!
@@ -282,12 +285,13 @@
     <div class="support-section">
       <h3>🎫 Support FGC Trollhättan</h3>
       <p>Become a member - it's free and helps us keep running events! You'll also get info about future tournaments and community updates.</p>
-      <a href="/register?name={{ name | urlencode }}&tag={{ tag | urlencode }}&event={{ event_slug | urlencode }}&membership_only=true" class="support-link">
+      <a href="/register?name={{ name | urlencode }}&tag={{ tag | urlencode }}&event={{ event_slug | urlencode }}&membership_only=true{% if checkin_id and status_token %}&checkin_id={{ checkin_id | urlencode }}&t={{ status_token | urlencode }}{% endif %}" class="support-link">
         Join as Member →
       </a>
+      {% if not (checkin_id and status_token) %}
       <script>
-        // The status route doesn't pass checkin_id to the template yet, so carry the opaque id
-        // from this page's URL into the membership link.
+        // Legacy links (no verified capability in the context): carry the opaque id from this
+        // page's URL into the membership link, as before.
         (function () {
           const checkinId = new URLSearchParams(window.location.search).get("checkin_id");
           const link = document.querySelector("a.support-link");
@@ -298,6 +302,7 @@
           );
         })();
       </script>
+      {% endif %}
     </div>
     {% endif %}
 
@@ -318,6 +323,36 @@
     audioEl.addEventListener("error", () => {
       console.warn("Could not play confirmation sound");
     });
+
+{% if checkin_id and status_token %}
+    // T-032: the server still picks this template by name. With a verified capability, confirm
+    // the result with the id lookup so a same-name player never trusts someone else's "Ready".
+    (async function confirmById() {
+      const notice = document.getElementById("status-check-notice");
+      const show = (text) => {
+        notice.textContent = text;
+        notice.hidden = false;
+        const thanks = document.querySelector(".thank-you");
+        if (thanks) thanks.hidden = true;
+      };
+      try {
+        const res = await fetch(
+          `/api/checkin/${encodeURIComponent({{ checkin_id | tojson }})}/status?t=${encodeURIComponent({{ status_token | tojson }})}`,
+          { method: "GET", cache: "no-store" }
+        );
+        if (res.status === 403) {
+          show("Your status link expired – ask a TO or check in again");
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.found !== true) show("We couldn't find your check-in – ask a TO");
+        else if (data.ready !== true) show("Your check-in is not complete yet – ask a TO.");
+      } catch (err) {
+        console.warn("Status confirmation failed:", err);
+      }
+    })();
+{% endif %}
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
