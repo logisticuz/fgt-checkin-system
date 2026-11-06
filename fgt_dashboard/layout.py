@@ -311,6 +311,8 @@ def create_layout():
             {"name": str(col).replace("_", " ").title(), "id": str(col)} for col in df.columns
         ]
         data = df.to_dict("records")
+        for row in data:
+            row["id"] = row.get("record_id")
 
     # Format event name for display - use event_display_name if available (has proper åäö)
     event_display_name = settings.get("event_display_name", "")
@@ -1084,6 +1086,8 @@ def create_layout():
                                                             },
                                                             "color": COLORS["accent_green"],
                                                             "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
                                                         },
                                                         {
                                                             "if": {
@@ -1121,6 +1125,8 @@ def create_layout():
                                                             },
                                                             "color": COLORS["accent_red"],
                                                             "fontWeight": "600",
+                                                            "cursor": "pointer",
+                                                            "textDecoration": "underline",
                                                         },
                                                         {
                                                             "if": {
@@ -1532,6 +1538,7 @@ def create_layout():
                                     html.Div(id="export-feedback", style={"marginTop": "0.5rem"}),
                                     # Download component for CSV export
                                     dcc.Download(id="download-guests-csv"),
+                                    dcc.Store(id="pending-delete-row-ids", data=[]),
                                     # Confirmation dialog for delete
                                     dcc.ConfirmDialog(
                                         id="confirm-delete-dialog",
