@@ -121,11 +121,6 @@ def test_posting_same_checkin_twice_keeps_one_row(app_client, pg_db):
 
 
 @pytest.mark.db
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Known bug: member-status does not recompute status (T-004)",
-)
 def test_member_status_recomputes_stored_status(app_client, pg_db):
     row = pg_db.seed_checkin(startgg=True)
     response = app_client.post(

@@ -1380,7 +1380,12 @@ async def checkin_member_status_endpoint(checkin_id: str, request: Request):
     if not result:
         raise HTTPException(status_code=500, detail="Storage update failed")
 
-    return {"success": True, "checkin_id": checkin_id, "member": member}
+    return {
+        "success": True,
+        "checkin_id": checkin_id,
+        "member": member,
+        "status": result["fields"]["status"],
+    }
 
 
 # === Orchestration endpoints (n8n migration) ===

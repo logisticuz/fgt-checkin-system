@@ -638,44 +638,54 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
     return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
+def _update_checkin_with_status(conn, record_id: str, fields: Dict[str, Any]):
+    """Lock the current row and persist fields plus derived status in one transaction."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM active_event_data WHERE record_id = %s FOR UPDATE", (record_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        current = _row_to_dict([desc[0] for desc in cur.description], row)
+
+        cur.execute(
+            "SELECT require_membership, require_payment, require_startgg "
+            "FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1"
+        )
+        settings_row = cur.fetchone()
+        settings = (
+            _row_to_dict([desc[0] for desc in cur.description], settings_row)
+            if settings_row
+            else {}
+        )
+        update_fields = {
+            "checkin_uuid" if key == "UUID" else key: value
+            for key, value in (fields or {}).items()
+            if key != "status"
+        }
+        update_fields["status"] = compute_checkin_status({**current, **update_fields}, settings)[
+            "status"
+        ]
+        set_sql = ", ".join(f"{key} = %s" for key in update_fields)
+        cur.execute(
+            f"UPDATE active_event_data SET {set_sql} WHERE record_id = %s RETURNING *",
+            [*update_fields.values(), record_id],
+        )
+        row = cur.fetchone()
+        row_dict = _row_to_dict([desc[0] for desc in cur.description], row)
+
+    result_fields = _checkin_fields_from_row(row_dict)
+    result_fields["player_uuid"] = row_dict.get("player_uuid")
+    return {"record_id": row_dict["record_id"], "fields": result_fields}
+
+
 def update_checkin(
     record_id: str, fields: Dict[str, Any], typecast: bool = False
 ) -> Optional[Dict[str, Any]]:
-    """Update fields on a checkin record."""
+    """Update a checkin and derive its status from the locked stored row."""
     if not record_id:
         return None
-
-    update_fields = {}
-    for key, value in (fields or {}).items():
-        if key == "UUID":
-            update_fields["checkin_uuid"] = value
-        else:
-            update_fields[key] = value
-
-    if not update_fields:
-        return None
-
-    set_sql = ", ".join([f"{k} = %s" for k in update_fields.keys()])
-    params = list(update_fields.values())
-    params.append(record_id)
-
-    columns = None
-    row = None
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE active_event_data SET {set_sql} WHERE record_id = %s RETURNING *",
-                params,
-            )
-            row = cur.fetchone()
-            if row:
-                columns = [desc[0] for desc in cur.description]
-
-    if not row or not columns:
-        return None
-
-    row_dict = _row_to_dict(columns, row)
-    return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
+    with _get_pool().connection() as conn, conn.transaction():
+        return _update_checkin_with_status(conn, record_id, fields)
 
 
 def delete_checkin(record_id: str) -> bool:
@@ -709,6 +719,27 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         existing = get_checkin_by_tag(tag, event_slug)
     elif name:
         existing = get_checkin_by_name(name, event_slug)
+
+    if existing and existing.get("record_id"):
+        checkin_id = existing["record_id"]
+        safe_fields = {}
+        for key in ("name", "email", "telephone"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                safe_fields[key] = value.strip()
+        normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
+        if normalized_source is not None:
+            safe_fields["acquisition_source"] = normalized_source
+        updated = update_checkin(checkin_id, safe_fields)
+        if not updated:
+            raise RuntimeError("Failed to update existing checkin")
+        return {
+            "checkin_id": checkin_id,
+            "record_id": checkin_id,
+            "event_slug": event_slug,
+            "created": False,
+            "player_uuid": updated["fields"].get("player_uuid"),
+        }
 
     games = payload.get("tournament_games_registered")
     if isinstance(games, str):
@@ -749,21 +780,19 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if normalized_source is not None:
         fields["acquisition_source"] = normalized_source
 
-    if existing and existing.get("record_id"):
-        checkin_id = existing["record_id"]
-        updated = update_checkin(checkin_id, fields)
-        if not updated:
-            raise RuntimeError("Failed to update existing checkin")
-        return {
-            "checkin_id": checkin_id,
-            "record_id": checkin_id,
-            "event_slug": event_slug,
-            "created": False,
-            "player_uuid": matched_player_uuid,
-        }
-
-    with _get_pool().connection() as conn:
+    with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT require_membership, require_payment, require_startgg "
+                "FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1"
+            )
+            settings_row = cur.fetchone()
+            settings = (
+                _row_to_dict([desc[0] for desc in cur.description], settings_row)
+                if settings_row
+                else {}
+            )
+            fields["status"] = compute_checkin_status(fields, settings)["status"]
             cur.execute(
                 """
                 INSERT INTO active_event_data (
@@ -848,7 +877,8 @@ def apply_integration_result(
         if data.get("email"):
             update_fields["email"] = data["email"]
     elif src == "ebas":
-        update_fields["member"] = bool(ok and data.get("member", True))
+        if ok and isinstance(data.get("member"), bool):
+            update_fields["member"] = data["member"]
     elif src in ("swish", "stripe"):
         if data.get("payment_amount") is not None:
             update_fields["payment_amount"] = data.get("payment_amount")
@@ -866,19 +896,18 @@ def apply_integration_result(
     fields = (updated or {}).get("fields", {})
     event_slug = fields.get("event_slug") if isinstance(fields, dict) else None
 
+    audit_source = src if src in {"startgg", "ebas", "swish", "stripe"} else "unknown"
     log_action(
-        {"user_id": "integration", "user_name": f"n8n:{src}", "user_email": ""},
+        {"user_id": "integration", "user_name": f"n8n:{audit_source}", "user_email": ""},
         "integration_result",
         "active_event_data",
         target_event=event_slug,
         target_record=checkin_id,
         details=json.dumps(
             {
-                "source": src,
-                "ok": ok,
-                "data": data,
-                "error": error,
-                "fetched_at": fetched_at,
+                "source": audit_source,
+                "ok": bool(ok),
+                "updated_fields": sorted(update_fields),
             }
         ),
     )
