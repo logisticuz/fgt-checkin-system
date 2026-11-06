@@ -866,6 +866,7 @@ def apply_integration_result(
     data: Optional[Dict[str, Any]] = None,
     error: Optional[Dict[str, Any]] = None,
     fetched_at: Optional[str] = None,
+    state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply integration result to a checkin record and write audit log."""
     if not checkin_id:
@@ -878,18 +879,21 @@ def apply_integration_result(
 
     src = source.lower().strip()
     if src == "startgg":
-        registered = bool(ok and data.get("registered", True))
-        update_fields["startgg"] = registered
-        # Keep guest flag aligned with Start.gg match result:
-        # - matched on Start.gg => not guest
-        # - not matched (manual add/guest flow) => guest
-        update_fields["is_guest"] = not registered
-        if isinstance(data.get("events"), list):
-            update_fields["tournament_games_registered"] = data.get("events")
-        if data.get("startgg_event_id"):
-            update_fields["startgg_event_id"] = str(data.get("startgg_event_id"))
-        if data.get("email"):
-            update_fields["email"] = data["email"]
+        # Failed/skipped checks must preserve registration, games and contact data.
+        if (
+            ok
+            and isinstance(data.get("registered"), bool)
+            and state not in ("unavailable", "skipped")
+        ):
+            registered = data["registered"]
+            update_fields["startgg"] = registered
+            update_fields["is_guest"] = not registered
+            if isinstance(data.get("events"), list):
+                update_fields["tournament_games_registered"] = data.get("events")
+            if data.get("startgg_event_id"):
+                update_fields["startgg_event_id"] = str(data.get("startgg_event_id"))
+            if data.get("email"):
+                update_fields["email"] = data["email"]
     elif src == "ebas":
         if ok and isinstance(data.get("member"), bool):
             update_fields["member"] = data["member"]

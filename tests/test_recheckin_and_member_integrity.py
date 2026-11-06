@@ -285,3 +285,109 @@ def test_integration_audit_never_copies_sensitive_payloads(pg_db, caplog, source
     assert not re.search(r"\d{10,12}", details)
     assert "personnummer" not in caplog.text.lower()
     assert synthetic_identifier not in caplog.text
+
+
+@pytest.mark.parametrize("initial", [True, False])
+@pytest.mark.parametrize(
+    "ok, registered, state",
+    [
+        (False, False, "unavailable"),
+        (False, True, "unavailable"),
+        (True, None, None),
+        (True, "false", None),
+        (True, 0, None),
+        (True, 1, None),
+        (True, False, "unavailable"),
+        (True, True, "skipped"),
+    ],
+)
+def test_unverified_startgg_preserves_all_stored_fields_and_still_audits(
+    pg_db, initial, ok, registered, state
+):
+    pg_db.seed_settings()
+    row = pg_db.seed_checkin(
+        member=True,
+        startgg=initial,
+        is_guest=not initial,
+        tournament_games_registered=["Original synthetic game"],
+        startgg_event_id="original-event",
+        email="original@example.invalid",
+        status="Ready" if initial else "Pending",
+    )
+    data = {
+        "events": [],
+        "startgg_event_id": "replacement-event",
+        "email": "replacement@example.invalid",
+    }
+    if registered is not None:
+        data["registered"] = registered
+    result = postgres.apply_integration_result(
+        row["record_id"], "startgg", ok, data, state=state
+    )
+    stored = pg_db.checkins()[0]
+    for field in (
+        "startgg",
+        "is_guest",
+        "tournament_games_registered",
+        "startgg_event_id",
+        "email",
+        "status",
+    ):
+        assert stored[field] == row[field], field
+    assert result["updated"] is False
+    with pg_db.pool.connection() as connection:
+        audit = json.loads(
+            connection.execute("SELECT details FROM audit_log").fetchone()[0]
+        )
+    assert audit["source"] == "startgg" and audit["updated_fields"] == []
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_verified_startgg_boolean_updates_registration_and_derived_status(
+    pg_db, registered
+):
+    pg_db.seed_settings()
+    row = pg_db.seed_checkin(member=True, startgg=not registered)
+    result = postgres.apply_integration_result(
+        row["record_id"],
+        "startgg",
+        True,
+        {
+            "registered": registered,
+            "events": ["Updated synthetic game"],
+            "startgg_event_id": "updated-event",
+            "email": "updated@example.invalid",
+        },
+        state="verified_true" if registered else "verified_false",
+    )
+    stored = pg_db.checkins()[0]
+    assert result["updated"] is True
+    assert stored["startgg"] is registered and stored["is_guest"] is not registered
+    assert stored["status"] == ("Ready" if registered else "Pending")
+    assert stored["tournament_games_registered"] == ["Updated synthetic game"]
+    assert (
+        stored["startgg_event_id"] == "updated-event"
+        and stored["email"] == "updated@example.invalid"
+    )
+
+
+@pytest.mark.parametrize("state", ["unavailable", "skipped"])
+def test_integration_endpoint_forwards_degraded_state_and_preserves_startgg(
+    app_client, pg_db, state
+):
+    pg_db.seed_settings()
+    row = pg_db.seed_checkin(member=True, startgg=True, is_guest=False, status="Ready")
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": "startgg",
+            "ok": True,
+            "state": state,
+            "data": {"registered": False, "events": []},
+        },
+    )
+    assert response.status_code == 200 and response.json()["updated"] is False
+    stored = pg_db.checkins()[0]
+    assert stored["startgg"] is True and stored["is_guest"] is False
+    assert stored["status"] == "Ready"

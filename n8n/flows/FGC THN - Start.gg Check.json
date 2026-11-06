@@ -26,7 +26,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $json.body || $json;\nconst tag = (body.tag || '').trim();\nconst slug = body.tournament_slug || body.slug || '';\n\nif (!tag || !slug) {\n  return [{ json: { isRegistered: false, error: true, message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\nreturn [{ json: { tag, slug } }];"
+        "jsCode": "const body = $json.body || $json;\nconst tag = String(body.tag || '').trim();\nconst slug = String(body.tournament_slug || body.slug || '').trim();\nconst attempt_id = body.attempt_id || String($execution.id);\n\nif (!tag || !slug) {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id,\n    message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\n// User input is serialized as GraphQL variables, never interpolated into JSON/query text.\nconst query = 'query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }';\nconst requestBody = JSON.stringify({ query, variables: { slug, tag } });\nreturn [{ json: { tag, slug, attempt_id, requestBody } }];"
       },
       "name": "Parse Input",
       "type": "n8n-nodes-base.code",
@@ -52,8 +52,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
-        "options": {}
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {
+          "timeout": 8000
+        }
       },
       "name": "Query Start.gg",
       "type": "n8n-nodes-base.httpRequest",
@@ -62,11 +64,12 @@
         528,
         208
       ],
-      "id": "query-startgg"
+      "id": "query-startgg",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "const data = $json.data;\nconst tournament = data?.tournament;\n\nif (!tournament) {\n  return [{ json: { isRegistered: false, error: true, message: 'Turnering hittades inte' } }];\n}\n\nconst participants = tournament.participants?.nodes || [];\nif (participants.length === 0) {\n  return [{ json: { isRegistered: false, tournament: tournament.name, message: 'Ej registrerad' } }];\n}\n\nconst player = participants[0];\nconst events = (player.events || []).map(e => e.name);\n\nreturn [{ json: {\n  isRegistered: true,\n  tournament: tournament.name,\n  tag: player.gamerTag,\n  name: player.user?.name || null,\n  events: events,\n  eventCount: events.length\n} }];"
+        "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst response = $json;\nconst tournament = response.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (response.error || (Array.isArray(response.errors) && response.errors.length > 0) ||\n    !tournament || !Array.isArray(participants)) {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'Start.gg kunde inte verifieras' } }];\n}\n\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    tournament: tournament.name, events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst events = (Array.isArray(player.events) ? player.events : [])\n  .map(event => event?.name).filter(name => typeof name === 'string');\nreturn [{ json: { ok: true, state: 'verified_true', isRegistered: true,\n  tournament: tournament.name, tag: player.gamerTag, name: player.user?.name || null,\n  events, eventCount: events.length, attempt_id } }];"
       },
       "name": "Parse Response",
       "type": "n8n-nodes-base.code",
@@ -79,7 +82,7 @@
     },
     {
       "parameters": {
-        "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Case-insensitive:** Tag matching is handled by Start.gg API.",
+        "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Matching:** Require exact trimmed, case-insensitive gamerTag equality locally.\n\n**Degraded:** Transport/GraphQL/malformed-response errors return ok:false, state:unavailable without a registration boolean. Missing input returns state:skipped.",
         "height": 576,
         "width": 500,
         "color": 4
@@ -108,6 +111,38 @@
       "typeVersion": 1,
       "id": "note-startgg-query",
       "name": "Query"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "skip-startgg-check",
+              "leftValue": "={{ $json.state === 'skipped' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-startgg",
+      "name": "IF Skip Start.gg",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        416,
+        208
+      ]
     }
   ],
   "connections": {
@@ -126,7 +161,7 @@
       "main": [
         [
           {
-            "node": "Query Start.gg",
+            "node": "IF Skip Start.gg",
             "type": "main",
             "index": 0
           }
@@ -138,6 +173,24 @@
         [
           {
             "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Skip Start.gg": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Query Start.gg",
             "type": "main",
             "index": 0
           }
@@ -246,7 +299,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const body = $json.body || $json;\nconst tag = (body.tag || '').trim();\nconst slug = body.tournament_slug || body.slug || '';\n\nif (!tag || !slug) {\n  return [{ json: { isRegistered: false, error: true, message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\nreturn [{ json: { tag, slug } }];"
+          "jsCode": "const body = $json.body || $json;\nconst tag = String(body.tag || '').trim();\nconst slug = String(body.tournament_slug || body.slug || '').trim();\nconst attempt_id = body.attempt_id || String($execution.id);\n\nif (!tag || !slug) {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id,\n    message: !tag ? 'Tag saknas' : 'Slug saknas' } }];\n}\n\n// User input is serialized as GraphQL variables, never interpolated into JSON/query text.\nconst query = 'query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }';\nconst requestBody = JSON.stringify({ query, variables: { slug, tag } });\nreturn [{ json: { tag, slug, attempt_id, requestBody } }];"
         },
         "name": "Parse Input",
         "type": "n8n-nodes-base.code",
@@ -272,8 +325,10 @@
           },
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={\n  \"query\": \"query Q($slug: String!, $tag: String!) { tournament(slug: $slug) { id name participants(query: { filter: { gamerTag: $tag } }) { nodes { id gamerTag email user { name } events { id name } } } } }\",\n  \"variables\": { \"slug\": \"{{ $json.slug }}\", \"tag\": \"{{ $json.tag }}\" }\n}",
-          "options": {}
+          "jsonBody": "={{ $json.requestBody }}",
+          "options": {
+            "timeout": 8000
+          }
         },
         "name": "Query Start.gg",
         "type": "n8n-nodes-base.httpRequest",
@@ -282,11 +337,12 @@
           528,
           208
         ],
-        "id": "query-startgg"
+        "id": "query-startgg",
+        "onError": "continueRegularOutput"
       },
       {
         "parameters": {
-          "jsCode": "const data = $json.data;\nconst tournament = data?.tournament;\n\nif (!tournament) {\n  return [{ json: { isRegistered: false, error: true, message: 'Turnering hittades inte' } }];\n}\n\nconst participants = tournament.participants?.nodes || [];\nif (participants.length === 0) {\n  return [{ json: { isRegistered: false, tournament: tournament.name, message: 'Ej registrerad' } }];\n}\n\nconst player = participants[0];\nconst events = (player.events || []).map(e => e.name);\n\nreturn [{ json: {\n  isRegistered: true,\n  tournament: tournament.name,\n  tag: player.gamerTag,\n  name: player.user?.name || null,\n  events: events,\n  eventCount: events.length\n} }];"
+          "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst response = $json;\nconst tournament = response.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (response.error || (Array.isArray(response.errors) && response.errors.length > 0) ||\n    !tournament || !Array.isArray(participants)) {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'Start.gg kunde inte verifieras' } }];\n}\n\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    tournament: tournament.name, events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst events = (Array.isArray(player.events) ? player.events : [])\n  .map(event => event?.name).filter(name => typeof name === 'string');\nreturn [{ json: { ok: true, state: 'verified_true', isRegistered: true,\n  tournament: tournament.name, tag: player.gamerTag, name: player.user?.name || null,\n  events, eventCount: events.length, attempt_id } }];"
         },
         "name": "Parse Response",
         "type": "n8n-nodes-base.code",
@@ -299,7 +355,7 @@
       },
       {
         "parameters": {
-          "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Case-insensitive:** Tag matching is handled by Start.gg API.",
+          "content": "## Start.gg Check Sub-workflow\n\n**Purpose:** Verify if a player is registered in the tournament on Start.gg.\n\n**Called by:** Check-in Orchestrator (HTTP Request node)\n\n**Input:**\n```json\n{\n  \"tag\": \"PlayerTag\",\n  \"slug\": \"tournament-slug\"\n}\n```\n\n**Output:**\n```json\n{\n  \"isRegistered\": true/false,\n  \"tournament\": \"Tournament Name\",\n  \"events\": [\"SF6\", \"T8\"],\n  \"eventCount\": 2\n}\n```\n\n**API:** Uses Start.gg GraphQL API with gamerTag filter.\n\n**Matching:** Require exact trimmed, case-insensitive gamerTag equality locally.\n\n**Degraded:** Transport/GraphQL/malformed-response errors return ok:false, state:unavailable without a registration boolean. Missing input returns state:skipped.",
           "height": 576,
           "width": 500,
           "color": 4
@@ -328,6 +384,38 @@
         "typeVersion": 1,
         "id": "note-startgg-query",
         "name": "Query"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "skip-startgg-check",
+                "leftValue": "={{ $json.state === 'skipped' }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "if-skip-startgg",
+        "name": "IF Skip Start.gg",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          416,
+          208
+        ]
       }
     ],
     "connections": {
@@ -346,7 +434,7 @@
         "main": [
           [
             {
-              "node": "Query Start.gg",
+              "node": "IF Skip Start.gg",
               "type": "main",
               "index": 0
             }
@@ -358,6 +446,24 @@
           [
             {
               "node": "Parse Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IF Skip Start.gg": {
+        "main": [
+          [
+            {
+              "node": "Parse Response",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Query Start.gg",
               "type": "main",
               "index": 0
             }

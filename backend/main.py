@@ -1286,6 +1286,7 @@ async def integration_result_endpoint(request: Request):
             data=data,
             error=error,
             fetched_at=fetched_at,
+            state=body.get("state"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
