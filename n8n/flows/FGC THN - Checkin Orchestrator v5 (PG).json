@@ -124,6 +124,15 @@
               "neverError": true
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "={{ $env.INTERNAL_API_TOKEN }}"
+            }
+          ]
         }
       },
       "id": "report-startgg-v5",
@@ -149,6 +158,15 @@
               "neverError": true
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "={{ $env.INTERNAL_API_TOKEN }}"
+            }
+          ]
         }
       },
       "id": "report-ebas-v5",
@@ -301,7 +319,11 @@
     "executionOrder": "v1",
     "timezone": "Europe/Stockholm",
     "callerPolicy": "workflowsFromSameOwner",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
   },
   "staticData": null,
   "meta": null,
@@ -504,6 +526,15 @@
                 "neverError": true
               }
             }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Internal-Token",
+                "value": "={{ $env.INTERNAL_API_TOKEN }}"
+              }
+            ]
           }
         },
         "id": "report-startgg-v5",
@@ -529,6 +560,15 @@
                 "neverError": true
               }
             }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Internal-Token",
+                "value": "={{ $env.INTERNAL_API_TOKEN }}"
+              }
+            ]
           }
         },
         "id": "report-ebas-v5",
