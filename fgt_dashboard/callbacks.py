@@ -4646,8 +4646,7 @@ def register_callbacks(app):
     )
     def toggle_field(active_cell, table_data, selected_slug, auth_state):
         """
-        When TO clicks on a cell in toggleable columns (payment_valid, startgg, is_guest), toggle it.
-        If all required fields are OK, set status to Ready.
+        Toggle payment, Start.gg, or membership and display the status returned by storage.
         """
         auth_state = current_user() or {}
         if not active_cell:
@@ -4686,8 +4685,24 @@ def register_callbacks(app):
         def is_checked(val):
             return val == "✓" or val is True or str(val).lower() == "true"
 
-        # Toggle the clicked field
-        current_val = row.get(col_id)
+        # Payment calculations must use stored games, even when the games column is hidden.
+        read_row = getattr(storage_api, "get_checkin_by_record_id", None)
+        stored_fields = {}
+        if col_id == "payment_valid" and callable(read_row):
+            stored = read_row(record_id)
+            stored_fields = stored.get("fields", {}) if isinstance(stored, dict) else {}
+            if not stored_fields:
+                return (
+                    html.Span(
+                        "⚠️ Player is no longer available. Refresh and select again.",
+                        style={"color": "#f59e0b"},
+                    ),
+                    no_update,
+                    None,
+                )
+
+        # Toggle the clicked field; status is exclusively derived by storage.
+        current_val = stored_fields.get(col_id, row.get(col_id))
         new_val = not is_checked(current_val)
 
         # Build update dict
@@ -4698,21 +4713,15 @@ def register_callbacks(app):
         if col_id == "startgg" and new_val:
             update_data["is_guest"] = True
 
-        # Fetch configurable requirements from settings
-        # Use "is True" so that missing/None = requirement OFF
-        settings = get_active_settings() or {}
-        require_payment = settings.get("require_payment") is True
-        require_membership = settings.get("require_membership") is True
-        require_startgg = settings.get("require_startgg") is True
-
         # Payment toggle should also set payment_amount/payment_expected so revenue is tracked.
-        if col_id == "payment_valid":
+        if col_id == "payment_valid" and stored_fields:
+            settings = get_active_settings() or {}
             try:
                 per_game = int(settings.get("swish_expected_per_game") or 0)
             except Exception:
                 per_game = 0
 
-            raw_games = row.get("tournament_games_registered")
+            raw_games = stored_fields.get("tournament_games_registered")
             if isinstance(raw_games, list):
                 game_count = len([g for g in raw_games if str(g or "").strip()])
             elif isinstance(raw_games, str):
@@ -4730,45 +4739,24 @@ def register_callbacks(app):
                 update_data["payment_expected"] = expected_amount
                 update_data["payment_amount"] = 0
 
-        # Determine current field values (with the toggled value updated)
-        if col_id == "payment_valid":
-            payment_val = new_val
-            member_val = is_checked(row.get("member", ""))
-            startgg_val = is_checked(row.get("startgg", ""))
-        elif col_id == "startgg":
-            payment_val = is_checked(row.get("payment_valid", ""))
-            member_val = is_checked(row.get("member", ""))
-            startgg_val = new_val
-        elif col_id == "member":
-            payment_val = is_checked(row.get("payment_valid", ""))
-            member_val = new_val
-            startgg_val = is_checked(row.get("startgg", ""))
-        else:  # is_guest - doesn't affect Ready status
-            payment_val = is_checked(row.get("payment_valid", ""))
-            member_val = is_checked(row.get("member", ""))
-            startgg_val = is_checked(row.get("startgg", ""))
-
-        # Check each requirement (skip if not required)
-        payment_ok = (not require_payment) or payment_val
-        member_ok = (not require_membership) or member_val
-        startgg_ok = (not require_startgg) or startgg_val
-
-        new_status = "Ready" if (payment_ok and member_ok and startgg_ok) else "Pending"
-        update_data["status"] = new_status
-
         # Update database
         result = update_checkin(record_id, update_data)
 
         if result:
-            # Update local table data for immediate feedback
+            fields = result.get("fields", {}) if isinstance(result, dict) else {}
+            if not fields and callable(read_row):
+                fresh = read_row(record_id)
+                fields = fresh.get("fields", {}) if isinstance(fresh, dict) else {}
+            # Boolean-only adapters keep the local click feedback, without inventing a status.
             row[col_id] = "✓" if new_val else "✗"
-            if "is_guest" in update_data:
-                row["is_guest"] = "✓" if bool(update_data["is_guest"]) else "✗"
-            if "payment_amount" in update_data:
-                row["payment_amount"] = update_data["payment_amount"]
-            if "payment_expected" in update_data:
-                row["payment_expected"] = update_data["payment_expected"]
-            row["status"] = new_status
+            for flag in ("payment_valid", "member", "startgg", "is_guest"):
+                if flag in fields:
+                    row[flag] = "✓" if is_checked(fields[flag]) else "✗"
+            for field in ("status", "payment_amount", "payment_expected"):
+                if field in fields:
+                    row[field] = fields[field]
+            new_val = is_checked(fields.get(col_id, new_val))
+            new_status = fields.get("status", row.get("status", "Pending"))
 
             # Broadcast SSE to notify status pages
             try:
@@ -4957,6 +4945,26 @@ def register_callbacks(app):
                 messages.append(f"{player_name}: failed to save {label_by_column[edited_column]}")
                 table_needs_refresh = True
                 continue
+
+            fields = result.get("fields", {}) if isinstance(result, dict) else {}
+            if not fields:
+                read_row = getattr(storage_api, "get_checkin_by_record_id", None)
+                if callable(read_row):
+                    fresh = read_row(record_id)
+                    fields = fresh.get("fields", {}) if isinstance(fresh, dict) else {}
+            if fields:
+                for field in (
+                    "status", "payment_amount", "payment_expected", edited_column
+                ):
+                    if field in fields:
+                        row[field] = fields[field]
+                for flag in ("payment_valid", "member", "startgg", "is_guest"):
+                    if flag in fields:
+                        value = fields[flag]
+                        row[flag] = (
+                            "✓" if value is True or str(value).lower() == "true" else "✗"
+                        )
+                table_needs_refresh = True
 
             updated += 1
 
@@ -5640,6 +5648,7 @@ def register_callbacks(app):
                 "collect_acquisition_source": bool(collect_acquisition_source),
             }
 
+            active_slug = get_active_slug() or ""
             try:
                 previous = current_store or {}
                 storage_api.log_action(
@@ -5650,7 +5659,7 @@ def register_callbacks(app):
                     },
                     "admin_update_requirements",
                     "settings",
-                    target_event=get_active_slug() or "",
+                    target_event=active_slug,
                     details=json.dumps(
                         {
                             "require_payment": {
@@ -5680,6 +5689,37 @@ def register_callbacks(app):
                 )
             except Exception as e:
                 logger.warning(f"Failed to write audit log for requirements save: {e}")
+
+            updated_rows = 0
+            try:
+                if active_slug:
+                    recompute = getattr(storage_api, "recompute_active_statuses", None)
+                    if not callable(recompute):
+                        raise RuntimeError("Active status recomputation is unavailable")
+                    updated_rows = recompute(active_slug)
+            except Exception:
+                logger.exception(
+                    "Requirements saved but active statuses could not be recomputed"
+                )
+                return (
+                    html.Span(
+                        "⚠️ Settings saved, but statuses could not be refreshed. Please retry.",
+                        style={"color": "#f59e0b"},
+                    ),
+                    new_store,
+                )
+            try:
+                requests.post(
+                    f"{BACKEND_INTERNAL_URL}/api/notify/update",
+                    json={
+                        "type": "requirements_updated",
+                        "event_slug": active_slug,
+                        "updated_rows": updated_rows,
+                    },
+                    timeout=2,
+                )
+            except Exception as error:
+                logger.warning("Failed to broadcast requirements update: %s", error)
 
             return html.Span(f"✅ Saved! {summary}", style={"color": "#10b981"}), new_store
         else:

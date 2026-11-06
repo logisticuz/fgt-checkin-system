@@ -8,6 +8,9 @@
     const maxReconnectAttempts = 10;
     const reconnectDelay = 3000;
     let fallbackInterval = null;
+    let refreshTimer = null;
+    let refreshPending = false;
+    const refreshDebounceMs = 1000;
 
     function updateIndicator(status) {
         const dot = document.getElementById('connection-dot');
@@ -33,7 +36,26 @@
         console.log('SSE status:', status);
     }
 
-    function triggerRefresh() {
+    function isTableEditing() {
+        const table = document.getElementById('checkins-table');
+        if (!table) return false;
+        const active = document.activeElement;
+        const textInput = 'textarea, select, input:not([type="checkbox"]):not([type="radio"]), [contenteditable="true"]';
+        return Boolean(
+            (active && table.contains(active) && active.matches(textInput)) ||
+            table.querySelector('.cell--editing, .dash-cell--editing')
+        );
+    }
+
+    function flushRefresh() {
+        refreshTimer = null;
+        if (!refreshPending) return;
+        if (isTableEditing()) {
+            // Retain the queued refresh until editing finishes.
+            refreshTimer = setTimeout(flushRefresh, refreshDebounceMs);
+            return;
+        }
+        refreshPending = false;
         // Find and click the refresh button to trigger Dash callback
         const btn = document.getElementById('btn-refresh');
         if (btn) {
@@ -42,6 +64,12 @@
         } else {
             console.log('Refresh button not found');
         }
+    }
+
+    function triggerRefresh() {
+        refreshPending = true;
+        if (refreshTimer !== null) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(flushRefresh, refreshDebounceMs);
     }
 
     function startFallbackPolling() {
