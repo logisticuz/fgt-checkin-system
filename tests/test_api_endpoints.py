@@ -56,7 +56,7 @@ def test_integration_result_updates_the_existing_row(app_client, pg_db):
 
 
 @pytest.mark.db
-def test_integration_callback_recomputes_stored_status(app_client, pg_db, request):
+def test_integration_callback_recomputes_stored_status(app_client, pg_db):
     row = pg_db.seed_checkin(status="Pending", startgg=True)
     response = app_client.post(
         "/api/integration/result",
@@ -70,13 +70,7 @@ def test_integration_callback_recomputes_stored_status(app_client, pg_db, reques
     assert response.status_code == 200
     stored = pg_db.checkins()[0]
     assert stored["member"] is True
-    # Mark only the final assertion; transport/flag-update regressions must fail normally.
-    request.node.add_marker(
-        pytest.mark.xfail(
-            strict=True,
-            reason="integration/result does not recompute status; fixed in T-004",
-        )
-    )
+    # Fixed by T-004: apply_integration_result recomputes status in the same transaction.
     assert stored["status"] == "Ready"
 
 
