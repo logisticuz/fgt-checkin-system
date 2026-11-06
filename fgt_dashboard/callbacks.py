@@ -1,6 +1,10 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State, ALL
 from dash import no_update, html, ctx, dcc
+try:
+    from auth_helpers import current_user
+except ImportError:
+    from fgt_dashboard.auth_helpers import current_user
 from shared.storage import (
     get_checkins,
     get_active_settings,
@@ -71,26 +75,10 @@ ACTION_META = {
 
 ACTION_GROUP_ORDER = ["Auth", "Settings", "Check-ins", "Archive", "Integrations", "Other"]
 
-_default_dev_identities = "viktor molina,logisticuz"
-_env_dev_identities = os.getenv("DEV_TOOLS_ALLOWED_IDENTITIES", _default_dev_identities)
-DEV_ALLOWED_IDENTITIES = {
-    item.strip().lower() for item in str(_env_dev_identities).split(",") if item.strip()
-}
-
-
-def _is_dev_tools_owner(auth_state: Any) -> bool:
-    if not isinstance(auth_state, dict):
-        return False
-
-    candidates = [
-        auth_state.get("user_name"),
-        auth_state.get("user_email"),
-        auth_state.get("user_id"),
-        auth_state.get("username"),
-        auth_state.get("tag"),
-    ]
-    normalized = {str(v).strip().lower() for v in candidates if str(v or "").strip()}
-    return any(v in DEV_ALLOWED_IDENTITIES for v in normalized)
+def _is_dev_tools_owner(auth_state=None) -> bool:
+    """Ignore the client store; only the current server session can grant dev access."""
+    user = current_user()
+    return bool(user and user.get("is_dev"))
 
 
 def format_action_label(action: str) -> str:
@@ -817,6 +805,7 @@ def register_callbacks(app):
         ],
     )
     def clear_current_event(submit_n_clicks, selected_slug, auth_state):
+        auth_state = current_user() or {}
         if not submit_n_clicks:
             return no_update, no_update
         if not selected_slug or selected_slug == "__ALL__":
@@ -831,7 +820,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_clear_active_event",
                     "settings",
@@ -858,6 +847,7 @@ def register_callbacks(app):
         Input("dev-tools-visible-toggle", "value"),
     )
     def toggle_dev_tools_visibility(auth_state, visibility_flags):
+        auth_state = current_user() or {}
         if not _is_dev_tools_owner(auth_state):
             return {"display": "none"}, {"display": "none"}, {"display": "none"}
 
@@ -895,6 +885,7 @@ def register_callbacks(app):
            - First time: default_game = ALL events
            - Later: keep TO's selections that still exist, drop removed, add new
         """
+        auth_state = current_user() or {}
         if not n_clicks and not mock_clicks:
             return no_update, no_update, no_update
 
@@ -956,7 +947,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_use_mock_event",
                     "settings",
@@ -1302,7 +1293,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "admin_fetch_event_data",
                 "settings",
@@ -4658,6 +4649,7 @@ def register_callbacks(app):
         When TO clicks on a cell in toggleable columns (payment_valid, startgg, is_guest), toggle it.
         If all required fields are OK, set status to Ready.
         """
+        auth_state = current_user() or {}
         if not active_cell:
             return no_update, no_update, no_update
 
@@ -4815,7 +4807,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_toggle_field",
                     "active_event_data",
@@ -4858,6 +4850,7 @@ def register_callbacks(app):
         _timestamp, table_data, previous_data, active_cell, selected_slug, auth_state
     ):
         """Persist inline name, tag and phone edits from the check-ins table."""
+        auth_state = current_user() or {}
         if not table_data or not previous_data:
             return no_update, no_update
 
@@ -4972,7 +4965,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     action_by_column[edited_column],
                     "active_event_data",
@@ -5022,6 +5015,7 @@ def register_callbacks(app):
     )
     def add_manual_checkin(n_clicks, input_name, input_tag, input_games, selected_slug, auth_state):
         """Manually add a missing Start.gg participant to active check-ins."""
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update, no_update, no_update, no_update
 
@@ -5103,7 +5097,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_manual_checkin",
                     "active_event_data",
@@ -5145,6 +5139,7 @@ def register_callbacks(app):
     )
     def recheck_startgg(n_clicks, selected_row_ids, table_data, selected_slug, auth_state):
         """Re-validate Start.gg registration and sync games for a selected player."""
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update
 
@@ -5214,7 +5209,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_recheck_startgg",
                     "active_event_data",
@@ -5269,6 +5264,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def bulk_recheck_startgg(n_clicks, selected_slug, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update
 
@@ -5304,7 +5300,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_bulk_recheck_startgg",
                     "active_event_data",
@@ -5418,6 +5414,7 @@ def register_callbacks(app):
         submit_n_clicks, captured_row_ids, table_data, selected_slug, auth_state
     ):
         """Delete the selected player(s) after confirmation."""
+        auth_state = current_user() or {}
         if not submit_n_clicks:
             return no_update, no_update, no_update
         if not captured_row_ids:
@@ -5451,7 +5448,7 @@ def register_callbacks(app):
                         {
                             "user_id": (auth_state or {}).get("user_id", ""),
                             "user_name": (auth_state or {}).get("user_name", "system"),
-                            "user_email": (auth_state or {}).get("user_email", ""),
+                            "user_email": (auth_state or {}).get("email", ""),
                         },
                         "admin_delete_checkin",
                         "active_event_data",
@@ -5590,6 +5587,7 @@ def register_callbacks(app):
         auth_state,
     ):
         """Save check-in requirement settings to storage backend."""
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update, no_update
 
@@ -5648,7 +5646,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_update_requirements",
                     "settings",
@@ -5825,6 +5823,7 @@ def register_callbacks(app):
     )
     def save_payment_settings(n_clicks, price_per_game, swish_number, auth_state):
         """Save payment settings (price per game, swish number) to storage backend."""
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update
 
@@ -5861,7 +5860,7 @@ def register_callbacks(app):
                     {
                         "user_id": (auth_state or {}).get("user_id", ""),
                         "user_name": (auth_state or {}).get("user_name", "system"),
-                        "user_email": (auth_state or {}).get("user_email", ""),
+                        "user_email": (auth_state or {}).get("email", ""),
                     },
                     "admin_update_payment_settings",
                     "settings",
@@ -5929,6 +5928,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def save_ops_timing(n_clicks, checkin_opened_at, event_started_at, event_ended_at, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update
 
@@ -5985,7 +5985,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "admin_update_event_timing",
                 "settings",
@@ -6021,6 +6021,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def live_set_ops_now(_open_clicks, _start_clicks, _end_clicks, auth_state):
+        auth_state = current_user() or {}
         trig = ctx.triggered_id
         field_map = {
             "btn-live-checkin-opened-now": "checkin_opened_at",
@@ -6056,7 +6057,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "admin_update_event_timing",
                 "settings",
@@ -6170,8 +6171,13 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def recompute_selected_event_stats(n_clicks, selected_slug, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update
+        if not _is_dev_tools_owner():
+            return html.Span(
+                "❌ Unauthorized: dev tools are owner-only.", style={"color": "#ef4444"}
+            )
 
         if not selected_slug or selected_slug == "__ALL__":
             return html.Span(
@@ -6191,7 +6197,7 @@ def register_callbacks(app):
                 user={
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
             )
         except Exception as e:
@@ -6229,6 +6235,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def scan_archived_event_integrity(n_clicks, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update, no_update
 
@@ -6263,7 +6270,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "event_stats_integrity_scanned",
                 "event_stats",
@@ -6303,6 +6310,7 @@ def register_callbacks(app):
         ],
     )
     def archive_current_event(n_clicks_quick, n_clicks, selected_slug, clear_flags, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks and not n_clicks_quick:
             return no_update, no_update, no_update
 
@@ -6329,7 +6337,7 @@ def register_callbacks(app):
             "user": {
                 "user_id": (auth_state or {}).get("user_id", ""),
                 "user_name": (auth_state or {}).get("user_name", "system"),
-                "user_email": (auth_state or {}).get("user_email", ""),
+                "user_email": (auth_state or {}).get("email", ""),
             },
         }
 
@@ -6380,7 +6388,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "event_archived",
                 "event_stats",
@@ -6464,6 +6472,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def reopen_archived_event(n_clicks, selected_slug, restore_flags, auth_state):
+        auth_state = current_user() or {}
         if not n_clicks:
             return no_update, no_update, no_update, no_update
 
@@ -6485,7 +6494,7 @@ def register_callbacks(app):
             "user": {
                 "user_id": (auth_state or {}).get("user_id", ""),
                 "user_name": (auth_state or {}).get("user_name", "system"),
-                "user_email": (auth_state or {}).get("user_email", ""),
+                "user_email": (auth_state or {}).get("email", ""),
             },
         }
 
@@ -6533,7 +6542,7 @@ def register_callbacks(app):
                 {
                     "user_id": (auth_state or {}).get("user_id", ""),
                     "user_name": (auth_state or {}).get("user_name", "system"),
-                    "user_email": (auth_state or {}).get("user_email", ""),
+                    "user_email": (auth_state or {}).get("email", ""),
                 },
                 "event_reopened",
                 "event_stats",
@@ -6622,6 +6631,7 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def delete_archived_event(submit_n_clicks, selected_slug, reason, auth_state):
+        auth_state = current_user() or {}
         if not submit_n_clicks:
             return no_update
 
@@ -6640,7 +6650,7 @@ def register_callbacks(app):
             "user": {
                 "user_id": (auth_state or {}).get("user_id", ""),
                 "user_name": (auth_state or {}).get("user_name", "system"),
-                "user_email": (auth_state or {}).get("user_email", ""),
+                "user_email": (auth_state or {}).get("email", ""),
             },
         }
 
