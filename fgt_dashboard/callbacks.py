@@ -127,6 +127,17 @@ def action_sort_key(action: str) -> tuple:
     return (group_rank, label.lower())
 
 
+def _csv_safe(df):
+    """Return an export copy whose string cells cannot start spreadsheet formulas."""
+
+    def safe_cell(value):
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+            return "'" + value
+        return value
+
+    return df.apply(lambda column: column.map(safe_cell))
+
+
 def _find_checkin_row(table_data, row_id):
     """Resolve a Dash row identity without falling back to its displayed position."""
     if row_id is None:
@@ -496,16 +507,20 @@ def register_callbacks(app):
                 search_lower = search_query.lower()
                 mask = pd.Series([False] * len(df), index=df.index)
                 if "name" in df.columns:
-                    mask = mask | df["name"].str.lower().str.contains(search_lower, na=False)
+                    mask = mask | df["name"].str.lower().str.contains(
+                        search_lower, na=False, regex=False
+                    )
                 if "tag" in df.columns:
-                    mask = mask | df["tag"].str.lower().str.contains(search_lower, na=False)
+                    mask = mask | df["tag"].str.lower().str.contains(
+                        search_lower, na=False, regex=False
+                    )
                 df = df[mask]
 
             # Apply game filter
             if game_filter and "tournament_games_registered" in df.columns:
                 df = df[
                     df["tournament_games_registered"].str.contains(
-                        game_filter, case=False, na=False
+                        game_filter, case=False, na=False, regex=False
                     )
                 ]
 
@@ -546,8 +561,7 @@ def register_callbacks(app):
                         "name": header,
                         "id": str(c),
                         "reorderable": True,
-                        "editable": c
-                        in ["name", "tag", "telephone", "tournament_games_registered"],
+                        "editable": c in ["name", "tag", "telephone"],
                     }
                     cols.append(col_def)
 
@@ -4076,7 +4090,7 @@ def register_callbacks(app):
 
         df = pd.DataFrame(rows)
         filename = f"insights_{mode}.csv"
-        return dcc.send_data_frame(df.to_csv, filename, index=False)
+        return dcc.send_data_frame(_csv_safe(df).to_csv, filename, index=False)
 
     # -------------------------------------------------------------------------
     # Duplicates - scan, merge, undo
@@ -4843,11 +4857,11 @@ def register_callbacks(app):
     def save_tag_edits(
         _timestamp, table_data, previous_data, active_cell, selected_slug, auth_state
     ):
-        """Persist inline edits (name/tag/phone/games) from the check-ins table."""
+        """Persist inline name, tag and phone edits from the check-ins table."""
         if not table_data or not previous_data:
             return no_update, no_update
 
-        editable_columns = ["name", "tag", "telephone", "tournament_games_registered"]
+        editable_columns = ["name", "tag", "telephone"]
         if not active_cell or active_cell.get("column_id") not in editable_columns:
             return no_update, no_update
 
@@ -4867,32 +4881,9 @@ def register_callbacks(app):
         if not prev_by_id or not curr_by_id:
             return no_update, no_update
 
-        settings = get_active_settings() or {}
-        per_game = int(settings.get("swish_expected_per_game") or 0)
-
         def _clean_phone(value):
             txt = str(value or "").strip()
             return re.sub(r"\s+", "", txt)
-
-        def _parse_games(value):
-            if value is None:
-                return []
-            if isinstance(value, list):
-                raw = value
-            else:
-                raw = re.split(r"[,;\n]+", str(value))
-            out = []
-            seen = set()
-            for item in raw:
-                g = str(item or "").strip()
-                if not g:
-                    continue
-                key = g.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(g)
-            return out
 
         changed_rows = []
         for record_id, curr_row in curr_by_id.items():
@@ -4905,9 +4896,6 @@ def register_callbacks(app):
             if edited_column == "telephone":
                 old_cmp = _clean_phone(old_val)
                 new_cmp = _clean_phone(new_val)
-            elif edited_column == "tournament_games_registered":
-                old_cmp = ", ".join(_parse_games(old_val)).lower()
-                new_cmp = ", ".join(_parse_games(new_val)).lower()
             else:
                 old_cmp = str(old_val or "").strip()
                 new_cmp = str(new_val or "").strip()
@@ -4927,13 +4915,11 @@ def register_callbacks(app):
             "name": "admin_update_name",
             "tag": "admin_update_tag",
             "telephone": "admin_update_telephone",
-            "tournament_games_registered": "admin_update_games",
         }
         label_by_column = {
             "name": "name",
             "tag": "tag",
             "telephone": "phone",
-            "tournament_games_registered": "games",
         }
 
         for record_id, old_value, new_value in changed_rows:
@@ -4964,23 +4950,16 @@ def register_callbacks(app):
                 update_data[edited_column] = new_clean
                 table_needs_refresh = True
 
-            elif edited_column == "tournament_games_registered":
-                old_games = _parse_games(old_value)
-                new_games = _parse_games(new_value)
-                old_clean = old_games
-                new_clean = new_games
-                row[edited_column] = ", ".join(new_games)
-                update_data[edited_column] = new_games
-                if per_game >= 0:
-                    update_data["payment_expected"] = len(new_games) * per_game
-                table_needs_refresh = True
-
+            # Keep the storage boundary restricted even if table data contains other edits.
+            update_data = {
+                key: value for key, value in update_data.items() if key in {"name", "tag", "telephone"}
+            }
+            if not update_data:
+                continue
             result = update_checkin(record_id, update_data, typecast=True)
             if not result:
                 if edited_column in ["name", "tag", "telephone"]:
                     row[edited_column] = str(old_value or "").strip()
-                elif edited_column == "tournament_games_registered":
-                    row[edited_column] = ", ".join(_parse_games(old_value))
                 reverted += 1
                 messages.append(f"{player_name}: failed to save {label_by_column[edited_column]}")
                 table_needs_refresh = True
@@ -5582,7 +5561,7 @@ def register_callbacks(app):
             style={"color": "#10b981"},
         )
 
-        return dict(content=df.to_csv(index=False), filename=filename), feedback
+        return dict(content=_csv_safe(df).to_csv(index=False), filename=filename), feedback
 
     # -------------------------------------------------------------------------
     # Save Check-in Requirements - update settings
