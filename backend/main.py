@@ -41,6 +41,7 @@ except ImportError:
     get_checkin_by_record_id = None
     compute_checkin_status = None
 import shared.storage as storage_api
+from shared.membership_flow import get_membership_flow
 from validation import sanitize_checkin_payload, validate_checkin_payload
 
 logging.basicConfig(level=logging.INFO)
@@ -623,6 +624,7 @@ async def health_check():
 
     return {
         "status": "ok" if integration_ok else "degraded",
+        "membership_flow": get_membership_flow(),
         "components": {
             "checkin": True,
             "dashboard": True,
@@ -772,6 +774,7 @@ async def root(request: Request):
         name="checkin.html",
         context={
             "request": request,
+            "membership_flow": get_membership_flow(),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "kiosk": False,
             "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
@@ -794,6 +797,7 @@ async def kiosk_mode(request: Request):
         name="checkin.html",
         context={
             "request": request,
+            "membership_flow": get_membership_flow(),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "kiosk": True,
             "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
@@ -812,6 +816,7 @@ async def register_form(request: Request):
         name="register.html",
         context={
             "request": request,
+            "membership_flow": get_membership_flow(),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
@@ -835,6 +840,7 @@ async def register_form_alias(request: Request):
         name="register.html",
         context={
             "request": request,
+            "membership_flow": get_membership_flow(),
             "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
@@ -1611,6 +1617,23 @@ async def ebas_register(request: Request):
       4. n8n calls Sverok API + reports member status via backend callback
       5. Return result to frontend (same format as old n8n response)
     """
+    flow = get_membership_flow()
+    if flow == "v2":
+        return _ebas_registration_response(
+            410,
+            error_code="flow_v2",
+            user_message=(
+                "Membership registration has moved. "
+                "Please use the membership step on the check-in page."
+            ),
+        )
+    if flow == "off":
+        return _ebas_registration_response(
+            503,
+            error_code="flow_off",
+            user_message="Membership registration is handled by a TO today. Please ask a TO.",
+        )
+
     try:
         body = await request.json()
     except Exception:
