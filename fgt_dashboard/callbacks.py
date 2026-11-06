@@ -723,6 +723,7 @@ def register_callbacks(app):
     @app.callback(
         Output("checkins-table", "row_selectable"),
         Output("checkins-table", "selected_rows"),
+        Output("checkins-table", "selected_row_ids"),
         Output("btn-toggle-multiselect", "children"),
         Output("btn-toggle-multiselect", "style"),
         Input("btn-toggle-multiselect", "n_clicks"),
@@ -758,15 +759,17 @@ def register_callbacks(app):
             return (
                 "multi" if is_enabled else False,
                 [],
+                [],
                 "Multi-select: ON" if is_enabled else "Multi-select: OFF",
                 enabled_style if is_enabled else disabled_style,
             )
 
         enabled = not bool(n_clicks and n_clicks % 2 == 1)
         if enabled:
-            return "multi", [], "Multi-select: ON", enabled_style
+            return "multi", [], [], "Multi-select: ON", enabled_style
         return (
             False,
+            [],
             [],
             "Multi-select: OFF",
             disabled_style,

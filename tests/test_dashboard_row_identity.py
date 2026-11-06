@@ -241,6 +241,36 @@ def test_recheck_keeps_one_click_behavior_with_selected_ids(dashboard):
     assert all(state["property"] != "selected_rows" for state in definition["state"])
 
 
+@pytest.mark.parametrize(
+    "clicks, selected_rows, current_mode",
+    [(0, [], "multi"), (1, [], "multi"), (2, [], False), (1, [0], "multi"), (1, [0], False)],
+    ids=["initialize", "disable", "enable", "quick-clear", "clear-disabled"],
+)
+def test_selection_clear_removes_actionable_ids(dashboard, clicks, selected_rows, current_mode):
+    definition = dashboard.definitions["toggle_multiselect_mode"]
+    result = dashboard.callbacks["toggle_multiselect_mode"](clicks, selected_rows, current_mode)
+    table_state = {"selected_rows": selected_rows, "selected_row_ids": ["record-0"]}
+    for output, value in zip(definition["output"], result):
+        if output.component_id == "checkins-table":
+            table_state[output.component_property] = value
+    assert table_state["selected_rows"] == []
+    assert table_state["selected_row_ids"] == []
+
+    rows = [make_row(0)]
+    recheck = dashboard.callbacks["recheck_startgg"](
+        1, table_state["selected_row_ids"], rows, "test-event", {}
+    )
+    assert "Select a player" in recheck.children
+    displayed, _, _, pending = dashboard.callbacks["show_delete_confirmation"](
+        1, table_state["selected_row_ids"], rows
+    )
+    assert displayed is False
+    assert pending == []
+    dashboard.callbacks["delete_selected_player"](1, pending, rows, "test-event", {})
+    dashboard.post.assert_not_called()
+    dashboard.storage.delete_checkin.assert_not_called()
+
+
 def test_table_refresh_assigns_record_identity_after_filtering(dashboard):
     dashboard.storage.get_checkins.return_value = [
         {key: value for key, value in make_row(number).items() if key != "id"}
