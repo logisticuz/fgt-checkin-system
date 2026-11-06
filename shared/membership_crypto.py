@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -42,25 +43,62 @@ def _derived_key(info):
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(_key())
 
 
-def encrypt_pnr(pnr: str, attempt_id: str | uuid.UUID) -> bytes:
-    """Return 96-bit nonce followed by ciphertext/tag, bound to this attempt's UUID."""
-    if not isinstance(pnr, str):
-        raise MembershipCryptoError("Invalid membership personal ID")
+def _encrypt(plaintext, attempt_id):
     nonce = secrets.token_bytes(12)
-    return nonce + AESGCM(_key()).encrypt(nonce, pnr.encode("utf-8"), _attempt_bytes(attempt_id))
+    return nonce + AESGCM(_key()).encrypt(nonce, plaintext, _attempt_bytes(attempt_id))
 
 
-def decrypt_pnr(ciphertext: bytes, attempt_id: str | uuid.UUID) -> str:
+def _decrypt(ciphertext, attempt_id):
     try:
         value = bytes(ciphertext)
         if len(value) < 28:
             raise MembershipCryptoError("Cannot decrypt membership personal ID")
-        plaintext = AESGCM(_key()).decrypt(value[:12], value[12:], _attempt_bytes(attempt_id))
-        return plaintext.decode("utf-8")
+        return AESGCM(_key()).decrypt(value[:12], value[12:], _attempt_bytes(attempt_id))
     except MembershipCryptoError:
         raise
     except (InvalidTag, ValueError, TypeError):
         raise MembershipCryptoError("Cannot decrypt membership personal ID") from None
+
+
+def encrypt_pnr(pnr: str, attempt_id: str | uuid.UUID) -> bytes:
+    """Return 96-bit nonce followed by ciphertext/tag, bound to this attempt's UUID."""
+    if not isinstance(pnr, str) or re.fullmatch(r"[0-9]{12}", pnr) is None:
+        raise MembershipCryptoError("Invalid membership personal ID")
+    return _encrypt(pnr.encode("ascii"), attempt_id)
+
+
+def decrypt_pnr(ciphertext: bytes, attempt_id: str | uuid.UUID) -> str:
+    try:
+        plaintext = _decrypt(ciphertext, attempt_id).decode("ascii")
+        if re.fullmatch(r"[0-9]{12}", plaintext) is None:
+            raise MembershipCryptoError("Cannot decrypt membership personal ID")
+        return plaintext
+    except UnicodeError:
+        raise MembershipCryptoError("Cannot decrypt membership personal ID") from None
+
+
+def _validate_context(context):
+    if (
+        not isinstance(context, dict)
+        or set(context) != {"email", "phone", "lang"}
+        or not all(isinstance(value, str) and value for value in context.values())
+    ):
+        raise MembershipCryptoError("Invalid membership registration context")
+    return context
+
+
+def encrypt_context(context: dict[str, str], attempt_id: str | uuid.UUID) -> bytes:
+    encoded = json.dumps(_validate_context(context), sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return _encrypt(encoded, attempt_id)
+
+
+def decrypt_context(ciphertext: bytes, attempt_id: str | uuid.UUID) -> dict[str, str]:
+    try:
+        return _validate_context(json.loads(_decrypt(ciphertext, attempt_id).decode("utf-8")))
+    except (UnicodeError, json.JSONDecodeError):
+        raise MembershipCryptoError("Cannot decrypt membership registration context") from None
 
 
 def fingerprint(value: str) -> str:
