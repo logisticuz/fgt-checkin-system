@@ -260,7 +260,9 @@
     {% if membership_flow == "off" %}
     <div id="membership-flow-off-message" class="message info" role="status"></div>
     {% endif %}
-    <section id="section-ebas" class="section hidden"{% if membership_flow == "off" %} style="display: none" inert{% endif %}>
+    {% if membership_flow == "v2" %}{% include "partials/membership_v2.html" %}{% endif %}
+    {# In v2 the legacy form stays in the DOM (the inline script binds to its ids) but renamed and inert. #}
+    <section id="{{ 'section-ebas-legacy' if membership_flow == 'v2' else 'section-ebas' }}" class="section hidden"{% if membership_flow in ("off", "v2") %} style="display: none" inert{% endif %}>
       <h2>Become a Sverok Member</h2>
       <p style="margin-bottom: 1rem; color: #aaa;">
         Membership is free. Registration can take up to 60 seconds while SPAR/Sverok confirms your details.
