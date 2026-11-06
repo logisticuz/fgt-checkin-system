@@ -1,11 +1,13 @@
 """checkin_id passthrough in the check-in/status templates (T-020). Behaviour is covered by e2e."""
 
 import re
+from pathlib import Path
 
 import pytest
 
 from tests.test_status_templates import app_templates  # noqa: F401  (pytest fixture)
 
+BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 OLD_MEMBER_LINK = (
     '<a href="/register?name=Synthetic%20Player&tag=synthetic&event=synthetic-event'
     '&membership_only=true" class="support-link">'
@@ -82,3 +84,20 @@ def test_checkin_page_adds_the_orchestrate_id_to_both_navigations(app_templates)
     for forbidden in ("personnummer", "telefon", "email", "phone"):
         assert forbidden not in register_qs
         assert forbidden not in status_nav
+
+
+@pytest.mark.parametrize("flow", ["v2", "legacy"])
+def test_register_status_redirects_carry_the_id(app_templates, flow):  # noqa: F811
+    html = render(app_templates, "register.html", membership_flow=flow, games=[])
+    helper = html[html.index("function statusQuery()") :][:400]
+    assert 'params.get("checkin_id")' in helper
+    assert "encodeURIComponent(checkinId)" in helper
+    # Both register.html redirects (legacy membership_only + "Continue") use the helper.
+    assert html.count("${statusQuery()}`") == 2
+    assert 'const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";' not in html
+
+
+def test_v2_membership_only_redirect_carries_the_id():
+    script = (BACKEND_DIR / "static" / "js" / "membership_v2.js").read_text(encoding="utf-8")
+    redirect = script[script.index("if (membershipOnly) {") :][:600]
+    assert 'CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : ""' in redirect

@@ -457,6 +457,15 @@
     // State from URL params
     // Override "needs" flags based on what's REQUIRED for this event
     const params = new URLSearchParams(window.location.search);
+    // Query for /status/<name>: keeps kiosk mode and the opaque checkin_id (never PII).
+    function statusQuery() {
+      const checkinId = params.get("checkin_id");
+      const qs = [
+        KIOSK_MODE ? "kiosk=true" : "",
+        checkinId ? `checkin_id=${encodeURIComponent(checkinId)}` : "",
+      ].filter(Boolean).join("&");
+      return qs ? `?${qs}` : "";
+    }
     // membership_only=true means user came from Ready page to voluntarily become member
     const membershipOnly = params.get("membership_only") === "true";
     const state = {
@@ -741,8 +750,7 @@
           // In membership_only mode, redirect back to status page after short delay
           if (state.membershipOnly) {
             setTimeout(() => {
-              const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
-              window.location.href = `/status/${encodeURIComponent(state.name)}${kioskParam}`;
+              window.location.href = `/status/${encodeURIComponent(state.name)}${statusQuery()}`;
             }, 2000);
             return;
           }
@@ -840,10 +848,9 @@
       setButtonLoading(btn, true);
 
       try {
-        // Redirect to status page (preserve kiosk mode)
+        // Redirect to status page (preserve kiosk mode and the opaque checkin_id)
         const name = state.name || localStorage.getItem("namn");
-        const kioskParam = KIOSK_MODE ? "?kiosk=true" : "";
-        window.location.href = `/status/${encodeURIComponent(name)}${kioskParam}`;
+        window.location.href = `/status/${encodeURIComponent(name)}${statusQuery()}`;
       } catch (err) {
         console.error("Final checkin error:", err);
         showMessage("Something went wrong. Please try again.", "error");

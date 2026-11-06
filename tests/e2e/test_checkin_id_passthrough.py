@@ -57,7 +57,11 @@ def site(browser, app_templates):  # noqa: F811
     }
 
     def open_site(
-        orchestrate=None, participant=None, status_templates=("status_ready.html",), **ctx
+        orchestrate=None,
+        participant=None,
+        status_templates=("status_ready.html",),
+        ebas_register=None,
+        **ctx,
     ):
         api = MockApi()
         calls = {"orchestrate": [], "status_pages": []}
@@ -86,6 +90,8 @@ def site(browser, app_templates):  # noqa: F811
                     kind = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
                     return route.fulfill(content_type=kind, body=file.read_bytes())
                 return route.fulfill(status=404, body="")
+            if path == "/api/ebas/register" and ebas_register is not None:
+                return json_reply(route, ebas_register)
             if path == "/api/checkin/orchestrate":
                 calls["orchestrate"].append(route.request.post_data_json)
                 return json_reply(route, orchestrate)
@@ -198,3 +204,67 @@ def test_pending_page_keeps_id_when_it_turns_ready(site, incoming):
     assert dict(parse_qsl(urlparse(redirected).query)) == (
         {"checkin_id": CHECKIN_ID} if incoming else {}
     )
+
+
+REGISTER = "/register?name=Synthetic%20Player&ebas=true&event=synthetic-event"
+ENCODED_ID = "rec%20Synthetic%2F42%26x"
+
+
+def become_member_v2(page, api):
+    api.queue("start", CODE_SENT)
+    api.queue("verify", {"ok": True, "state": "submitted"})
+    page.fill("#mv2-pnr", synthetic_personnummer())
+    page.fill("#mv2-email", "player@example.invalid")
+    page.fill("#mv2-phone", "0700000000")
+    page.check("#mv2-consent-bylaws")
+    page.check("#mv2-consent-privacy")
+    page.click("#mv2-start")
+    page.wait_for_selector("#mv2-step-code:not([hidden])")
+    page.fill("#mv2-code", "123456")
+    page.click("#mv2-verify")
+
+
+def wait_for_status_page(page, calls):
+    for _ in range(200):
+        if calls["status_pages"]:
+            return calls["status_pages"][0]
+        page.wait_for_timeout(25)
+    raise AssertionError("no navigation to /status/<name>")
+
+
+@pytest.mark.parametrize("incoming", [ENCODED_ID, None], ids=["with-id", "without-id"])
+def test_register_continue_keeps_id_on_the_way_to_status(site, incoming):
+    page, api, calls = site()
+    page.goto(REGISTER + (f"&checkin_id={incoming}" if incoming else ""))
+    become_member_v2(page, api)
+    page.wait_for_selector("#section-final:not(.hidden)")
+    page.click("#btn-final-checkin")
+    url = wait_for_status_page(page, calls)
+    assert urlparse(url).path == "/status/Synthetic%20Player"
+    assert dict(parse_qsl(urlparse(url).query)) == ({"checkin_id": CHECKIN_ID} if incoming else {})
+
+
+@pytest.mark.parametrize("kiosk", [False, True], ids=["web", "kiosk"])
+def test_v2_membership_only_redirect_keeps_id(site, kiosk):
+    page, api, calls = site()
+    page.goto("/register?name=Synthetic%20Player&membership_only=true")
+    if kiosk:
+        page.evaluate("sessionStorage.setItem('kioskMode', 'true')")
+    page.goto(f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}")
+    become_member_v2(page, api)
+    url = wait_for_status_page(page, calls)  # after the 2 s success message
+    expected = {"checkin_id": CHECKIN_ID, **({"kiosk": "true"} if kiosk else {})}
+    assert dict(parse_qsl(urlparse(url).query)) == expected
+    if kiosk:
+        assert urlparse(url).query.startswith("kiosk=true&")
+
+
+def test_legacy_membership_only_redirect_keeps_id(site):
+    page, _, calls = site(membership_flow="legacy", ebas_register={"success": True})
+    page.goto(f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}")
+    page.click("#pnr-toggle-manual")
+    page.fill("#pnr-manual-input", synthetic_personnummer())
+    page.fill("#phone-ebas", "0700000000")
+    page.click("#btn-register-ebas")
+    url = wait_for_status_page(page, calls)
+    assert dict(parse_qsl(urlparse(url).query)) == {"checkin_id": CHECKIN_ID}
