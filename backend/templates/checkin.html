@@ -264,6 +264,27 @@
       text-decoration: none;
     }
     .hidden { display: none; }
+
+    /* Personal ID helpers */
+    .pnr-toggle { font-size: 0.8rem; color: #58aaff; }
+    .pnr-error { color: #f44336; font-size: 0.85rem; min-height: 1.1rem; margin-top: 0.3rem; }
+    input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #f44336; }
+    .error-container a { color: #58aaff; font-weight: 600; }
+
+    /* Kiosk: a minimum readable size for everything a player has to read or tap. */
+    body.kiosk label,
+    body.kiosk .consent,
+    body.kiosk .pnr-toggle,
+    body.kiosk .pnr-error,
+    body.kiosk .error-container p,
+    body.kiosk footer { font-size: 1rem; }
+    body.kiosk input[type="text"],
+    body.kiosk input[type="tel"],
+    body.kiosk select,
+    body.kiosk #ci-pnr-picker-mode select,
+    body.kiosk #ci-pnr-picker-mode input { font-size: 1.1rem; }
+    body.kiosk .tooltip { font-size: 0.9rem; white-space: normal; width: 16rem; }
+    body.kiosk footer { color: #9aa4ae; }
   </style>
 </head>
 <body>
@@ -272,17 +293,17 @@
       <h1>EVENT CHECK-IN</h1>
     </header>
 
-    <form id="checkin-form">
-      <div id="error-container" class="error-container"></div>
+    <form id="checkin-form" autocomplete="off">
+      <div id="error-container" class="error-container" role="status" aria-live="polite"></div>
 
       <div class="form-group">
         <label for="namn">Name</label>
-        <input type="text" id="namn" name="namn" placeholder="Your full name" required>
+        <input type="text" id="namn" name="namn" placeholder="Your full name" autocomplete="off" required>
       </div>
 
       <div class="form-group">
         <label for="telefon">Phone Number</label>
-        <input type="tel" id="telefon" name="telefon" placeholder="07X XXX XX XX" required>
+        <input type="tel" id="telefon" name="telefon" placeholder="07X XXX XX XX" autocomplete="off" required>
       </div>
 
       <div class="form-group">
@@ -293,34 +314,34 @@
             <span class="tooltip">If registered on Start.gg, use the exact same tag</span>
           </span>
         </label>
-        <input type="text" id="tag" name="tag" placeholder="Your player tag" required>
+        <input type="text" id="tag" name="tag" placeholder="Your player tag" autocomplete="off" required>
       </div>
 
-      <div class="form-group" id="personnummer-group">
-        <label>Personal ID</label>
+      <div class="form-group" id="personnummer-group" role="group" aria-labelledby="pnr-label" aria-describedby="ci-pnr-error">
+        <label id="pnr-label">Personal ID</label>
         <div id="ci-pnr-picker-mode">
           <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
-            <select id="ci-pnr-year" style="flex: 1; min-width: 75px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();"><option value="">Year</option></select>
-            <select id="ci-pnr-month" style="flex: 1; min-width: 80px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();">
+            <select id="ci-pnr-year" aria-label="Personal ID: birth year" style="flex: 1; min-width: 75px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();"><option value="">Year</option></select>
+            <select id="ci-pnr-month" aria-label="Personal ID: birth month" style="flex: 1; min-width: 80px; padding: 0.4rem 0.4rem;" onchange="ciUpdateDays(); ciSyncPicker();">
               <option value="">Month</option>
               <option value="01">01</option><option value="02">02</option><option value="03">03</option>
               <option value="04">04</option><option value="05">05</option><option value="06">06</option>
               <option value="07">07</option><option value="08">08</option><option value="09">09</option>
               <option value="10">10</option><option value="11">11</option><option value="12">12</option>
             </select>
-            <select id="ci-pnr-day" style="flex: 0.7; min-width: 60px; padding: 0.4rem 0.4rem;" onchange="ciSyncPicker();"><option value="">Day</option></select>
-            <input type="text" id="ci-pnr-last4" placeholder="XXXX" maxlength="4" inputmode="numeric"
+            <select id="ci-pnr-day" aria-label="Personal ID: birth day" style="flex: 0.7; min-width: 60px; padding: 0.4rem 0.4rem;" onchange="ciSyncPicker();"><option value="">Day</option></select>
+            <input type="text" id="ci-pnr-last4" aria-label="Personal ID: last four digits" placeholder="XXXX" maxlength="4" inputmode="numeric" autocomplete="off"
                    style="flex: 0.8; min-width: 65px; text-align: center; letter-spacing: 2px; padding: 0.4rem 0.4rem;"
                    oninput="this.value=this.value.replace(/\D/g,''); ciSyncPicker();">
           </div>
-          <a href="#" onclick="ciTogglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Type manually instead</a>
+          <a href="#" class="pnr-toggle" onclick="ciTogglePnrMode(event)">Type manually instead</a>
         </div>
         <div id="ci-pnr-manual-mode" class="hidden">
-          <input type="text" id="ci-pnr-manual-input" placeholder="199001011234" pattern="\d{10,12}" oninput="ciSyncManual();">
-          <a href="#" onclick="ciTogglePnrMode(event)" style="font-size: 0.75rem; color: #58aaff;">Use date picker</a>
+          <input type="text" id="ci-pnr-manual-input" aria-label="Personal ID, 12 digits (YYYYMMDDXXXX)" placeholder="199001011234" pattern="\d{10,12}" inputmode="numeric" autocomplete="off" oninput="ciSyncManual();">
+          <a href="#" class="pnr-toggle" onclick="ciTogglePnrMode(event)">Use date picker</a>
         </div>
         <input type="hidden" id="personnummer" name="personnummer">
-        <div id="ci-pnr-error" style="color: #f44336; font-size: 0.8rem; min-height: 1.1rem;"></div>
+        <div id="ci-pnr-error" class="pnr-error" aria-live="polite"></div>
       </div>
 
       <div class="form-group" id="acquisition-source-group">
@@ -351,6 +372,7 @@
   </div>
 
   <script src="/static/js/validation.js"></script>
+  <script src="/static/js/checkin_hygiene.js"></script>
   <script>
     // === Personnummer date picker logic (checkin) ===
     (function initCiPnrPicker() {
@@ -439,9 +461,6 @@
       }
     }
 
-    const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
-    const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
-
     // Configurable requirements from event settings
     const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
     const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
@@ -455,16 +474,16 @@
 
     if (KIOSK_MODE) {
       sessionStorage.setItem("kioskMode", "true");
+      document.body.classList.add("kiosk");
     } else {
       sessionStorage.removeItem("kioskMode");
     }
 
     // Hide personnummer field if membership not required
+    // (A `required` on the hidden #personnummer never fired; personalIdProblem() validates
+    // the visible fields in the submit handler instead.)
     if (!REQUIRE_MEMBERSHIP) {
       document.getElementById("personnummer-group").style.display = "none";
-    } else {
-      // Make personnummer required if membership is required
-      document.getElementById("personnummer").setAttribute("required", "");
     }
 
     if (!COLLECT_ACQUISITION_SOURCE) {
@@ -486,20 +505,112 @@
     // Error display helpers (using textContent to prevent XSS)
     function showErrors(errors) {
       const container = document.getElementById("error-container");
-      container.innerHTML = "";  // Clear existing
-      errors.forEach(e => {
+      container.replaceChildren(...errors.map(e => {
         const p = document.createElement("p");
         p.textContent = e;  // Safe - escapes HTML
-        container.appendChild(p);
-      });
+        return p;
+      }));
       container.classList.add("show");
     }
 
     function clearErrors() {
       const container = document.getElementById("error-container");
-      container.innerHTML = "";
+      container.replaceChildren();
       container.classList.remove("show");
     }
+
+    // The server answered 5xx or not at all: the check-in may exist already, so don't just say
+    // "try again". Point to a TO and the status page instead.
+    function showMaybeRegistered(name) {
+      const text = document.createElement("p");
+      text.textContent = "Your check-in may have been registered – check with a TO.";
+      const linkRow = document.createElement("p");
+      const link = document.createElement("a");
+      link.href = `/status/${encodeURIComponent(name)}${KIOSK_MODE ? "?kiosk=true" : ""}`;
+      link.textContent = "Check my status →";
+      linkRow.appendChild(link);
+      const container = document.getElementById("error-container");
+      container.replaceChildren(text, linkRow);
+      container.classList.add("show");
+    }
+
+    // FastAPI error bodies: {"detail": "..."}, {"detail": {"errors": [...]}} or a 422 list.
+    function serverErrors(data) {
+      const detail = data && data.detail;
+      let errors = [];
+      if (typeof detail === "string") errors = [detail];
+      else if (detail && Array.isArray(detail.errors)) errors = detail.errors;
+      else if (Array.isArray(detail)) errors = detail.map(item => item && item.msg);
+      else if (data && typeof data.error === "string") errors = [data.error];
+      errors = errors.filter(e => typeof e === "string" && e.trim());
+      return errors.length ? errors : null;
+    }
+
+    const PNR_PARTS = ["ci-pnr-year", "ci-pnr-month", "ci-pnr-day", "ci-pnr-last4"];
+
+    // A started but unfinished Personal ID must not be sent as "empty". Returns null when the
+    // Personal ID is complete and valid, or untouched; otherwise {message, field}.
+    function personalIdProblem() {
+      if (!REQUIRE_MEMBERSHIP) return null;
+      const manualMode = !document.getElementById("ci-pnr-manual-mode").classList.contains("hidden");
+      if (manualMode) {
+        const input = document.getElementById("ci-pnr-manual-input");
+        const digits = Validation.sanitizePersonnummer(input.value);
+        if (!digits) return null;
+        const result = Validation.validatePersonnummer(digits);
+        return result.valid ? null : { message: result.error, field: input };
+      }
+      const parts = PNR_PARTS.map(id => document.getElementById(id));
+      if (parts.every(el => el.value === "")) return null;
+      const missing = parts.find(el =>
+        el.id === "ci-pnr-last4" ? el.value.length !== 4 : el.value === "");
+      if (missing) {
+        return {
+          message: "Personal ID is incomplete. Fill in year, month, day and the last four digits.",
+          field: missing,
+        };
+      }
+      const result = Validation.validatePersonnummer(parts.map(el => el.value).join(""));
+      return result.valid ? null : { message: result.error, field: parts[3] };
+    }
+
+    function clearPnrInvalid() {
+      [...PNR_PARTS, "ci-pnr-manual-input"].forEach(id =>
+        document.getElementById(id).removeAttribute("aria-invalid"));
+    }
+    document.getElementById("personnummer-group").addEventListener("input", clearPnrInvalid);
+    document.getElementById("personnummer-group").addEventListener("change", clearPnrInvalid);
+
+    // Kiosk hygiene: nothing personal survives a redirect, Back, or 90 s of inactivity.
+    let submitGen = 0;  // bumped on reset: a late orchestrate answer is then ignored
+
+    function clearFields() {
+      const form = document.getElementById("checkin-form");
+      form.reset();
+      document.getElementById("personnummer").value = "";  // hidden inputs survive reset()
+      ciUpdateDays();
+      document.getElementById("ci-pnr-manual-mode").classList.add("hidden");
+      document.getElementById("ci-pnr-picker-mode").classList.remove("hidden");
+      document.getElementById("ci-pnr-error").textContent = "";
+      clearPnrInvalid();
+    }
+
+    function resetForm() {
+      submitGen += 1;
+      clearFields();
+      clearErrors();
+      const btn = document.querySelector("#checkin-form .btn-submit");
+      btn.disabled = false;
+      btn.textContent = "Check In";
+    }
+
+    function leaveTo(url) {
+      clearFields();  // so a Back/bfcache restore can't show this person's details
+      CheckinHygiene.purgePersonalStorage();
+      window.location.href = url;
+    }
+
+    CheckinHygiene.install({ kiosk: KIOSK_MODE, reset: resetForm });
 
     // Form submission
     document.getElementById("checkin-form").addEventListener("submit", async function(e) {
@@ -508,6 +619,19 @@
 
       const btn = this.querySelector(".btn-submit");
       const originalText = btn.textContent;
+      const restoreButton = () => {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      };
+
+      const pnrProblem = personalIdProblem();
+      if (pnrProblem) {
+        document.getElementById("ci-pnr-error").textContent = pnrProblem.message;
+        pnrProblem.field.setAttribute("aria-invalid", "true");
+        pnrProblem.field.focus();
+        return;
+      }
+
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>Validating...';
 
@@ -527,8 +651,7 @@
         const errors = Validation.validateForm(rawData);
         if (errors.length > 0) {
           showErrors(errors);
-          btn.disabled = false;
-          btn.textContent = originalText;
+          restoreButton();
           return;
         }
       }
@@ -538,83 +661,90 @@
         ? Validation.sanitizeFormData(rawData)
         : rawData;
 
-      // Persist to localStorage (excluding sensitive data like personnummer)
-      localStorage.setItem("namn", sanitized.namn);
-      localStorage.setItem("telefon", sanitized.telefon);
-      localStorage.setItem("tag", sanitized.tag);
-      // NOTE: personnummer is NOT stored for privacy/security reasons
-
+      // Nothing is persisted in localStorage any more: what the next pages need travels in
+      // their URL (name, tag, event, checkin_id). Never personnummer or contact details.
+      const gen = submitGen;
+      let response;
       try {
-        const response = await fetch(`/api/checkin/orchestrate`, {
+        response = await fetch(`/api/checkin/orchestrate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(sanitized)
         });
-
-        if (!response.ok) {
-          throw new Error(`Server error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        // Opaque check-in id from orchestrate, carried so later steps can address the
-        // check-in by id (never personnummer or contact data in a URL).
-        const checkinIdQ = data.checkin_id
-          ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}`
-          : "";
-
-        if (data.ready) {
-          // Player is ready - go to success page
-          const statusQs = [KIOSK_MODE ? "kiosk=true" : "", checkinIdQ].filter(Boolean).join("&");
-          window.location.href = `/status/${encodeURIComponent(sanitized.namn)}${statusQs ? "?" + statusQs : ""}`;
-        } else {
-          // Store event slug for register page
-          if (data.slug) {
-            localStorage.setItem("eventSlug", data.slug);
-          }
-
-          // Something missing - go to register page
-          // Compute missing array from individual fields if not provided
-          // (n8n doesn't include 'missing' for already_checked_in responses)
-          let missing = [];
-          if (Array.isArray(data.missing) && data.missing.length > 0) {
-            missing = data.missing;
-          } else {
-            // Fallback: compute from individual boolean fields
-            if (data.member === false) missing.push("Membership");
-            if (data.payment_valid === false) missing.push("Payment");
-            if (data.startgg === false) missing.push("Start.gg");
-          }
-
-          // Filter missing based on what's actually required for this event
-          // This ensures disabled requirements don't show up even if n8n returns them
-          missing = missing.filter(item => {
-            const t = item.toLowerCase();
-            if (t.includes("membership")) return REQUIRE_MEMBERSHIP;
-            if (t.includes("payment")) return REQUIRE_PAYMENT;
-            if (t.includes("start")) return REQUIRE_STARTGG;
-            return true;
-          });
-
-          const flags = missing.map(s => {
-            const t = String(s).toLowerCase();
-            if (t.includes("payment")) return "payment=true";
-            if (t.includes("membership")) return "ebas=true";
-            if (t.includes("start")) return "startgg=false";
-            return "";
-          }).filter(Boolean).join("&");
-
-          // Include event slug in URL for register page
-          const eventSlug = data.slug ? `&event=${encodeURIComponent(data.slug)}` : "";
-          const kioskQ = KIOSK_MODE ? "&kiosk=true" : "";
-          const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}${kioskQ}${checkinIdQ ? "&" + checkinIdQ : ""}`;
-          window.location.href = `/register?${qs}`;
-        }
       } catch (err) {
-        console.error("Validation error:", err);
-        showErrors(["Something went wrong. Please try again."]);
-        btn.disabled = false;
-        btn.textContent = originalText;
+        if (gen !== submitGen) return;
+        console.error("Check-in request failed:", err);
+        showMaybeRegistered(sanitized.namn);
+        restoreButton();
+        return;
       }
+      let data = null;
+      try { data = await response.json(); } catch (err) { data = null; }
+      if (gen !== submitGen) return;
+
+      if (response.status >= 500 || (response.ok && !data)) {
+        showMaybeRegistered(sanitized.namn);
+        restoreButton();
+        return;
+      }
+      if (!response.ok) {
+        showErrors(serverErrors(data) ||
+          [`Check-in failed (error ${response.status}). Please try again or ask a TO.`]);
+        restoreButton();
+        return;
+      }
+
+      // Opaque check-in id from orchestrate, carried so later steps can address the
+      // check-in by id (never personnummer or contact data in a URL).
+      const checkinIdQ = data.checkin_id
+        ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}`
+        : "";
+
+      if (data.ready) {
+        // Player is ready - go to success page
+        const statusQs = [KIOSK_MODE ? "kiosk=true" : "", checkinIdQ].filter(Boolean).join("&");
+        leaveTo(`/status/${encodeURIComponent(sanitized.namn)}${statusQs ? "?" + statusQs : ""}`);
+        return;
+      }
+
+      // Something missing - go to register page
+      // Compute missing array from individual fields if not provided
+      // (n8n doesn't include 'missing' for already_checked_in responses)
+      let missing = [];
+      if (Array.isArray(data.missing) && data.missing.length > 0) {
+        missing = data.missing;
+      } else {
+        // Fallback: compute from individual boolean fields
+        if (data.member === false) missing.push("Membership");
+        if (data.payment_valid === false) missing.push("Payment");
+        if (data.startgg === false) missing.push("Start.gg");
+      }
+
+      // Filter missing based on what's actually required for this event
+      // This ensures disabled requirements don't show up even if n8n returns them
+      missing = missing.filter(item => {
+        const t = item.toLowerCase();
+        if (t.includes("membership")) return REQUIRE_MEMBERSHIP;
+        if (t.includes("payment")) return REQUIRE_PAYMENT;
+        if (t.includes("start")) return REQUIRE_STARTGG;
+        return true;
+      });
+
+      const flags = missing.map(s => {
+        const t = String(s).toLowerCase();
+        if (t.includes("payment")) return "payment=true";
+        if (t.includes("membership")) return "ebas=true";
+        if (t.includes("start")) return "startgg=false";
+        return "";
+      }).filter(Boolean).join("&");
+
+      // Event slug and tag go in the URL (register.html reads them from there first); they
+      // used to be kept in localStorage, where the next kiosk user could inherit them.
+      const eventSlug = data.slug ? `&event=${encodeURIComponent(data.slug)}` : "";
+      const tagQ = sanitized.tag ? `&tag=${encodeURIComponent(sanitized.tag)}` : "";
+      const kioskQ = KIOSK_MODE ? "&kiosk=true" : "";
+      const qs = `name=${encodeURIComponent(sanitized.namn)}${flags ? "&" + flags : ""}${eventSlug}${tagQ}${kioskQ}${checkinIdQ ? "&" + checkinIdQ : ""}`;
+      leaveTo(`/register?${qs}`);
     });
 
     // Tooltip click handling

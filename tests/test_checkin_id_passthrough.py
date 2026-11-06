@@ -68,10 +68,10 @@ def test_checkin_page_adds_the_orchestrate_id_to_both_navigations(app_templates)
     html = render(
         app_templates, "checkin.html", membership_flow="v2", collect_acquisition_source=False
     )
-    assert (
-        "data.checkin_id\n          ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}`"
-        in html
-    )
+    assert re.search(
+        r"data\.checkin_id\s*\?\s*`checkin_id=\$\{encodeURIComponent\(String\(data\.checkin_id\)\)\}`",
+        html,
+    )  # whitespace-insensitive: indentation may change with refactors
     status_match = re.search(r"const statusQs = \[(.*?)\]", html)
     assert status_match
     status_nav = status_match.group(1)
