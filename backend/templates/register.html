@@ -257,7 +257,10 @@
     <div id="messages"></div>
 
     <!-- Section: eBas Membership -->
-    <section id="section-ebas" class="section hidden">
+    {% if membership_flow == "off" %}
+    <div id="membership-flow-off-message" class="message info" role="status"></div>
+    {% endif %}
+    <section id="section-ebas" class="section hidden"{% if membership_flow == "off" %} style="display: none" inert{% endif %}>
       <h2>Become a Sverok Member</h2>
       <p style="margin-bottom: 1rem; color: #aaa;">
         Membership is free. Registration can take up to 60 seconds while SPAR/Sverok confirms your details.
@@ -444,6 +447,10 @@
     const REQUIRE_PAYMENT = {{ require_payment | default(true) | tojson }};
     const REQUIRE_MEMBERSHIP = {{ require_membership | default(true) | tojson }};
     const REQUIRE_STARTGG = {{ require_startgg | default(true) | tojson }};
+
+    {% if membership_flow == "off" %}
+    document.getElementById("membership-flow-off-message").textContent = "Membership registration is handled by a TO today. Please ask a TO.";
+    {% endif %}
 
     // State from URL params
     // Override "needs" flags based on what's REQUIRED for this event
