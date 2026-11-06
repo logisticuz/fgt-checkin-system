@@ -720,75 +720,82 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     tag = (payload.get("tag") or "").strip() or None
     name = (payload.get("name") or "").strip() or None
 
-    existing = None
-    if tag:
-        existing = get_checkin_by_tag(tag, event_slug)
-    elif name:
-        existing = get_checkin_by_name(name, event_slug)
-
-    if existing and existing.get("record_id"):
-        checkin_id = existing["record_id"]
-        safe_fields = {}
-        for key in ("name", "email", "telephone"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                safe_fields[key] = value.strip()
-        normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
-        if normalized_source is not None:
-            safe_fields["acquisition_source"] = normalized_source
-        updated = update_checkin(checkin_id, safe_fields)
-        if not updated:
-            raise RuntimeError("Failed to update existing checkin")
-        return {
-            "checkin_id": checkin_id,
-            "record_id": checkin_id,
-            "event_slug": event_slug,
-            "created": False,
-            "player_uuid": updated["fields"].get("player_uuid"),
-        }
-
-    games = payload.get("tournament_games_registered")
-    if isinstance(games, str):
-        games = [g.strip() for g in games.split(",") if g.strip()]
-    if not isinstance(games, list):
-        games = []
-
-    # Resolve player_uuid early (match-only, no creation)
-    matched_player_uuid = None
-    if CANONICAL_PLAYER_ID_ENABLED:
-        try:
-            matched_player_uuid = _find_player_uuid(tag, payload.get("email"))
-        except Exception as exc:
-            logger.warning(f"⚠️ Player UUID lookup failed (non-blocking): {exc}")
-
-    fields: Dict[str, Any] = {
-        "event_slug": event_slug,
-        "name": payload.get("name"),
-        "tag": payload.get("tag"),
-        "email": payload.get("email"),
-        "telephone": payload.get("telephone"),
-        "status": payload.get("status") or "Pending",
-        "member": bool(payload.get("member", False)),
-        "startgg": bool(payload.get("startgg", False)),
-        "is_guest": bool(payload.get("is_guest", False)),
-        "payment_valid": bool(payload.get("payment_valid", False)),
-        "payment_amount": payload.get("payment_amount") or 0,
-        "payment_expected": payload.get("payment_expected") or 0,
-        "tournament_games_registered": games,
-        "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
-        "startgg_event_id": payload.get("startgg_event_id"),
-        "external_id": payload.get("external_id"),
-        "added_via": _normalize_added_via(payload.get("added_via")),
-        "player_uuid": matched_player_uuid,
-    }
-
-    normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
-    if normalized_source is not None:
-        fields["acquisition_source"] = normalized_source
-
     with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,))
+            cur.execute(
+                "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,)
+            )
+            existing = None
+            if tag or name:
+                column = "tag" if tag else "name"
+                cur.execute(
+                    f"SELECT record_id FROM active_event_data "
+                    f"WHERE LOWER({column}) = LOWER(%s) AND event_slug = %s "
+                    "ORDER BY created DESC LIMIT 1",
+                    (tag or name, event_slug),
+                )
+                existing = cur.fetchone()
+
+            if existing:
+                checkin_id = existing[0]
+                safe_fields = {}
+                for key in ("name", "email", "telephone"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        safe_fields[key] = value.strip()
+                normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
+                if normalized_source is not None:
+                    safe_fields["acquisition_source"] = normalized_source
+                updated = _update_checkin_with_status(conn, checkin_id, safe_fields)
+                if not updated:
+                    raise RuntimeError("Failed to update existing checkin")
+                return {
+                    "checkin_id": checkin_id,
+                    "record_id": checkin_id,
+                    "event_slug": event_slug,
+                    "created": False,
+                    "player_uuid": updated["fields"].get("player_uuid"),
+                }
+
+            games = payload.get("tournament_games_registered")
+            if isinstance(games, str):
+                games = [g.strip() for g in games.split(",") if g.strip()]
+            if not isinstance(games, list):
+                games = []
+
+            # Resolve player_uuid early (match-only, no creation)
+            matched_player_uuid = None
+            if CANONICAL_PLAYER_ID_ENABLED:
+                try:
+                    matched_player_uuid = _find_player_uuid(tag, payload.get("email"))
+                except Exception as exc:
+                    logger.warning(f"⚠️ Player UUID lookup failed (non-blocking): {exc}")
+
+            fields: Dict[str, Any] = {
+                "event_slug": event_slug,
+                "name": payload.get("name"),
+                "tag": payload.get("tag"),
+                "email": payload.get("email"),
+                "telephone": payload.get("telephone"),
+                "status": payload.get("status") or "Pending",
+                "member": bool(payload.get("member", False)),
+                "startgg": bool(payload.get("startgg", False)),
+                "is_guest": bool(payload.get("is_guest", False)),
+                "payment_valid": bool(payload.get("payment_valid", False)),
+                "payment_amount": payload.get("payment_amount") or 0,
+                "payment_expected": payload.get("payment_expected") or 0,
+                "tournament_games_registered": games,
+                "UUID": payload.get("UUID") or payload.get("checkin_uuid"),
+                "startgg_event_id": payload.get("startgg_event_id"),
+                "external_id": payload.get("external_id"),
+                "added_via": _normalize_added_via(payload.get("added_via")),
+                "player_uuid": matched_player_uuid,
+            }
+
+            normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
+            if normalized_source is not None:
+                fields["acquisition_source"] = normalized_source
+
             cur.execute(
                 "SELECT require_membership, require_payment, require_startgg "
                 "FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1"

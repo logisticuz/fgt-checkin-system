@@ -135,14 +135,20 @@ def test_parallel_orchestrate_submissions_with_case_variants_keep_one_row(
     app_client, pg_db, backend_app, monkeypatch
 ):
     barrier = Barrier(2)
-    original_lookup = postgres.get_checkin_by_tag
+    original_execute = psycopg.Cursor.execute
+    lookups, inserts = [], []
 
-    def simultaneous_initial_lookup(tag, slug):
-        found = original_lookup(tag, slug)
-        barrier.wait(timeout=5)
-        return found
+    def simultaneous_initial_lookup(cursor, query, params=None, **kwargs):
+        result = original_execute(cursor, query, params, **kwargs)
+        if isinstance(query, str):
+            if query.startswith("SELECT record_id FROM active_event_data WHERE LOWER("):
+                lookups.append(params)
+                barrier.wait(timeout=5)
+            elif "INSERT INTO active_event_data" in query:
+                inserts.append(params)
+        return result
 
-    monkeypatch.setattr(postgres, "get_checkin_by_tag", simultaneous_initial_lookup)
+    monkeypatch.setattr(psycopg.Cursor, "execute", simultaneous_initial_lookup)
     payload = make_checkin(tag="Test-Parallel-Tag")
 
     def submit(tag):
@@ -162,6 +168,7 @@ def test_parallel_orchestrate_submissions_with_case_variants_keep_one_row(
     assert all(response.status_code == 200 for response in responses)
     assert len({response.json()["checkin_id"] for response in responses}) == 1
     assert len(pg_db.checkins()) == 1
+    assert len(lookups) == len(inserts) == 2
 
 
 @pytest.mark.db
@@ -177,7 +184,21 @@ def test_conflict_update_preserves_verified_fields_and_uses_canonical_status(pg_
         status="Pending",
         acquisition_source="friend",
     )
-    monkeypatch.setattr(postgres, "get_checkin_by_tag", lambda *args: None)
+    original_execute = psycopg.Cursor.execute
+    lookups, inserts = [], []
+
+    def force_conflict_lookup(cursor, query, params=None, **kwargs):
+        if isinstance(query, str):
+            if query.startswith("SELECT record_id FROM active_event_data WHERE LOWER("):
+                lookups.append(params)
+                return original_execute(
+                    cursor, "SELECT record_id FROM active_event_data WHERE false", **kwargs
+                )
+            if "INSERT INTO active_event_data" in query:
+                inserts.append(params)
+        return original_execute(cursor, query, params, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", force_conflict_lookup)
     result = postgres.begin_checkin(
         row["event_slug"],
         {
@@ -192,6 +213,7 @@ def test_conflict_update_preserves_verified_fields_and_uses_canonical_status(pg_
         },
     )
     assert result["checkin_id"] == row["record_id"]
+    assert len(lookups) == len(inserts) == 1
     stored = pg_db.checkins()[0]
     assert stored["name"] == "Updated Test Player"
     for key in (

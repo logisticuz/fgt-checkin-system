@@ -115,8 +115,18 @@ def test_archive_failure_rolls_back_players_archive_and_active_changes(
     assert {table: table_rows(archive_db, table) for table in before} == before
 
 
-def test_checkin_waits_for_archive_and_survives_as_an_active_row(archive_db, event, monkeypatch):
-    original = archive_db.seed_checkin(event_slug=event)
+@pytest.mark.parametrize("identity", ["new_tag", "existing_tag", "existing_name"])
+def test_checkin_waits_for_archive_and_survives_as_an_active_row(
+    archive_db, event, monkeypatch, identity
+):
+    original = archive_db.seed_checkin(
+        event_slug=event, tag="test-archived", name="Test Archived Player"
+    )
+    payload = {
+        "new_tag": {"name": "Test Late Player", "tag": "test-late"},
+        "existing_tag": {"name": "Test Repeat Player", "tag": "TEST-ARCHIVED"},
+        "existing_name": {"name": "test archived player"},
+    }[identity]
     barrier, release = Barrier(2), Event()
     original_match = postgres._match_or_create_player
 
@@ -130,9 +140,7 @@ def test_checkin_waits_for_archive_and_survives_as_an_active_row(archive_db, eve
         archiving = executor.submit(archive, event, clear_active=True)
         try:
             barrier.wait(timeout=5)
-            incoming = executor.submit(
-                postgres.begin_checkin, event, {"name": "Test Late Player", "tag": "test-late"}
-            )
+            incoming = executor.submit(postgres.begin_checkin, event, payload)
             deadline = time.monotonic() + 5
             with archive_db.pool.connection() as probe:
                 while not probe.execute(
@@ -151,6 +159,8 @@ def test_checkin_waits_for_archive_and_survives_as_an_active_row(archive_db, eve
         assert archiving.result(timeout=10)["archived"] == 1
         new_checkin = incoming.result(timeout=10)
     assert [row["record_id"] for row in archive_db.checkins()] == [new_checkin["checkin_id"]]
+    assert new_checkin["created"] is True
+    assert new_checkin["checkin_id"] != original["record_id"]
     assert [row["source_record_id"] for row in table_rows(archive_db, "event_archive")] == [
         original["record_id"]
     ]
