@@ -123,6 +123,10 @@ def _pg_session():
             if warnings.called:
                 pytest.fail("Application schema migrations emitted a warning")
 
+            from shared.migrate import apply
+
+            apply(pool, migrations_dir=ROOT / "shared" / "migrations")
+
             with pytest.MonkeyPatch.context() as isolation:
                 isolation.setattr(postgres, "DATABASE_URL", url)
                 isolation.setattr(postgres, "_pool", pool)
