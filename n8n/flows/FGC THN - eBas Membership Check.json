@@ -86,7 +86,7 @@
     },
     {
       "parameters": {
-        "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
+        "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: YYYYMMDDXXXX\n- 10 digits: YYMMDDXXXX\n- With dash: YYMMDD-XXXX\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
         "height": 324,
         "width": 340,
         "color": 6
@@ -218,7 +218,11 @@
   "settings": {
     "executionOrder": "v1",
     "callerPolicy": "workflowsFromSameOwner",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
   },
   "staticData": null,
   "meta": null,
@@ -370,7 +374,7 @@
       },
       {
         "parameters": {
-          "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: 199001011234\n- 10 digits: 9001011234\n- With dash: 900101-1234\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
+          "content": "## Personnummer Normalization\n\nSwedish personnummer formats:\n- 12 digits: YYYYMMDDXXXX\n- 10 digits: YYMMDDXXXX\n- With dash: YYMMDD-XXXX\n\nThis node normalizes to 12-digit format.\nUses heuristic: YY > 30 → 19XX, else → 20XX",
           "height": 324,
           "width": 340,
           "color": 6
