@@ -700,6 +700,11 @@ def recompute_active_statuses(event_slug: str) -> int:
         raise ValueError("event_slug is required")
     with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
+            # Serialize the batch with check-in creation's shared event lock.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))",
+                (event_slug,),
+            )
             # Keep the requirement snapshot stable throughout the batch.
             cur.execute(
                 "SELECT id FROM settings WHERE is_active = true ORDER BY id DESC LIMIT 1 FOR SHARE"

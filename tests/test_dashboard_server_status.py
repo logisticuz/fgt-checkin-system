@@ -3,7 +3,12 @@
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, current_thread
+from time import monotonic, sleep
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +17,42 @@ from shared import postgres_api as postgres
 from tests.test_dashboard_row_identity import dashboard, make_row
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def observe_batch_connection(pg_db, monkeypatch):
+    ready, process_ids = Event(), []
+
+    @contextmanager
+    def connection():
+        with pg_db.pool.connection() as conn:
+            if current_thread().name.startswith("t027-recompute"):
+                process_ids.append(conn.info.backend_pid)
+                ready.set()
+            yield conn
+
+    monkeypatch.setattr(
+        postgres, "_get_pool", lambda: SimpleNamespace(connection=connection)
+    )
+    return ready, process_ids
+
+
+def batch_waits_on_advisory_lock(pg_db, ready, process_ids, future):
+    assert ready.wait(3), "Batch did not acquire a test connection"
+    deadline = monotonic() + 3
+    with pg_db.pool.connection() as monitor:
+        while monotonic() < deadline:
+            if future.done():
+                future.result()  # Surface worker failures before classifying completion.
+                return False
+            blocked = monitor.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s "
+                "AND locktype = 'advisory' AND NOT granted)",
+                (process_ids[0],),
+            ).fetchone()[0]
+            if blocked:
+                return True
+            sleep(0.01)
+    pytest.fail("Batch neither completed nor waited on its event lock")
 
 
 @pytest.mark.parametrize("column", ["member", "startgg", "payment_valid"])
@@ -185,6 +226,94 @@ def test_active_status_batch_rolls_back_if_a_row_update_fails(pg_db, monkeypatch
     with pytest.raises(RuntimeError, match="Synthetic second-row failure"):
         postgres.recompute_active_statuses("test-event")
     assert [row["status"] for row in pg_db.checkins()] == ["Ready", "Ready"]
+
+
+@pytest.mark.db
+def test_status_batch_waits_for_shared_event_lock_before_reading_requirements(
+    pg_db, monkeypatch
+):
+    slug = "test-event-" + pg_db.schema
+    settings = pg_db.seed_settings(
+        active_event_slug=slug,
+        require_payment=False,
+        require_membership=False,
+        require_startgg=False,
+    )
+    pg_db.seed_checkin(event_slug=slug, payment_valid=False, status="Ready")
+    ready, process_ids = observe_batch_connection(pg_db, monkeypatch)
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="t027-recompute"
+    ) as executor:
+        with pg_db.pool.connection() as holder, holder.transaction():
+            holder.execute(
+                "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))",
+                (slug,),
+            )
+            future = executor.submit(postgres.recompute_active_statuses, slug)
+            assert batch_waits_on_advisory_lock(pg_db, ready, process_ids, future)
+            # This would time out if the worker locked settings before its event lock.
+            with pg_db.pool.connection() as writer, writer.transaction():
+                writer.execute("SET LOCAL lock_timeout = '2s'")
+                writer.execute(
+                    "UPDATE settings SET require_payment = true WHERE id = %s",
+                    (settings["id"],),
+                )
+        assert future.result(timeout=5) == 1
+    assert pg_db.checkins()[0]["status"] == "Pending"
+
+
+@pytest.mark.db
+@pytest.mark.xfail(strict=False, reason="needs T-026 shared lock")
+def test_requirement_batch_includes_checkin_paused_after_old_status_calculation(
+    pg_db, monkeypatch
+):
+    slug = "test-event-" + pg_db.schema
+    settings = pg_db.seed_settings(
+        active_event_slug=slug,
+        require_payment=False,
+        require_membership=False,
+        require_startgg=False,
+    )
+    pg_db.seed_checkin(event_slug=slug, payment_valid=False, status="Ready")
+    calculated, allow_insert = Event(), Event()
+    original = postgres.compute_checkin_status
+
+    def pause_new_checkin(fields, requirements):
+        result = original(fields, requirements)
+        if fields.get("tag") == "Concurrent synthetic player":
+            assert result["status"] == "Ready"
+            calculated.set()
+            assert allow_insert.wait(10), "Test did not release the paused check-in"
+        return result
+
+    monkeypatch.setattr(postgres, "compute_checkin_status", pause_new_checkin)
+    ready, process_ids = observe_batch_connection(pg_db, monkeypatch)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t027-create") as creator:
+        with ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="t027-recompute"
+        ) as batcher:
+            checkin = creator.submit(
+                postgres.begin_checkin,
+                slug,
+                {"tag": "Concurrent synthetic player", "name": "Synthetic player"},
+            )
+            try:
+                assert calculated.wait(
+                    3
+                ), "New check-in never reached its old-rule status"
+                postgres.update_settings(str(settings["id"]), {"require_payment": True})
+                batch = batcher.submit(postgres.recompute_active_statuses, slug)
+                # Without T-026 this completes first; with the shared lock it waits.
+                batch_waits_on_advisory_lock(pg_db, ready, process_ids, batch)
+            finally:
+                allow_insert.set()
+            created = checkin.result(timeout=5)
+            updated_rows = batch.result(timeout=5)
+    rows = {row["record_id"]: row for row in pg_db.checkins()}
+    stored = rows[created["record_id"]]
+    canonical = original(stored, postgres.get_active_settings())["status"]
+    assert stored["status"] == canonical == "Pending"
+    assert updated_rows == 2
 
 
 def test_failed_requirement_refresh_is_audited_and_does_not_broadcast_success(
