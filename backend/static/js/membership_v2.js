@@ -40,6 +40,7 @@
   const POLL_MAX_MS = Number(section.dataset.pollMaxMs) || 240000;
 
   const params = new URLSearchParams(window.location.search);
+  const CHECKIN_ID = params.get("checkin_id") || null;
 
   // --- Copy -----------------------------------------------------------------------------
   // English only for now; the app-wide Swedish switch comes later (sverok-texts.md).
@@ -79,6 +80,11 @@
     help_failed: "Please ask a TO for help and we'll sort it out together.",
     help_unknown_title: "We couldn't confirm your registration yet",
     help_unknown: "Please don't register again. Ask a TO to check your membership.",
+    reset_button: "Cancel and clear",
+    next_person: "Next person – clear screen",
+    previous_pending:
+      "The previous registration is still being processed. If it was yours, please ask a TO " +
+      "before registering again.",
   };
 
   function t(key, vars) {
@@ -110,7 +116,6 @@
     resend: $("mv2-resend"),
     edit: $("mv2-edit"),
     reset: $("mv2-reset"),
-    resetRow: $("mv2-reset-row"),
     destination: $("mv2-destination"),
     busyText: $("mv2-busy-text"),
     helpHeading: $("mv2-help-heading"),
@@ -148,7 +153,8 @@
     el.codeForm.hidden = name !== "code";
     el.busy.hidden = name !== "busy";
     el.help.hidden = name !== "help";
-    el.resetRow.hidden = name === "busy";
+    // Always available, also while Sverok works (the server finishes on its own).
+    el.reset.textContent = name === "busy" ? t("next_person") : t("reset_button");
   }
 
   function say(region, text) {
@@ -319,7 +325,7 @@
       accepted_privacy: el.privacy.checked === true,
       bylaws_version: legalVersion("bylaws"),
       privacy_version: legalVersion("privacy"),
-      checkin_id: params.get("checkin_id") || null,
+      checkin_id: CHECKIN_ID,
     };
 
     const gen = S.gen;
@@ -406,7 +412,10 @@
     el.resend.disabled = true;
     el.edit.disabled = true;
     // From here the registration may reach Sverok, so a reload must resume, not restart.
-    try { sessionStorage.setItem(ATTEMPT_KEY, S.attemptId); } catch (e) { /* ignore */ }
+    try {
+      sessionStorage.setItem(ATTEMPT_KEY,
+        JSON.stringify({ attempt_id: S.attemptId, checkin_id: CHECKIN_ID }));
+    } catch (e) { /* ignore */ }
     S.timers.busyDelay = setTimeout(function () { enterBusy(t("submitting")); }, BUSY_DELAY_MS);
 
     let result;
@@ -511,6 +520,8 @@
   function enterBusy(text) {
     S.busy = true;
     clearAlerts();
+    // The details are already sent; nothing personal needs to stay on screen while waiting.
+    [el.pnr, el.email, el.phone, el.code].forEach(function (input) { input.value = ""; });
     showStep("busy");
     el.busyText.textContent = text; // inside a polite live region
   }
@@ -649,12 +660,16 @@
     bumpIdle();
   }
 
+  // After 90 s without input the screen ALWAYS goes back to a clean start, even while Sverok
+  // is still working: the server finishes on its own, and the generation counter drops any
+  // late answer, so it can never land on the next person's screen.
   function bumpIdle() {
     clearTimer("idle");
     S.timers.idle = setTimeout(function () {
-      // Never wipe while Sverok is working: the person is waiting, not gone.
-      if (S.busy || S.inFlight) { bumpIdle(); return; }
+      const wasPending = S.busy || S.inFlight;
       reset();
+      // Neutral (no personal data): tells a returning person not to register twice.
+      if (wasPending) showInfo(t("previous_pending"));
     }, IDLE_MS);
   }
 
@@ -662,6 +677,9 @@
     reset();
     if (!section.classList.contains("hidden")) el.pnr.focus();
   });
+  // Leaving via the page's "Back to start" link ends this person's attempt for the tab.
+  const backLink = document.getElementById("back-link");
+  if (backLink) backLink.addEventListener("click", forgetAttempt);
   ["pointerdown", "keydown", "input", "touchstart", "wheel"].forEach(function (type) {
     document.addEventListener(type, bumpIdle, { passive: true, capture: true });
   });
@@ -673,13 +691,19 @@
   bumpIdle();
 
   // A reload during a pending registration resumes the status check instead of offering
-  // the form again (which could create a duplicate). Runs after register.html's initUI.
+  // the form again (which could create a duplicate). The stored attempt is bound to the
+  // check-in it was started for: it resumes only on a page for that same, known check-in,
+  // so a later person in the same tab can never inherit someone else's result.
+  // Runs after register.html's initUI.
   document.addEventListener("DOMContentLoaded", function () {
     let pending = null;
-    try { pending = sessionStorage.getItem(ATTEMPT_KEY); } catch (e) { pending = null; }
-    if (!pending) return;
-    if (section.classList.contains("hidden")) { forgetAttempt(); return; }
-    S.attemptId = pending;
+    try { pending = JSON.parse(sessionStorage.getItem(ATTEMPT_KEY) || "null"); } catch (e) {
+      pending = null;
+    }
+    const sameCheckin = !!(pending && pending.attempt_id && CHECKIN_ID &&
+      pending.checkin_id === CHECKIN_ID);
+    if (!sameCheckin || section.classList.contains("hidden")) { forgetAttempt(); return; }
+    S.attemptId = pending.attempt_id;
     startPolling(t("checking"));
   });
 

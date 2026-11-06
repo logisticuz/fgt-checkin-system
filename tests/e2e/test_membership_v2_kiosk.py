@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e.conftest import DESKTOP, TABLET, synthetic_personnummer
+from tests.e2e.conftest import DESKTOP, REGISTER_URL, TABLET, synthetic_personnummer
 
 pytestmark = pytest.mark.e2e
 
@@ -20,6 +20,8 @@ CODE_SENT = {
 }
 SUBMITTED = {"ok": True, "state": "submitted"}
 UNKNOWN = {"ok": True, "state": "outcome_unknown"}
+URL_A = REGISTER_URL + "&checkin_id=checkin-A"
+URL_B = REGISTER_URL + "&checkin_id=checkin-B"
 
 
 def wait_for(page, condition, timeout_ms=3000):
@@ -55,6 +57,19 @@ def enter_code(page, code="123456"):
 
 def text(page, selector):
     return page.locator(selector).text_content().strip()
+
+
+def stored_attempt(page):
+    return page.evaluate("JSON.parse(sessionStorage.getItem('mv2_attempt_id') || 'null')")
+
+
+def to_pending(page, api):
+    """Get to the outcome_unknown polling state (Sverok result not known yet)."""
+    to_code_step(page, api)
+    api.queue("verify", UNKNOWN)
+    api.queue("status", UNKNOWN)
+    enter_code(page)
+    page.wait_for_selector("#mv2-step-busy:not([hidden])")
 
 
 def test_happy_path_continues_check_in(kiosk):
@@ -137,7 +152,11 @@ def test_verify_locks_on_first_click(kiosk):
     wait_for(page, lambda: len(api.calls["verify"]) >= 1)
     page.wait_for_selector("#mv2-step-busy:not([hidden])")  # after the short delay
     assert text(page, "#mv2-busy-text") == "Registering with Sverok – this can take up to 3 minutes"
-    assert not page.is_visible("#mv2-reset")  # no "cancel" while Sverok is working
+    # A next-person action stays available while Sverok works; nothing personal stays on screen.
+    assert text(page, "#mv2-reset") == "Next person – clear screen"
+    assert page.is_visible("#mv2-reset")
+    for selector in ("#mv2-pnr", "#mv2-email", "#mv2-phone", "#mv2-code"):
+        assert page.input_value(selector) == "", selector
     assert len(api.calls["verify"]) == 1
 
     api.queue("verify", SUBMITTED)
@@ -221,7 +240,7 @@ def test_outcome_unknown_polls_until_submitted(kiosk):
     enter_code(page)
     page.wait_for_selector("#mv2-step-busy:not([hidden])")
     assert text(page, "#mv2-busy-text") == "We're checking your registration…"
-    assert page.evaluate("sessionStorage.getItem('mv2_attempt_id')") == ATTEMPT
+    assert stored_attempt(page) == {"attempt_id": ATTEMPT, "checkin_id": None}
 
     page.clock.run_for(4_900)
     assert api.calls["status"] == []
@@ -233,14 +252,12 @@ def test_outcome_unknown_polls_until_submitted(kiosk):
     assert page.evaluate("sessionStorage.getItem('mv2_attempt_id')") is None
 
 
-def test_outcome_unknown_gives_up_after_four_minutes_without_idle_reset(kiosk):
+def test_outcome_unknown_gives_up_after_four_minutes(kiosk):
     page, api = kiosk(clock=True)
-    to_code_step(page, api)
-    api.queue("verify", UNKNOWN)
-    api.queue("status", UNKNOWN)
-    enter_code(page)
-    page.wait_for_selector("#mv2-step-busy:not([hidden])")
-    for _ in range(48):  # 48 x 5 s = 240 s; the 90 s idle timer must not wipe meanwhile
+    to_pending(page, api)
+    for step in range(48):  # 48 x 5 s = 240 s
+        if step % 12 == 0:
+            page.dispatch_event("body", "pointerdown")  # the person is still there
         calls = len(api.calls["status"])
         page.clock.run_for(5_000)
         wait_for(
@@ -254,16 +271,82 @@ def test_outcome_unknown_gives_up_after_four_minutes_without_idle_reset(kiosk):
     assert 45 <= len(api.calls["status"]) <= 49
 
 
-def test_reload_during_pending_registration_resumes_polling(kiosk):
-    page, api = kiosk()
+def test_idle_while_polling_clears_screen_and_stops_tracking(kiosk):
+    page, api = kiosk(clock=True, url=URL_A)
+    to_pending(page, api)
+    assert stored_attempt(page) == {"attempt_id": ATTEMPT, "checkin_id": "checkin-A"}
+    page.clock.run_for(91_000)
+
+    page.wait_for_selector("#mv2-step-form:not([hidden])")
+    for selector in ("#mv2-pnr", "#mv2-email", "#mv2-phone", "#mv2-code"):
+        assert page.input_value(selector) == "", selector
+    assert stored_attempt(page) is None
+    assert "previous registration is still being processed" in text(page, "#mv2-status")
+    polls = len(api.calls["status"])
+    api.queue("status", SUBMITTED)
+    page.clock.run_for(30_000)
+    page.wait_for_timeout(100)
+    assert len(api.calls["status"]) == polls  # no more polling for the previous person
+    assert page.is_visible("#mv2-step-form")
+
+
+def test_idle_during_in_flight_verify_drops_the_late_answer(kiosk):
+    page, api = kiosk(clock=True, url=URL_A)
     to_code_step(page, api)
-    api.queue("verify", UNKNOWN)
-    api.queue("status", UNKNOWN)
+    api.hold.add("verify")
     enter_code(page)
-    page.wait_for_selector("#mv2-step-busy:not([hidden])")
+    wait_for(page, lambda: len(api.calls["verify"]) == 1)
+    page.clock.run_for(91_000)
+    page.wait_for_selector("#mv2-step-form:not([hidden])")
+    assert page.input_value("#mv2-pnr") == ""
+
+    api.queue("verify", SUBMITTED)
+    api.release()  # the server finished for the previous person
+    page.wait_for_timeout(200)
+    assert page.is_visible("#mv2-step-form")
+    assert not page.is_visible("#section-final")
+    assert "You're a member" not in text(page, "#messages")
+
+
+def test_same_person_reload_resumes_polling(kiosk):
+    page, api = kiosk(url=URL_A)
+    to_pending(page, api)
     page.reload()
     page.wait_for_selector("#mv2-step-busy:not([hidden])")
     assert not page.is_visible("#mv2-step-form")
+    assert stored_attempt(page) == {"attempt_id": ATTEMPT, "checkin_id": "checkin-A"}
+
+
+def test_reload_without_a_checkin_id_does_not_resume(kiosk):
+    page, api = kiosk()
+    to_pending(page, api)
+    page.reload()
+    page.wait_for_selector("#mv2-step-form:not([hidden])")
+    assert stored_attempt(page) is None
+
+
+@pytest.mark.parametrize("via_back_link", [True, False], ids=["back-link", "direct"])
+def test_next_person_in_same_tab_never_inherits_a_pending_attempt(kiosk, via_back_link):
+    page, api = kiosk(url=URL_A)
+    to_pending(page, api)
+    if via_back_link:
+        # Run the link's click handlers but stay on the page (the mock has no "/" route).
+        page.evaluate(
+            "const a = document.getElementById('back-link');"
+            "a.addEventListener('click', e => e.preventDefault());"
+            "a.click();"
+        )
+    polls = len(api.calls["status"])
+    api.queue("status", SUBMITTED)  # A's registration completes meanwhile
+
+    page.goto(URL_B)  # person B's check-in, same tab
+    page.wait_for_selector("#mv2-step-form:not([hidden])")
+    page.wait_for_timeout(5_500)  # longer than one poll interval
+    assert len(api.calls["status"]) == polls
+    assert stored_attempt(page) is None
+    assert page.is_visible("#section-ebas")
+    assert not page.is_visible("#section-final")
+    assert page.evaluate("typeof state === 'object' && state.needsEbas") is True
 
 
 def test_resend_countdown(kiosk):
