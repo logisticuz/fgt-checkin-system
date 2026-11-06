@@ -127,6 +127,20 @@ def action_sort_key(action: str) -> tuple:
     return (group_rank, label.lower())
 
 
+def _find_checkin_row(table_data, row_id):
+    """Resolve a Dash row identity without falling back to its displayed position."""
+    if row_id is None:
+        return None
+    return next(
+        (
+            row
+            for row in table_data or []
+            if row.get("id") == row_id and row.get("record_id") == row_id
+        ),
+        None,
+    )
+
+
 def register_callbacks(app):
     """
     Register all Dash callbacks for:
@@ -543,8 +557,12 @@ def register_callbacks(app):
             else:
                 count_text = f"{filtered_count} of {total_count} players"
 
+            table_rows = df_filtered.to_dict("records")
+            for row in table_rows:
+                row["id"] = row.get("record_id")
+
             return (
-                df_filtered.to_dict("records"),
+                table_rows,
                 cols,
                 count_text,
                 coverage_text,
@@ -4611,6 +4629,7 @@ def register_callbacks(app):
     @app.callback(
         Output("payment-update-feedback", "children", allow_duplicate=True),
         Output("checkins-table", "data", allow_duplicate=True),
+        Output("checkins-table", "active_cell"),
         Input("checkins-table", "active_cell"),
         State("checkins-table", "data"),
         State("event-dropdown", "value"),
@@ -4622,22 +4641,28 @@ def register_callbacks(app):
         When TO clicks on a cell in toggleable columns (payment_valid, startgg, is_guest), toggle it.
         If all required fields are OK, set status to Ready.
         """
-        if not active_cell or not table_data:
-            return no_update, no_update
+        if not active_cell:
+            return no_update, no_update, no_update
 
-        row_idx = active_cell.get("row")
         col_id = active_cell.get("column_id")
 
         # Only trigger on toggleable columns (is_guest is set automatically by system)
         # member is toggled manually or set by eBas Register flow
         toggleable_columns = ["payment_valid", "startgg", "member"]
         if col_id not in toggleable_columns:
-            return no_update, no_update
+            return no_update, no_update, no_update
 
-        if row_idx is None or row_idx >= len(table_data):
-            return no_update, no_update
+        row = _find_checkin_row(table_data, active_cell.get("row_id"))
+        if row is None:
+            return (
+                html.Span(
+                    "⚠️ Selected player is no longer in the table. Refresh and select again.",
+                    style={"color": "#f59e0b"},
+                ),
+                no_update,
+                None,
+            )
 
-        row = table_data[row_idx]
         record_id = row.get("record_id")
         player_name = row.get("name") or row.get("tag") or "Unknown"
 
@@ -4645,6 +4670,7 @@ def register_callbacks(app):
             return (
                 html.Span("❌ No record_id found for this player.", style={"color": "#ef4444"}),
                 no_update,
+                None,
             )
 
         # Helper to check if value is truthy
@@ -4726,14 +4752,14 @@ def register_callbacks(app):
 
         if result:
             # Update local table data for immediate feedback
-            table_data[row_idx][col_id] = "✓" if new_val else "✗"
+            row[col_id] = "✓" if new_val else "✗"
             if "is_guest" in update_data:
-                table_data[row_idx]["is_guest"] = "✓" if bool(update_data["is_guest"]) else "✗"
+                row["is_guest"] = "✓" if bool(update_data["is_guest"]) else "✗"
             if "payment_amount" in update_data:
-                table_data[row_idx]["payment_amount"] = update_data["payment_amount"]
+                row["payment_amount"] = update_data["payment_amount"]
             if "payment_expected" in update_data:
-                table_data[row_idx]["payment_expected"] = update_data["payment_expected"]
-            table_data[row_idx]["status"] = new_status
+                row["payment_expected"] = update_data["payment_expected"]
+            row["status"] = new_status
 
             # Broadcast SSE to notify status pages
             try:
@@ -4791,10 +4817,14 @@ def register_callbacks(app):
             except Exception as e:
                 logger.warning(f"Failed to write audit log for toggle: {e}")
 
-            return feedback, table_data
+            return feedback, table_data, None
         else:
             logger.error(f"Failed to update {col_id} for {player_name}")
-            return html.Span(f"❌ Failed to update {col_id}", style={"color": "#ef4444"}), no_update
+            return (
+                html.Span(f"❌ Failed to update {col_id}", style={"color": "#ef4444"}),
+                no_update,
+                None,
+            )
 
     @app.callback(
         Output("payment-update-feedback", "children", allow_duplicate=True),
@@ -5123,47 +5153,115 @@ def register_callbacks(app):
     # Re-check Start.gg - re-validate registration + sync games for selected player
     # -------------------------------------------------------------------------
     @app.callback(
+        Output("confirm-recheck-dialog", "displayed"),
+        Output("confirm-recheck-dialog", "message"),
+        Output("pending-recheck-row-ids", "data"),
         Output("recheck-startgg-feedback", "children", allow_duplicate=True),
         Input("btn-recheck-startgg", "n_clicks"),
-        State("checkins-table", "selected_rows"),
+        State("checkins-table", "selected_row_ids"),
+        State("checkins-table", "data"),
+        prevent_initial_call=True,
+    )
+    def show_recheck_confirmation(n_clicks, selected_row_ids, table_data):
+        """Capture the selected identity before opening the re-check dialog."""
+        if not n_clicks:
+            return False, "", [], no_update
+
+        if not selected_row_ids:
+            return (
+                False,
+                "",
+                [],
+                html.Span("Select a player row first.", style={"color": "#f59e0b"}),
+            )
+
+        if len(selected_row_ids) > 1:
+            return (
+                False,
+                "",
+                [],
+                html.Span(
+                    "Select only one player at a time for re-check.", style={"color": "#f59e0b"}
+                ),
+            )
+
+        row = _find_checkin_row(table_data, selected_row_ids[0])
+        if row is None:
+            return (
+                False,
+                "",
+                [],
+                html.Span(
+                    "Selected player is no longer in the table. Refresh and select again.",
+                    style={"color": "#f59e0b"},
+                ),
+            )
+
+        player_name = row.get("name") or row.get("tag") or "Unknown"
+        return (
+            True,
+            f"Re-check Start.gg registration and sync games for {player_name}?",
+            [row["record_id"]],
+            no_update,
+        )
+
+    @app.callback(
+        Output("recheck-startgg-feedback", "children", allow_duplicate=True),
+        Output("pending-recheck-row-ids", "data", allow_duplicate=True),
+        Input("confirm-recheck-dialog", "submit_n_clicks"),
+        State("pending-recheck-row-ids", "data"),
         State("checkins-table", "data"),
         State("event-dropdown", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def recheck_startgg(n_clicks, selected_rows, table_data, selected_slug, auth_state):
+    def recheck_startgg(n_clicks, captured_row_ids, table_data, selected_slug, auth_state):
         """Re-validate Start.gg registration and sync games for a selected player."""
         if not n_clicks:
-            return no_update
+            return no_update, no_update
 
-        if not selected_rows or len(selected_rows) == 0:
-            return html.Span(
-                "Select a player row first.",
-                style={"color": "#f59e0b"},
+        if not captured_row_ids:
+            return (
+                html.Span(
+                    "Select a player row first.",
+                    style={"color": "#f59e0b"},
+                ),
+                [],
             )
 
-        if len(selected_rows) > 1:
-            return html.Span(
-                "Select only one player at a time for re-check.",
-                style={"color": "#f59e0b"},
+        if len(captured_row_ids) > 1:
+            return (
+                html.Span(
+                    "Select only one player at a time for re-check.",
+                    style={"color": "#f59e0b"},
+                ),
+                [],
             )
 
-        row_idx = selected_rows[0]
-        if not table_data or row_idx >= len(table_data):
-            return no_update
+        row = _find_checkin_row(table_data, captured_row_ids[0])
+        if row is None:
+            return (
+                html.Span(
+                    "Selected player is no longer in the table. Refresh and select again.",
+                    style={"color": "#f59e0b"},
+                ),
+                [],
+            )
 
-        row = table_data[row_idx]
         record_id = row.get("record_id")
         player_name = row.get("name") or row.get("tag") or "Unknown"
         player_tag = row.get("tag") or ""
 
         if not record_id:
-            return html.Span("No record_id for selected row.", style={"color": "#ef4444"})
+            return html.Span("No record_id for selected row.", style={"color": "#ef4444"}), []
 
         if not player_tag:
-            return html.Span(
-                f"{player_name}: no tag set — add a tag first.",
-                style={"color": "#f59e0b"},
+            return (
+                html.Span(
+                    f"{player_name}: no tag set — add a tag first.",
+                    style={"color": "#f59e0b"},
+                ),
+                [],
             )
 
         # Save previous state for audit
@@ -5183,9 +5281,12 @@ def register_callbacks(app):
                     if resp.headers.get("content-type", "").startswith("application/json")
                     else resp.text[:200]
                 )
-                return html.Span(
-                    f"Re-check failed: {error_detail}",
-                    style={"color": "#ef4444"},
+                return (
+                    html.Span(
+                        f"Re-check failed: {error_detail}",
+                        style={"color": "#ef4444"},
+                    ),
+                    [],
                 )
 
             data = resp.json()
@@ -5222,26 +5323,38 @@ def register_callbacks(app):
                 logger.warning(f"Failed to write audit log for recheck: {e}")
 
             if startgg:
-                return html.Span(
-                    f"Re-checked {player_name}: Start.gg verified, Games: {events_str}, Status: {status}",
-                    style={"color": "#10b981"},
+                return (
+                    html.Span(
+                        f"Re-checked {player_name}: Start.gg verified, Games: {events_str}, Status: {status}",
+                        style={"color": "#10b981"},
+                    ),
+                    [],
                 )
             else:
-                return html.Span(
-                    f"Re-checked {player_name}: not found on Start.gg, Status: {status}",
-                    style={"color": "#f59e0b"},
+                return (
+                    html.Span(
+                        f"Re-checked {player_name}: not found on Start.gg, Status: {status}",
+                        style={"color": "#f59e0b"},
+                    ),
+                    [],
                 )
 
         except requests.exceptions.Timeout:
-            return html.Span(
-                "Re-check timed out — Start.gg or n8n may be slow. Try again.",
-                style={"color": "#ef4444"},
+            return (
+                html.Span(
+                    "Re-check timed out — Start.gg or n8n may be slow. Try again.",
+                    style={"color": "#ef4444"},
+                ),
+                [],
             )
         except Exception as e:
             logger.exception(f"Re-check Start.gg failed for '{player_name}': {e}")
-            return html.Span(
-                f"Re-check failed: {e}",
-                style={"color": "#ef4444"},
+            return (
+                html.Span(
+                    f"Re-check failed: {e}",
+                    style={"color": "#ef4444"},
+                ),
+                [],
             )
 
     # -------------------------------------------------------------------------
@@ -5326,14 +5439,15 @@ def register_callbacks(app):
         Output("confirm-delete-dialog", "displayed"),
         Output("confirm-delete-dialog", "message"),
         Output("delete-feedback", "children", allow_duplicate=True),
+        Output("pending-delete-row-ids", "data"),
         Input("btn-delete-selected", "n_clicks"),
-        State("checkins-table", "selected_rows"),
+        State("checkins-table", "selected_row_ids"),
         State("checkins-table", "data"),
         prevent_initial_call=True,
     )
-    def show_delete_confirmation(n_clicks, selected_rows, table_data):
+    def show_delete_confirmation(n_clicks, selected_row_ids, table_data):
         """Show confirmation dialog before deleting player(s)."""
-        if not n_clicks or not selected_rows or not table_data:
+        if not n_clicks or not selected_row_ids or not table_data:
             return (
                 False,
                 "",
@@ -5342,24 +5456,35 @@ def register_callbacks(app):
                     if n_clicks
                     else no_update
                 ),
+                [],
             )
 
         # Build list of names to delete
         names = []
-        for row_idx in selected_rows:
-            if row_idx is not None and row_idx < len(table_data):
-                row = table_data[row_idx]
-                player_name = row.get("name") or row.get("tag") or "Unknown"
-                player_tag = row.get("tag") or ""
-                display_name = (
-                    f"{player_name} ({player_tag})"
-                    if player_tag and player_tag != player_name
-                    else player_name
+        captured_row_ids = list(dict.fromkeys(selected_row_ids))
+        for row_id in captured_row_ids:
+            row = _find_checkin_row(table_data, row_id)
+            if row is None:
+                return (
+                    False,
+                    "",
+                    html.Span(
+                        "⚠️ Selected player is no longer in the table. Refresh and select again.",
+                        style={"color": "#f59e0b"},
+                    ),
+                    [],
                 )
-                names.append(display_name)
+            player_name = row.get("name") or row.get("tag") or "Unknown"
+            player_tag = row.get("tag") or ""
+            display_name = (
+                f"{player_name} ({player_tag})"
+                if player_tag and player_tag != player_name
+                else player_name
+            )
+            names.append(display_name)
 
         if not names:
-            return False, "", html.Span("⚠️ No row selected.", style={"color": "#f59e0b"})
+            return False, "", html.Span("⚠️ No row selected.", style={"color": "#f59e0b"}), []
 
         if len(names) == 1:
             message = (
@@ -5372,7 +5497,7 @@ def register_callbacks(app):
                 + "\n\nThis action cannot be undone."
             )
 
-        return True, message, no_update
+        return True, message, no_update, captured_row_ids
 
     # -------------------------------------------------------------------------
     # Delete selected player - Step 2: Execute delete after confirmation
@@ -5380,29 +5505,33 @@ def register_callbacks(app):
     @app.callback(
         Output("delete-feedback", "children"),
         Output("checkins-table", "data", allow_duplicate=True),
+        Output("pending-delete-row-ids", "data", allow_duplicate=True),
         Input("confirm-delete-dialog", "submit_n_clicks"),
-        State("checkins-table", "selected_rows"),
+        State("pending-delete-row-ids", "data"),
         State("checkins-table", "data"),
         State("event-dropdown", "value"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
     def delete_selected_player(
-        submit_n_clicks, selected_rows, table_data, selected_slug, auth_state
+        submit_n_clicks, captured_row_ids, table_data, selected_slug, auth_state
     ):
         """Delete the selected player(s) after confirmation."""
-        if not submit_n_clicks or not selected_rows or not table_data:
-            return no_update, no_update
+        if not submit_n_clicks:
+            return no_update, no_update, no_update
+        if not captured_row_ids:
+            return no_update, no_update, []
 
         deleted_names = []
         failed_names = []
         rows_to_remove = set()
 
-        for row_idx in selected_rows:
-            if row_idx is None or row_idx >= len(table_data):
+        for row_id in dict.fromkeys(captured_row_ids):
+            row = _find_checkin_row(table_data, row_id)
+            if row is None:
+                failed_names.append("Selected player is no longer in the table")
                 continue
 
-            row = table_data[row_idx]
             record_id = row.get("record_id")
             player_name = row.get("name") or row.get("tag") or "Unknown"
 
@@ -5413,7 +5542,7 @@ def register_callbacks(app):
             # Delete from database
             if delete_checkin(record_id):
                 deleted_names.append(player_name)
-                rows_to_remove.add(row_idx)
+                rows_to_remove.add(record_id)
 
                 # Audit log for manual admin deletion
                 try:
@@ -5436,7 +5565,7 @@ def register_callbacks(app):
                 failed_names.append(player_name)
 
         # Remove deleted rows from table data
-        table_data = [r for i, r in enumerate(table_data) if i not in rows_to_remove]
+        table_data = [r for r in table_data or [] if r.get("id") not in rows_to_remove]
 
         # Build feedback message
         if deleted_names and not failed_names:
@@ -5458,7 +5587,7 @@ def register_callbacks(app):
         else:
             feedback = html.Span("⚠️ No rows to delete", style={"color": "#f59e0b"})
 
-        return feedback, table_data
+        return feedback, table_data, []
 
     # -------------------------------------------------------------------------
     # Export Guests CSV - download guest players for bulk Start.gg import
