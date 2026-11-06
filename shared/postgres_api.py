@@ -53,6 +53,12 @@ def _get_pool():
         )
         logger.info("✅ Postgres connection pool initialized")
         _run_migrations(_pool)
+        from shared.migrate import apply_if_enabled
+        try:
+            apply_if_enabled(_pool)
+        except Exception:
+            _pool = None
+            raise
     return _pool
 
 
