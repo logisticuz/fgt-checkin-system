@@ -144,7 +144,10 @@ def test_migrations_are_available_in_shared_only_container_layout(tmp_path, serv
     packaged = runpy.run_path(str(shared / "migrate.py"))
     assert not (shared.parent / "db").exists()
     files = packaged["_load_migrations"](packaged["MIGRATIONS_DIR"])
-    assert [migration.filename for migration in files] == ["000_baseline.sql"]
+    names = [migration.filename for migration in files]
+    # The baseline must ship and sort first; later track migrations (001_, 002_ …) may follow.
+    assert names[0] == "000_baseline.sql"
+    assert names == sorted(names)
 
 
 def test_environment_overrides_migration_directory(monkeypatch, tmp_path):
@@ -371,9 +374,11 @@ def test_destructive_override_is_applied_and_recorded(pg_db, tmp_path, caplog):
         assert connection.execute("SELECT to_regclass('migration_override')").fetchone()[0] is None
 
 
-def test_baseline_records_a_noop(pg_db):
-    assert migrate.apply(pg_db.pool) == ["000_baseline.sql"]
-    states = migrate.status(pg_db.pool)
+def test_baseline_records_a_noop(pg_db, tmp_path):
+    # Baseline-only directory, so later packaged migrations don't change this test's meaning.
+    shutil.copy(migrate.MIGRATIONS_DIR / "000_baseline.sql", tmp_path / "000_baseline.sql")
+    assert migrate.apply(pg_db.pool, tmp_path) == ["000_baseline.sql"]
+    states = migrate.status(pg_db.pool, tmp_path)
     assert len(states) == 1
     assert states[0].filename == "000_baseline.sql"
     assert states[0].applied_at is not None
