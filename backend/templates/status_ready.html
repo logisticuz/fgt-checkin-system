@@ -285,6 +285,19 @@
       <a href="/register?name={{ name | urlencode }}&tag={{ tag | urlencode }}&event={{ event_slug | urlencode }}&membership_only=true" class="support-link">
         Join as Member →
       </a>
+      <script>
+        // The status route doesn't pass checkin_id to the template yet, so carry the opaque id
+        // from this page's URL into the membership link.
+        (function () {
+          const checkinId = new URLSearchParams(window.location.search).get("checkin_id");
+          const link = document.querySelector("a.support-link");
+          if (!checkinId || !link) return;
+          // Append only: the server-rendered params stay byte-for-byte as they were.
+          link.setAttribute(
+            "href", link.getAttribute("href") + "&checkin_id=" + encodeURIComponent(checkinId)
+          );
+        })();
+      </script>
     </div>
     {% endif %}
 

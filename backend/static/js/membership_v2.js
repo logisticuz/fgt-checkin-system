@@ -615,9 +615,12 @@
 
     if (membershipOnly) {
       const name = (typeof state === "object" && state && state.name) || params.get("name") || "";
-      const kiosk = sessionStorage.getItem("kioskMode") === "true" ? "?kiosk=true" : "";
+      const qs = [
+        sessionStorage.getItem("kioskMode") === "true" ? "kiosk=true" : "",
+        CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : "",
+      ].filter(Boolean).join("&");
       setTimeout(function () {
-        window.location.href = "/status/" + encodeURIComponent(name) + kiosk;
+        window.location.href = "/status/" + encodeURIComponent(name) + (qs ? "?" + qs : "");
       }, 2000);
       return;
     }
