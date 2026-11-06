@@ -20,6 +20,8 @@ import html as html_mod
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from starlette.middleware.wsgi import WSGIMiddleware
+from starlette.concurrency import run_in_threadpool
+from psycopg import Error as DatabaseError
 
 from app import app as dash_app
 from auth import (
@@ -270,6 +272,33 @@ def _render_dashboard_landing_page(login_url: str) -> str:
     """
 
 
+def _database_unavailable_response(request: Request, error: Exception):
+    """One redacted log and a retryable response, without database exception values."""
+    error_id = uuid.uuid4().hex[:8]
+    safe_error = RuntimeError(f"{type(error).__name__}: database details redacted")
+    logger.error(
+        "Dashboard database unavailable log_id=%s",
+        error_id,
+        exc_info=(RuntimeError, safe_error, error.__traceback__),
+    )
+    headers = {"Retry-After": "10"}
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            {"error": "The admin panel cannot reach the database right now.", "log_id": error_id},
+            status_code=503,
+            headers=headers,
+        )
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta http-equiv='refresh' content='10'></head><body>"
+        "<h1>Admin panel temporarily unavailable</h1>"
+        "<p>The admin panel can't reach the database right now. Retrying in 10 s…</p>"
+        f"<p>Reference: {error_id}</p></body></html>",
+        status_code=503,
+        headers=headers,
+    )
+
+
 @app.middleware("http")
 async def require_dashboard_auth(request: Request, call_next):
     """Require authenticated session for dashboard pages and APIs."""
@@ -278,42 +307,58 @@ async def require_dashboard_auth(request: Request, call_next):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
 
     # Public routes
-    if path in {"/auth/login", "/auth/callback", "/auth/callback/finalize", "/health"} or path.startswith("/assets/"):
+    if path in {
+        "/auth/login",
+        "/auth/callback",
+        "/auth/callback/finalize",
+        "/health",
+    } or path.startswith("/assets/"):
         return await call_next(request)
 
-    # Selection route requires session but no active event yet
-    if path in {"/auth/select-event", "/auth/select-event/save", "/auth/logout", "/auth/me"}:
+    try:
+        # Selection route requires session but no active event yet
+        if path in {"/auth/select-event", "/auth/select-event/save", "/auth/logout", "/auth/me"}:
+            session_id = request.cookies.get(SESSION_COOKIE_NAME)
+            session_data = await run_in_threadpool(get_session, session_id) if session_id else None
+            if not session_data:
+                login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
+                return RedirectResponse(url=login_path, status_code=302)
+            await run_in_threadpool(update_session_activity, session_id)
+            return await call_next(request)
+
         session_id = request.cookies.get(SESSION_COOKIE_NAME)
-        session_data = get_session(session_id) if session_id else None
+        session_data = await run_in_threadpool(get_session, session_id) if session_id else None
+
         if not session_data:
             login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
+            # Nice UX on dashboard root: show a landing page instead of instant redirect.
+            if path == "/":
+                return HTMLResponse(_render_dashboard_landing_page(login_path), status_code=200)
             return RedirectResponse(url=login_path, status_code=302)
-        update_session_activity(session_id)
+
+        # No active event? Redirect browser navigation to select-event page.
+        # Skip Dash internal paths (/_dash-*) to avoid redirect loops — Dash
+        # AJAX callbacks must be allowed through even without an active slug.
+        if (
+            not await run_in_threadpool(get_active_slug)
+            and not path.startswith("/_dash-")
+            and path
+            not in {
+                "/auth/select-event",
+                "/auth/select-event/save",
+                "/auth/logout",
+                "/auth/me",
+                "/_favicon.ico",
+            }
+        ):
+            select_path = "/auth/select-event" if IS_PROD else "/admin/auth/select-event"
+            return RedirectResponse(url=select_path, status_code=302)
+
+        await run_in_threadpool(update_session_activity, session_id)
         return await call_next(request)
 
-    session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    session_data = get_session(session_id) if session_id else None
-
-    if not session_data:
-        login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
-        # Nice UX on dashboard root: show a landing page instead of instant redirect.
-        if path == "/":
-            return HTMLResponse(_render_dashboard_landing_page(login_path), status_code=200)
-        return RedirectResponse(url=login_path, status_code=302)
-
-    # No active event? Redirect browser navigation to select-event page.
-    # Skip Dash internal paths (/_dash-*) to avoid redirect loops — Dash
-    # AJAX callbacks must be allowed through even without an active slug.
-    if (
-        not get_active_slug()
-        and not path.startswith("/_dash-")
-        and path not in {"/auth/select-event", "/auth/select-event/save", "/auth/logout", "/auth/me", "/_favicon.ico"}
-    ):
-        select_path = "/auth/select-event" if IS_PROD else "/admin/auth/select-event"
-        return RedirectResponse(url=select_path, status_code=302)
-
-    update_session_activity(session_id)
-    return await call_next(request)
+    except (DatabaseError, ConnectionError, TimeoutError) as error:
+        return _database_unavailable_response(request, error)
 
 
 # =============================================
@@ -362,7 +407,7 @@ async def auth_callback_finalize(code: str = ""):
 
     try:
         # Step 1: Exchange code for access token
-        token_data = exchange_code_for_token(code, OAUTH_REDIRECT_URI)
+        token_data = await run_in_threadpool(exchange_code_for_token, code, OAUTH_REDIRECT_URI)
         access_token = token_data.get("access_token")
         if not access_token:
             logger.error(
@@ -371,7 +416,7 @@ async def auth_callback_finalize(code: str = ""):
             return JSONResponse({"error": "Token exchange failed"}, status_code=500)
 
         # Step 2: Get user info from Start.gg
-        user_info = get_startgg_user(access_token)
+        user_info = await run_in_threadpool(get_startgg_user, access_token)
         if not user_info.get("id"):
             logger.error("Could not retrieve user info from Start.gg")
             return JSONResponse({"error": "Could not retrieve user info"}, status_code=500)
@@ -380,10 +425,11 @@ async def auth_callback_finalize(code: str = ""):
         # If no active event (e.g. after archive + clear), let the user
         # through — they'll set one up via Settings > Fetch Event Data,
         # which verifies TO access at that point.
-        active_slug = get_active_slug()
+        active_slug = await run_in_threadpool(get_active_slug)
         if active_slug:
-            if not is_event_admin(access_token, active_slug):
-                _audit_safe(
+            if not await run_in_threadpool(is_event_admin, access_token, active_slug):
+                await run_in_threadpool(
+                    _audit_safe,
                     {
                         "user_id": user_info.get("id", ""),
                         "user_name": _display_name(
@@ -419,11 +465,12 @@ async def auth_callback_finalize(code: str = ""):
                 )
 
         # Step 3: Create session
-        session_id = create_session(user_info, access_token)
+        session_id = await run_in_threadpool(create_session, user_info, access_token)
         if not session_id:
             return JSONResponse({"error": "Session creation failed"}, status_code=500)
 
-        _audit_safe(
+        await run_in_threadpool(
+            _audit_safe,
             {
                 "user_id": user_info.get("id", ""),
                 "user_name": _display_name(
@@ -491,12 +538,13 @@ async def auth_callback_finalize(code: str = ""):
 async def auth_logout(request: Request):
     """Delete session and clear cookie."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    session_data = get_session(session_id) if session_id else None
+    session_data = await run_in_threadpool(get_session, session_id) if session_id else None
     if session_id:
-        delete_session(session_id)
+        await run_in_threadpool(delete_session, session_id)
 
     if session_data:
-        _audit_safe(
+        await run_in_threadpool(
+            _audit_safe,
             {
                 "user_id": session_data.get("user_id", ""),
                 "user_name": _display_name(
@@ -508,7 +556,7 @@ async def auth_logout(request: Request):
             },
             "auth_logout",
             "dashboard_auth",
-            target_event=get_active_slug() or "",
+            target_event=await run_in_threadpool(get_active_slug) or "",
         )
 
     redirect_path = "/" if IS_PROD else "/admin/"
@@ -527,13 +575,13 @@ async def auth_me(request: Request):
     Also touches last_active to keep the session alive.
     """
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    session_data = get_session(session_id) if session_id else None
+    session_data = await run_in_threadpool(get_session, session_id) if session_id else None
 
     if not session_data:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     # Update activity timestamp (once per page load via this endpoint)
-    update_session_activity(session_id)
+    await run_in_threadpool(update_session_activity, session_id)
 
     return {
         "user_id": session_data.get("user_id"),
@@ -550,20 +598,24 @@ async def auth_me(request: Request):
 async def auth_select_event(request: Request):
     """Select active event when no active slug is configured yet."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    session_data = get_session(session_id) if session_id else None
+    session_data = await run_in_threadpool(get_session, session_id) if session_id else None
     if not session_data:
         login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
         return RedirectResponse(url=login_path, status_code=302)
 
-    if get_active_slug():
+    if await run_in_threadpool(get_active_slug):
         return RedirectResponse(url=("/" if IS_PROD else "/admin/"), status_code=302)
 
     access_token = session_data.get("access_token", "")
-    candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
+    candidate_slugs = [
+        s
+        for s in (await run_in_threadpool(get_all_event_slugs) or [])
+        if s and s != "__ALL__"
+    ]
     allowed = []
     verify_unavailable = []
     for slug in candidate_slugs:
-        ok, reason = check_event_admin(access_token, slug)
+        ok, reason = await run_in_threadpool(check_event_admin, access_token, slug)
         if ok is True:
             allowed.append(slug)
         elif ok is None:
@@ -715,7 +767,7 @@ async def auth_select_event(request: Request):
 async def auth_select_event_save(request: Request):
     """Persist selected active event slug from authorized user's allowed list."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    session_data = get_session(session_id) if session_id else None
+    session_data = await run_in_threadpool(get_session, session_id) if session_id else None
     if not session_data:
         login_path = "/auth/login" if IS_PROD else "/admin/auth/login"
         return RedirectResponse(url=login_path, status_code=302)
@@ -757,11 +809,15 @@ async def auth_select_event_save(request: Request):
         """
 
     access_token = session_data.get("access_token", "")
-    candidate_slugs = [s for s in (get_all_event_slugs() or []) if s and s != "__ALL__"]
+    candidate_slugs = [
+        s
+        for s in (await run_in_threadpool(get_all_event_slugs) or [])
+        if s and s != "__ALL__"
+    ]
     allowed = []
     verify_unavailable = False
     for slug in candidate_slugs:
-        ok, reason = check_event_admin(access_token, slug)
+        ok, reason = await run_in_threadpool(check_event_admin, access_token, slug)
         if ok is True:
             allowed.append(slug)
         elif ok is None:
@@ -773,7 +829,9 @@ async def auth_select_event_save(request: Request):
             has_access = True
         else:
             # Fallback for manual slug not present in local candidate list.
-            manual_ok, manual_reason = check_event_admin(access_token, event_slug)
+            manual_ok, manual_reason = await run_in_threadpool(
+                check_event_admin, access_token, event_slug
+            )
             if manual_ok is None:
                 return HTMLResponse(
                     _render_error_page(
@@ -801,7 +859,7 @@ async def auth_select_event_save(request: Request):
             status_code=403,
         )
 
-    settings_with_id = get_active_settings_with_id() or {}
+    settings_with_id = await run_in_threadpool(get_active_settings_with_id) or {}
     record_id = settings_with_id.get("record_id")
     if not record_id:
         return HTMLResponse(_render_error_page("Could not find settings record."), status_code=500)
@@ -821,7 +879,9 @@ async def auth_select_event_save(request: Request):
     # If no archived data exists (new event), fall back to just setting the slug.
     reopened = False
     try:
-        result = reopen_event(event_slug, restore_active=True, user=user_ctx)
+        result = await run_in_threadpool(
+            reopen_event, event_slug, restore_active=True, user=user_ctx
+        )
         reopened = True
         logger.info(
             "Auto-reopened archived event '%s' (%d rows restored)",
@@ -830,11 +890,12 @@ async def auth_select_event_save(request: Request):
         )
     except ValueError:
         # No archived data — new event, just set the slug.
-        ok = update_settings(record_id, {"active_event_slug": event_slug})
+        ok = await run_in_threadpool(update_settings, record_id, {"active_event_slug": event_slug})
         if not ok:
             return HTMLResponse(_render_error_page("Failed to set active event."), status_code=500)
 
-    _audit_safe(
+    await run_in_threadpool(
+        _audit_safe,
         user_ctx,
         "auth_select_active_event",
         "settings",
@@ -878,7 +939,7 @@ def health_check():
 async def startup_cleanup():
     """Clean up expired sessions on container start."""
     try:
-        cleaned = cleanup_expired_sessions()
+        cleaned = await run_in_threadpool(cleanup_expired_sessions)
         if cleaned:
             logger.info(f"Startup: cleaned {cleaned} expired sessions")
     except Exception as e:
