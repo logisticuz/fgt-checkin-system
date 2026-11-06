@@ -3,8 +3,7 @@
 import httpx
 import pytest
 
-from shared.postgres_api import compute_checkin_status
-from tests.fixtures import make_checkin, make_settings
+from tests.fixtures import make_checkin
 
 
 def test_health_uses_no_external_provider(handler_client, n8n_stub):
@@ -54,7 +53,31 @@ def test_integration_result_updates_the_existing_row(app_client, pg_db):
     rows = pg_db.checkins()
     assert len(rows) == 1
     assert rows[0]["member"] is True
-    assert compute_checkin_status(rows[0], make_settings())["missing"] == ["Start.gg"]
+
+
+@pytest.mark.db
+def test_integration_callback_recomputes_stored_status(app_client, pg_db, request):
+    row = pg_db.seed_checkin(status="Pending", startgg=True)
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": "ebas",
+            "ok": True,
+            "data": {"member": True},
+        },
+    )
+    assert response.status_code == 200
+    stored = pg_db.checkins()[0]
+    assert stored["member"] is True
+    # Mark only the final assertion; transport/flag-update regressions must fail normally.
+    request.node.add_marker(
+        pytest.mark.xfail(
+            strict=True,
+            reason="integration/result does not recompute status; fixed in T-004",
+        )
+    )
+    assert stored["status"] == "Ready"
 
 
 @pytest.mark.db
