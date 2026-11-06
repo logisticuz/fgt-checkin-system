@@ -252,17 +252,15 @@ def compute_ready_and_missing(status: dict, requirements: dict) -> tuple:
 
     Returns: (ready: bool, missing: list[str])
     """
-    missing = []
-
-    if requirements["require_membership"] and not status.get("member"):
-        missing.append("Membership")
-    if requirements["require_payment"] and not status.get("payment"):
-        missing.append("Payment")
-    if requirements["require_startgg"] and not status.get("startgg"):
-        missing.append("Start.gg")
-
-    ready = len(missing) == 0
-    return ready, missing
+    computed = compute_checkin_status(
+        {
+            "member": status.get("member"),
+            "payment_valid": status.get("payment"),
+            "startgg": status.get("startgg"),
+        },
+        requirements,
+    )
+    return computed["ready"], computed["missing"]
 # --- /CHANGED ---
 
 # === Domain logic ===
@@ -488,9 +486,7 @@ def check_participant_status(name: str) -> dict:
         status["startgg"] = startgg_ok
 
         # Check payment status
-        amt = _to_float(f.get("payment_amount"))
-        exp = _to_float(f.get("payment_expected"))
-        payment_ok = (f.get("payment_valid") is True) or (exp > 0 and amt >= exp)
+        payment_ok = compute_checkin_status(f, {"require_payment": True})["ready"]
         status["payment"] = payment_ok
 
         # Build summary
@@ -1628,33 +1624,56 @@ async def update_player_games(request: Request):
     """
     Update tournament_games_registered and payment_expected for a player.
     Used when player manually selects games in register.html.
-    Body: { "tag": "playertag", "slug": "tournament-slug", "games": ["SF6", "Tekken 8"] }
+    Body: { "checkin_id": "record-id", "games": ["Street Fighter 6", "Tekken 8"] }
 
     Also calculates payment_expected = len(games) * swish_expected_per_game
     """
     try:
         body = await request.json()
-        tag = (body.get("tag") or "").strip().lower()
-        slug = body.get("slug") or ""
-        games = body.get("games") or []
+        if not isinstance(body, dict):
+            raise ValueError
+        checkin_id = body.get("checkin_id")
+        games = body.get("games", [])
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    if not tag or not slug:
-        raise HTTPException(status_code=400, detail="tag and slug are required")
+    if not isinstance(checkin_id, str) or not checkin_id.strip():
+        raise HTTPException(status_code=400, detail="checkin_id is required")
 
-    if not isinstance(games, list):
-        raise HTTPException(status_code=400, detail="games must be an array")
+    if not isinstance(games, list) or not all(isinstance(game, str) for game in games):
+        raise HTTPException(status_code=400, detail="games must be an array of strings")
 
-    # Find the player record by tag + slug using shared storage backend
-    checkin = get_checkin_by_tag(tag, slug)
+    checkin = get_checkin_by_record_id(checkin_id.strip())
     if not checkin:
         raise HTTPException(status_code=404, detail="Player not found")
 
     record_id = checkin["record_id"]
+    tag = checkin["fields"].get("tag") or ""
 
     # Get settings to calculate payment_expected
-    settings = get_active_settings()
+    settings = storage_get_active_settings() or {}
+    slug = settings.get("active_event_slug") or ""
+    if not slug:
+        raise HTTPException(status_code=400, detail="No active event configured")
+    if checkin["fields"].get("event_slug") != slug:
+        raise HTTPException(status_code=404, detail="Player not found in active event")
+
+    configured = settings.get("default_game")
+    if isinstance(configured, list) and configured:
+        allowed_games = list(dict.fromkeys(game for game in configured if isinstance(game, str)))
+    else:
+        allowed_games = list(
+            dict.fromkeys(
+                event["name"]
+                for event in get_tournament_events(slug)
+                if isinstance(event, dict) and isinstance(event.get("name"), str)
+            )
+        )
+    if any(game not in allowed_games for game in games):
+        raise HTTPException(
+            status_code=400, detail={"error": "Unknown game", "allowed_games": allowed_games}
+        )
+    games = list(dict.fromkeys(games))
     per_game = settings.get("swish_expected_per_game", 25)
     payment_expected = len(games) * per_game
 
@@ -1669,13 +1688,16 @@ async def update_player_games(request: Request):
         raise HTTPException(status_code=500, detail="Storage update failed")
 
     # Broadcast SSE update for dashboard
-    await sse_manager.broadcast("update", {
-        "type": "games_updated",
-        "record_id": record_id,
-        "tag": tag,
-        "games": games,
-        "payment_expected": payment_expected,
-    })
+    await sse_manager.broadcast(
+        "update",
+        {
+            "type": "games_updated",
+            "record_id": record_id,
+            "tag": tag,
+            "games": games,
+            "payment_expected": payment_expected,
+        },
+    )
 
     logger.info(f"Updated games for {tag}: {games}, payment_expected: {payment_expected}")
     return {"success": True, "tag": tag, "games": games, "payment_expected": payment_expected}

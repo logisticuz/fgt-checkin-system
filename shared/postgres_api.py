@@ -816,6 +816,13 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     %s, %s,
                     %s, %s, %s, %s, %s
                 )
+                ON CONFLICT (event_slug, lower(tag)) DO UPDATE SET
+                    name = COALESCE(NULLIF(BTRIM(EXCLUDED.name), ''), active_event_data.name),
+                    email = COALESCE(NULLIF(BTRIM(EXCLUDED.email), ''), active_event_data.email),
+                    telephone = COALESCE(NULLIF(BTRIM(EXCLUDED.telephone), ''),
+                                         active_event_data.telephone),
+                    acquisition_source = COALESCE(NULLIF(EXCLUDED.acquisition_source, ''),
+                                                  active_event_data.acquisition_source)
                 RETURNING record_id
                 """,
                 (
@@ -841,6 +848,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             )
             checkin_id = cur.fetchone()[0]
+            _update_checkin_with_status(conn, checkin_id, {})
 
     return {
         "checkin_id": checkin_id,
