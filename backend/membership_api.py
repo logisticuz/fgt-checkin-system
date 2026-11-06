@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import math
+import os
 import re
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -68,6 +70,7 @@ _MESSAGES = {
     "invalid_request": "Please check the request and try again.",
     "consent_required": "Please accept both the bylaws and privacy information.",
     "stale_texts": "The membership information has changed. Please reload and accept it again.",
+    "year_changed": "Please start again",
     "invalid_details": "Please check your membership details.",
     "rate_limited": "Please wait before requesting another verification code.",
     "ebas_unavailable": "Membership verification is temporarily unavailable. Please ask a TO.",
@@ -92,6 +95,10 @@ _STATE_MESSAGES = {
 
 def _field(record, name, default=None):
     return record.get(name, default) if isinstance(record, dict) else getattr(record, name, default)
+
+
+def _today():
+    return date.today()
 
 
 def _context(record, name, default=None):
@@ -173,7 +180,7 @@ def _normalize_phone(value):
 
 
 def registration_context(request):
-    context = {"membership_year": date.today().year}
+    context = {"membership_year": _today().year}
     checkin_id = _attempt_id(request.query_params.get("checkin_id"))
     if checkin_id is not None:
         context["checkin_id"] = checkin_id
@@ -319,7 +326,7 @@ def _start(details):
             bylaws_version=BYLAWS_VERSION,
             privacy_version=PRIVACY_VERSION,
             checkin_id=details.checkin_id,
-            year=date.today().year,
+            year=_today().year,
             email=details.member.email,
             phone=details.member.phone1,
             lang="en",
@@ -341,11 +348,33 @@ def _update_member(attempt):
             postgres_api.update_checkin(checkin_id, {"member": True})
 
 
+def _year_changed(attempt_id, *, submitting=False):
+    try:
+        if submitting:
+            store.finish_submit(attempt_id, "failed", "year_changed")
+        else:
+            store.fail_attempt(attempt_id, "year_changed")
+    except Exception:
+        _log(attempt_id, "failed", "internal_error")
+    return _reply(409, error_code="year_changed")
+
+
 def _submit(attempt_id, claim, attempt):
     try:
+        latest = store.get_attempt(attempt_id, decrypt=True)
+        if latest is None:
+            return _reply(404, error_code="not_found")
+        if latest.state not in ("submitting", "outcome_unknown"):
+            return _state_response(latest)
+        if latest.pnr is None or latest.context is None:
+            store.cleanup_expired()
+            return _state_response(store.get_attempt(attempt_id))
+        renewed = _today()
+        if renewed.year != latest.membership_year:
+            return _year_changed(attempt_id, submitting=True)
         member = MemberInput(claim.pnr, claim.context["email"], claim.context["phone"])
         with _get_ebas_client() as client:
-            result = client.submit_member_with_lookup(member, date.today())
+            result = client.submit_member_with_lookup(member, renewed)
         outcome = _field(result, "state")
     except Exception:
         outcome = "unavailable"
@@ -380,6 +409,8 @@ def _verify_claim(attempt_id, code):
     attempt = store.get_attempt(attempt_id)
     if attempt is None:
         return _reply(404, error_code="not_found")
+    if _today().year != attempt.membership_year:
+        return _year_changed(attempt_id)
     checked = verification.check_verification(attempt_id, attempt_id, code)
     result = checked.submission_claim
     if result is None:
@@ -422,16 +453,6 @@ def _resend(attempt_id):
         return _unavailable(attempt_id)
 
 
-def _receipt_year(attempt_id):
-    with postgres_api._get_pool().connection() as connection:
-        receipt = connection.execute(
-            "SELECT year FROM membership_receipts WHERE attempt_id = %s", (attempt_id,)
-        ).fetchone()
-    if receipt is None:
-        raise RuntimeError("Membership consent receipt is unavailable")
-    return receipt[0]
-
-
 def _status(attempt_id):
     try:
         attempt = store.get_attempt(attempt_id)
@@ -446,7 +467,7 @@ def _status(attempt_id):
                 pnr = _field(claimed, "pnr")
                 if pnr:
                     with _get_ebas_client() as client:
-                        result = client.confirm_membership(pnr, _receipt_year(attempt_id))
+                        result = client.confirm_membership(pnr, attempt.membership_year)
                     if _field(result, "found") is True:
                         store.finish_submit(attempt_id, "submitted")
                         _update_member(attempt)
@@ -486,6 +507,16 @@ def _pending_reconciles():
     return [str(row[0]) for row in rows]
 
 
+def _recovery_timeout():
+    try:
+        seconds = float(os.getenv("EBAS_SUBMIT_TIMEOUT_SECONDS", "200"))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid membership submit timeout") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Invalid membership submit timeout")
+    return seconds + 60
+
+
 async def _reconcile_loop():
     semaphore = asyncio.Semaphore(4)
 
@@ -496,6 +527,7 @@ async def _reconcile_loop():
     while True:
         await asyncio.sleep(BACKGROUND_RECONCILE_TICK_SECONDS)
         try:
+            await _background_call(store.recover_abandoned_submitting, _recovery_timeout())
             pending = await _background_call(_pending_reconciles)
             await asyncio.gather(*(reconcile(attempt_id) for attempt_id in pending))
         except Exception:
@@ -528,6 +560,18 @@ async def _lifespan(app):
 router = APIRouter(prefix="/api/membership", tags=["Membership"], lifespan=_lifespan)
 
 
+def _spawn_submission(attempt_id, claim, attempt):
+    work = run_in_threadpool(_submit, attempt_id, claim, attempt)
+    try:
+        task = asyncio.create_task(work)
+    except BaseException:
+        work.close()
+        raise
+    _submission_tasks.add(task)
+    task.add_done_callback(_submission_tasks.discard)
+    return task
+
+
 @router.post("/start")
 async def start(request: Request):
     if not _enabled():
@@ -558,9 +602,15 @@ async def verify(request: Request):
     if isinstance(claimed, JSONResponse):
         return claimed
     result, attempt = claimed
-    task = asyncio.create_task(run_in_threadpool(_submit, attempt_id, result, attempt))
-    _submission_tasks.add(task)
-    task.add_done_callback(_submission_tasks.discard)
+    try:
+        task = _spawn_submission(attempt_id, result, attempt)
+    except Exception:
+        try:
+            await run_in_threadpool(store.finish_submit, attempt_id, "outcome_unknown")
+        except Exception:
+            return _unavailable(attempt_id)
+        _log(attempt_id, "outcome_unknown", "internal_error")
+        return _reply(state="outcome_unknown")
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=SUBMIT_WAIT_SECONDS)
     except asyncio.TimeoutError:

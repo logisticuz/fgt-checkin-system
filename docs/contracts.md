@@ -100,3 +100,16 @@ own issuance path; that contract remains open until the meeting with Mattis.
 Both `/register` and `/register.html` receive `membership_year` equal to the current renewed year.
 An optional query-string `checkin_id` is passed to the template only after UUID validation;
 absent or invalid values are omitted. Start validates that a supplied check-in belongs to the active event.
+
+Membership attempts expose `membership_year` from the immutable consent receipt recorded at start.
+Verify and the worker handoff both require the server's current year to match that consented year;
+a mismatch returns 409 `year_changed` with `user_message:"Please start again"`, erases an unsubmitted
+challenge's secrets and requires fresh consent. A worker captures one renewed date and uses it only
+when its year matches; reconciliation always uses the stored membership year across calendar changes.
+
+The background reconciler first atomically recovers abandoned `submitting` claims older than
+`EBAS_SUBMIT_TIMEOUT_SECONDS + 60` seconds to `outcome_unknown`, then uses confirmation only.
+It never retries submission. Failed worker creation marks the claim uncertain immediately.
+At the fixed fifteen-minute deadline, both submitting and outcome_unknown become manual_review
+and their secrets are erased; cleanup uses database time. A retained worker claim cannot submit
+after the store's hard deadline. Started worker/maintenance tasks are drained on graceful shutdown.
