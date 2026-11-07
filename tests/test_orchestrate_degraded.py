@@ -11,7 +11,7 @@ PERSONNUMMER = "200001010016"  # Invented test input; every upstream transport i
 
 @pytest.fixture
 def n8n_engine(backend_app, monkeypatch):
-    monkeypatch.setattr(backend_app, "INTEGRATION_ENGINE", "n8n")
+    monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
 
 
 def _assert_no_membership_hint(body):

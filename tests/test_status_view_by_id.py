@@ -26,8 +26,8 @@ def forbid_name_lookups(backend_app, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Verified-ID status pages must never fall back to a name lookup")
 
-    monkeypatch.setattr(backend_app, "check_participant_status", forbidden)
-    monkeypatch.setattr(backend_app, "get_participant_details", forbidden)
+    monkeypatch.setattr(backend_app.pages, "check_participant_status", forbidden)
+    monkeypatch.setattr(backend_app.pages, "get_participant_details", forbidden)
 
 
 @pytest.mark.db
@@ -175,7 +175,7 @@ def test_unverified_capabilities_preserve_legacy_name_rendering(
     def forbidden(*args, **kwargs):
         pytest.fail("Unverified status pages must retain their legacy name path")
 
-    monkeypatch.setattr(backend_app, "lookup_checkin_status", forbidden)
+    monkeypatch.setattr(backend_app.pages, "lookup_checkin_status", forbidden)
     response = app_client.get(page_url(named["name"]), params=params)
     assert response.status_code == 200 and response.template.name == "status_ready.html"
     assert response.context["tag"] == named["tag"]

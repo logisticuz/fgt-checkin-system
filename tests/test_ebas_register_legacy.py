@@ -16,10 +16,10 @@ SYNTHETIC_PERSONNUMMER = "000000000000"
 @pytest.fixture
 def legacy_context(pg_db, backend_app, n8n_stub, monkeypatch):
     row = pg_db.seed_checkin()
-    monkeypatch.setattr(backend_app, "EBAS_REGISTER_WAIT_SECONDS", 0.2)
-    monkeypatch.setattr(backend_app, "_ebas_registrations", {})
-    monkeypatch.setattr(backend_app, "_ebas_registration_lock", asyncio.Lock())
-    monkeypatch.setattr(backend_app, "_ebas_registration_tasks", set())
+    monkeypatch.setattr(backend_app.ebas_legacy, "EBAS_REGISTER_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registrations", {})
+    monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registration_lock", asyncio.Lock())
+    monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registration_tasks", set())
     n8n_stub.response = {"success": True}
     payload = {
         "personnummer": SYNTHETIC_PERSONNUMMER,
@@ -56,7 +56,7 @@ def test_existing_member_returns_success_without_resubmitting(legacy_context, pg
 @pytest.mark.db
 def test_concurrent_registration_submits_once(legacy_context, n8n_stub, monkeypatch):
     backend, row, payload = legacy_context
-    monkeypatch.setattr(backend, "EBAS_REGISTER_WAIT_SECONDS", 5)
+    monkeypatch.setattr(backend.ebas_legacy, "EBAS_REGISTER_WAIT_SECONDS", 5)
 
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -77,8 +77,8 @@ def test_concurrent_registration_submits_once(legacy_context, n8n_stub, monkeypa
             finally:
                 release.set()
             assert (await first).json() == {"success": True}
-        assert backend._ebas_registrations == {}
-        assert not backend._ebas_registration_tasks
+        assert backend.ebas_legacy._ebas_registrations == {}
+        assert not backend.ebas_legacy._ebas_registration_tasks
 
     asyncio.run(scenario())
 
@@ -104,14 +104,14 @@ def test_slow_registration_keeps_running_and_receives_callback(legacy_context, n
             assert response.status_code == 202
             assert response.json() == {"success": True, "state": "processing"}
             assert not completed.is_set()
-            assert row["record_id"] in backend._ebas_registrations
-            assert len(backend._ebas_registration_tasks) == 1
+            assert row["record_id"] in backend.ebas_legacy._ebas_registrations
+            assert len(backend.ebas_legacy._ebas_registration_tasks) == 1
             release.set()
-            await asyncio.gather(*backend._ebas_registration_tasks)
+            await asyncio.gather(*backend.ebas_legacy._ebas_registration_tasks)
         assert completed.is_set()
         assert pg_db.checkins()[0]["member"] is True
-        assert backend._ebas_registrations == {}
-        assert not backend._ebas_registration_tasks
+        assert backend.ebas_legacy._ebas_registrations == {}
+        assert not backend.ebas_legacy._ebas_registration_tasks
 
     asyncio.run(scenario())
 
@@ -140,8 +140,8 @@ def test_registry_is_released_and_personal_id_is_never_logged(
         assert response.status_code == (202 if failure == "timeout" else 502)
         if failure == "timeout":
             assert response.json() == {"success": True, "state": "processing"}
-        assert backend._ebas_registrations == {}
-        assert not backend._ebas_registration_tasks
+        assert backend.ebas_legacy._ebas_registrations == {}
+        assert not backend.ebas_legacy._ebas_registration_tasks
 
     asyncio.run(scenario())
     assert SYNTHETIC_PERSONNUMMER not in caplog.text
@@ -151,8 +151,8 @@ def test_registry_is_released_and_personal_id_is_never_logged(
 @pytest.mark.db
 def test_expired_registry_entry_allows_a_new_attempt(legacy_context, n8n_stub):
     backend, row, payload = legacy_context
-    backend._ebas_registrations[row["record_id"]] = (
-        backend.time.monotonic() - backend.EBAS_REGISTER_TIMEOUT_SECONDS - 121
+    backend.ebas_legacy._ebas_registrations[row["record_id"]] = (
+        backend.time.monotonic() - backend.ebas_legacy.EBAS_REGISTER_TIMEOUT_SECONDS - 121
     )
 
     async def scenario():
@@ -160,7 +160,7 @@ def test_expired_registry_entry_allows_a_new_attempt(legacy_context, n8n_stub):
             response = await client.post("/api/ebas/register", json=payload)
         assert response.status_code == 200
         assert len(n8n_stub.calls) == 1
-        assert backend._ebas_registrations == {}
+        assert backend.ebas_legacy._ebas_registrations == {}
 
     asyncio.run(scenario())
 
@@ -168,7 +168,7 @@ def test_expired_registry_entry_allows_a_new_attempt(legacy_context, n8n_stub):
 @pytest.mark.db
 def test_upstream_uses_configured_timeout(legacy_context, n8n_stub, monkeypatch):
     backend, row, payload = legacy_context
-    monkeypatch.setattr(backend, "EBAS_REGISTER_TIMEOUT_SECONDS", 81)
+    monkeypatch.setattr(backend.ebas_legacy, "EBAS_REGISTER_TIMEOUT_SECONDS", 81)
 
     async def scenario():
         async with asgi_client(backend) as client:
