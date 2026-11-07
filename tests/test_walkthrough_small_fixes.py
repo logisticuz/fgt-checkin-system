@@ -1,8 +1,10 @@
 """T-063 walkthrough regressions; synthetic storage and offline app clients only."""
 
+import ast
 import asyncio
 import importlib.util
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -190,6 +192,61 @@ def test_archive_clear_clears_the_name_with_the_active_slug(pg_db):
     settings = postgres.get_active_settings()
     assert settings["active_event_slug"] is None
     assert settings["event_display_name"] is settings["tournament_name"] is None
+
+
+@pytest.mark.parametrize("failed_run", [False, True], ids=["successful-smoke", "failed-smoke"])
+def test_acceptance_helper_restores_its_complete_settings_snapshot(pg_db, failed_run):
+    from scripts.acceptance_smoke import DEV_HELPER
+
+    row = pg_db.seed_settings(
+        active_event_slug=OLD, event_display_name=OLD_NAME, tournament_name="Original Tournament"
+    )
+    original = postgres.get_active_settings_with_id()["fields"]
+    tree = ast.parse(DEV_HELPER)
+    assignments = {
+        node.targets[0].id: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in {"changes", "snapshot"}
+    }
+    cleanup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "cleanup_and_restore"
+    )
+    namespace = {
+        "slug": "acceptance-20261107123456-123456abcdef",
+        "current": {"fields": original},
+        "settings_id": str(row["id"]),
+        "storage": postgres,
+        "guard": lambda: None,
+    }
+    actual_helper = ast.Module(
+        body=[assignments["changes"], assignments["snapshot"], cleanup], type_ignores=[]
+    )
+    exec(compile(actual_helper, "<actual-acceptance-settings-helper>", "exec"), namespace)
+    assert namespace["snapshot"]["event_display_name"] == OLD_NAME
+    assert namespace["snapshot"]["tournament_name"] == "Original Tournament"
+    outcome = (
+        pytest.raises(RuntimeError, match="Synthetic smoke failure")
+        if failed_run
+        else nullcontext()
+    )
+    with pg_db.pool.connection() as connection, outcome:
+        try:
+            postgres.update_settings(str(row["id"]), namespace["changes"])
+            during_smoke = postgres.get_active_settings()
+            assert (
+                during_smoke["event_display_name"]
+                == during_smoke["tournament_name"]
+                == "Acceptance Smoke"
+            )
+            if failed_run:
+                raise RuntimeError("Synthetic smoke failure")
+        finally:
+            assert namespace["cleanup_and_restore"](connection) is True
+    assert postgres.get_active_settings_with_id()["fields"] == original
 
 
 @pytest.mark.parametrize("dates", [["2026-11-07"], ["2026-11-07", "2026-11-07"]])

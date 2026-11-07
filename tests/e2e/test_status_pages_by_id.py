@@ -42,7 +42,7 @@ def site(browser, app_templates):  # noqa: F811
         offer_membership=False,
     ):
         statuses = statuses or {}
-        calls = {"id_status": [], "name_status": [], "status_pages": []}
+        calls = {"id_status": [], "name_status": [], "status_pages": [], "media": []}
         base = {
             "membership_flow": "v2",
             "n8n_token": "",
@@ -69,6 +69,8 @@ def site(browser, app_templates):  # noqa: F811
 
         def router(route):
             url = urlparse(route.request.url)
+            if route.request.resource_type == "media" or url.path.endswith("/clear.mp3"):
+                calls["media"].append(route.request.url)
             query = dict(parse_qsl(url.query))
             if url.path == "/":
                 html = app_templates.get_template("checkin.html").render(base)
@@ -234,7 +236,7 @@ def success_visibility(page):
 def test_ready_page_shows_no_success_signal_without_a_positive_id_confirmation(
     site, answer, message
 ):
-    page, _ = site(status_templates=("status_ready.html",))
+    page, calls = site(status_templates=("status_ready.html",))
     status, body = answer
 
     def respond(route):
@@ -251,7 +253,8 @@ def test_ready_page_shows_no_success_signal_without_a_positive_id_confirmation(
     assert success_visibility(page) and not any(success_visibility(page))
     assert page.locator(".success-icon").is_hidden()
     assert page.locator("h1").is_hidden()
-    assert page.evaluate("document.getElementById('readySound').paused") is True
+    assert page.locator("audio").count() == 0
+    assert calls["media"] == []
 
 
 def test_ready_page_reveals_success_only_after_the_id_confirms_ready(site):
@@ -260,6 +263,8 @@ def test_ready_page_reveals_success_only_after_the_id_confirms_ready(site):
     page.wait_for_selector(".success-icon:not([hidden])")
     assert all(success_visibility(page))
     assert page.locator("#status-check-notice").is_hidden()
+    assert page.locator("audio").count() == 0
+    assert calls["media"] == []
     assert calls["id_status"] == [("chk-a", "tok-chk-a")]
 
 

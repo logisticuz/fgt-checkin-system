@@ -120,6 +120,7 @@ try:
         raise RuntimeError("Another acceptance lifecycle is active")
     changes = {
         "active_event_slug": slug, "event_display_name": "Acceptance Smoke",
+        "tournament_name": "Acceptance Smoke",
         "require_membership": False, "require_startgg": False,
         "require_payment": True, "swish_expected_per_game": 25,
         "default_game": ["Acceptance Smoke Game"], "events_json": [],

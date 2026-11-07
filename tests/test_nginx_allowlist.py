@@ -399,6 +399,10 @@ def test_dev_only_dash_exceptions_never_leak_to_prod():
         ("/auth/me", "synthetic", 200, False),
         ("/api/events/stream", "synthetic", 200, False),
         ("/api/events/stream/child", "synthetic", 200, False),
+        ("/favicon.ico", "", 204, False),
+        ("/favicon.ico", "synthetic", 204, False),
+        ("/future-open-route", "synthetic", 200, False),
+        ("/assets/new-open-asset", "synthetic", 200, False),
     ],
 )
 def test_bypass_cookie_requires_success_on_a_basic_gated_route(path, user, status, issues_cookie):
@@ -427,6 +431,8 @@ def test_bypass_cookie_requires_success_on_a_basic_gated_route(path, user, statu
         == ["map", "$admin_basic_cookie_path:$remote_user:$status", "$admin_auth_set_cookie"]
     )
     eligible = map_value(path_map, path)
+    assert directives(path_map, "default") == [["0"]]
+    assert directives(path_map, "/favicon.ico") == [["0"]]
     assert bool(map_value(cookie_map, f"{eligible}:{user}:{status}")) == issues_cookie
 
 

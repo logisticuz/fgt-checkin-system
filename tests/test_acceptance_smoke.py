@@ -445,6 +445,7 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
     original = {
         "active_event_slug": "existing-event",
         "event_display_name": "Existing Event",
+        "tournament_name": "Existing Tournament Name",
         "require_membership": True,
         "require_startgg": True,
         "require_payment": False,
