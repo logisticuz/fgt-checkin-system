@@ -39,7 +39,7 @@ def test_fully_applied_schema_passes_in_a_read_only_snapshot(pg_db, monkeypatch,
     assert result["duplicate_groups"] == result["duplicate_rows"] == 0
 
 
-@pytest.mark.parametrize("version", ["001", "002", "003", "004"])
+@pytest.mark.parametrize("version", ["001", "002", "003", "004", "013"])
 def test_any_required_pending_migration_blocks_deployment(pg_db, monkeypatch, capsys, version):
     with pg_db.pool.connection() as connection:
         previous = connection.execute(
