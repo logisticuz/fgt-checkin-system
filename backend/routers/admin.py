@@ -166,36 +166,26 @@ async def admin_recheck_startgg(request: Request):
         result_data = {"registered": is_registered, "events": events}
         if startgg_email:
             result_data["email"] = startgg_email
-        apply_fn(
+        applied = apply_fn(
             checkin_id=record_id,
             source="startgg",
             ok=True,
             data=result_data,
             state=result_state,
             attempt_id=attempt_id,
+            recompute_payment_expected=True,
         )
 
-    # 4. Recompute status
-    settings = get_active_settings()
-    requirements = compute_requirements(settings)
+        if applied.get("state") == "stale_rejected":
+            raise HTTPException(status_code=409, detail={"state": "stale_rejected"})
 
+    # 4. Read the accepted/current stored result; status and pricing were updated atomically.
     updated_checkin = get_by_id(record_id)
     uf = (updated_checkin or {}).get("fields", {})
 
-    status_dict = {
-        "member": bool(uf.get("member")),
-        "payment": bool(uf.get("payment_valid")),
-        "startgg": bool(uf.get("startgg")),
-    }
-    ready, missing = compute_ready_and_missing(status_dict, requirements)
-    final_status = "Ready" if ready else "Pending"
-    update_checkin(record_id, {"status": final_status})
-
-    # 5. Update payment_expected based on synced games
-    per_game = settings.get("swish_expected_per_game") or 0
+    final_status = uf.get("status") or "Pending"
     new_games = uf.get("tournament_games_registered") or []
-    if per_game and isinstance(new_games, list):
-        update_checkin(record_id, {"payment_expected": len(new_games) * per_game})
+    is_registered = bool(uf.get("startgg"))
 
     # 6. Broadcast SSE
     await sse_manager.broadcast("update", {
@@ -213,7 +203,7 @@ async def admin_recheck_startgg(request: Request):
         "record_id": record_id,
         "player_name": player_name,
         "startgg": is_registered,
-        "events": events,
+        "events": new_games,
         "status": final_status,
         "previous_startgg": prev_startgg,
         "previous_games": prev_games,

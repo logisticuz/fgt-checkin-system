@@ -129,7 +129,12 @@ def test_name_only_recheckin_keeps_verified_state(pg_db):
 )
 def test_ebas_requires_success_and_explicit_boolean(pg_db, initial, ok, data, expected, updated):
     pg_db.seed_settings()
-    row = pg_db.seed_checkin(member=initial, startgg=True, status="Ready" if initial else "Pending")
+    row = pg_db.seed_checkin(
+        member_source="ebas_check",
+        member=initial,
+        startgg=True,
+        status="Ready" if initial else "Pending",
+    )
     result = postgres.apply_integration_result(row["record_id"], "ebas", ok, data)
     stored = pg_db.checkins()[0]
     assert stored["member"] is expected
@@ -211,7 +216,10 @@ def test_recheckin_recomputes_status_without_safe_field_changes(pg_db):
 @pytest.mark.parametrize("member", [True, False])
 def test_integration_result_handler_recomputes_status(app_client, pg_db, member):
     row = pg_db.seed_checkin(
-        member=not member, startgg=True, status="Pending" if member else "Ready"
+        member_source="ebas_check",
+        member=not member,
+        startgg=True,
+        status="Pending" if member else "Ready",
     )
     response = app_client.post(
         "/api/integration/result",

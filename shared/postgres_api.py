@@ -1008,7 +1008,9 @@ def start_integration_attempt(checkin_id: str, sources=("ebas", "startgg")) -> s
 
 
 def _membership_provenance(conn, current):
-    """Also protect confirmed receipts predating the provenance column or its update."""
+    """Protect known authority and pre-004 true values whose source cannot be reconstructed."""
+    if current.get("member_source") is None and current.get("member") is True:
+        return "to"
     if current.get("member_source") in ("to", "v2"):
         return current["member_source"]
     confirmed = conn.execute(
@@ -3397,6 +3399,11 @@ def reopen_event(
 
                     if active_count == 0:
                         cur.execute(
+                            "SELECT count(*) FROM event_archive WHERE event_slug = %s",
+                            (event_slug,),
+                        )
+                        expected_rows = cur.fetchone()[0]
+                        cur.execute(
                             """
                             INSERT INTO active_event_data (
                                 record_id, event_slug, external_id,
@@ -3408,7 +3415,7 @@ def reopen_event(
                                 created, member_source
                             )
                             SELECT
-                                gen_random_uuid()::text,
+                                COALESCE(source_record_id, gen_random_uuid()::text),
                                 event_slug,
                                 external_id,
                                 name,
@@ -3431,10 +3438,13 @@ def reopen_event(
                                 %s, member_source
                             FROM event_archive
                             WHERE event_slug = %s
+                            ON CONFLICT (record_id) DO NOTHING
                             """,
                             (now, event_slug),
                         )
                         restored_rows = cur.rowcount or 0
+                        if restored_rows != expected_rows:
+                            raise ValueError("Cannot restore check-in IDs already in use")
 
     reopen_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
     log_action(

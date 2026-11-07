@@ -133,7 +133,7 @@ def test_reopen_waits_for_archive_then_restores_its_snapshot(archive_db, event, 
     assert result["restored_rows"] == 1
     rows = archive_db.checkins()
     assert len(rows) == 1
-    assert rows[0]["record_id"] != original["record_id"]
+    assert rows[0]["record_id"] == original["record_id"]
     assert rows[0]["event_slug"] == event
     assert table_rows(archive_db, "event_archive")[0]["source_record_id"] == original["record_id"]
     assert postgres.get_active_slug() == event
@@ -165,7 +165,7 @@ def test_archive_waits_until_reopen_has_restored_rows(archive_db, event, monkeyp
             assert archiving.result(timeout=10)["cleared_active"] == 1
 
     assert archive_db.checkins() == []
-    assert len(table_rows(archive_db, "event_archive")) == 2
+    assert len(table_rows(archive_db, "event_archive")) == 1
 
 
 @pytest.mark.parametrize("operation", ["update", "delete"])
