@@ -351,6 +351,9 @@ finally:
 PY
 echo 'PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'
 
+# Restore the missing-sibling fixture after T-044's sibling isolation checks.
+docker rm -f "$meetup" >/dev/null
+
 # T-049: prove persisted rows cannot retain client details or capabilities.
 request 200 "$public" '/api/participant/SyntheticPrivate/status?t=synthetic-private-query' GET \
     --cookie session=synthetic-private-cookie --user synthetic-private-user:synthetic-private-password
