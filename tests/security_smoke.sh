@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# Disposable regression for admin bypass-cookie issuance; no DEV/PROD requests.
+# --target dev: GET-only checks on live-capable DEV; no provider/write requests.
+# --target isolated: full routing checks against disposable, network-local stubs.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
-target=isolated
-if [[ "${1:-}" != --target || "${2:-}" != isolated || $# != 2 ]]; then
-    echo "Usage: $0 --target isolated" >&2; exit 2
-fi
+
+target=""
+while (($#)); do
+    case "$1" in
+        --target) target="${2:?--target needs dev or isolated}"; shift 2 ;;
+        *) echo "Usage: $0 --target dev|isolated|http://127.0.0.1:18088" >&2; exit 2 ;;
+    esac
+done
+case "$target" in
+    dev) dev_base=http://127.0.0.1:8088 ;;
+    http://127.0.0.1:8088|http://127.0.0.1:18088) dev_base=$target; target=dev ;;
+    isolated) ;;
+    *) echo "Specify isolated, dev, or the conductor's loopback shadow URL" >&2; exit 2 ;;
+esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 scratch=$(mktemp -d "$root/tests/.security-smoke.XXXXXX")
 containers=()
@@ -26,6 +37,13 @@ check_header() {
         echo "Missing header $1: $2" >&2; cat "$scratch/headers" >&2; exit 1;
     }
 }
+security_headers() {
+    check_header X-Content-Type-Options nosniff
+    check_header Referrer-Policy same-origin
+    check_header X-Frame-Options DENY
+    check_header Content-Security-Policy-Report-Only '.+'
+    if [[ "$target" == isolated ]]; then check_header Strict-Transport-Security 'max-age=31536000'; fi
+}
 request() {
     local expected=$1 host=$2 path=$3 method=${4:-GET}
     shift 4
@@ -38,6 +56,34 @@ request() {
         cat "$scratch/body" >&2; exit 1;
     }
 }
+denied=(/api/checkin/begin /api/integration/result /api/checkin/synthetic/member-status
+    /api/notify/update /n8n/webhook /n8n/webhook/callback /docs /redoc /openapi.json
+    /api/ebas/validate /api/player/member /api/player/games/extra
+    /api/membership/internal /api/checkin/orchestrate/extra /auth/select-event /unknown)
+
+if [[ "$target" == dev ]]; then
+    base=$dev_base
+    for path in "${denied[@]}"; do request 404 localhost "$path" GET; security_headers; done
+    for path in / /kiosk /register /register.html /health /admin/; do
+        request 200 localhost "$path" GET; security_headers
+    done
+    # DEV retains application OAuth only; no real session or Basic credentials.
+    for path in /_dash-layout /admin/auth/select-event; do
+        status=$(curl --noproxy '*' -sS --connect-timeout 3 --max-time 8 \
+            -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' "$base$path")
+        if [[ "$status" == 302 ]]; then check_header Location /admin/auth/login
+        elif [[ "$status" != 200 ]]; then echo "DEV $path: expected 200 or OAuth 302, got $status" >&2; exit 1; fi
+        security_headers
+    done
+    # Root SSE is an explicitly approved DEV-only Dash exception; never send its token.
+    request 401 localhost /api/events/stream GET
+    if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Strict-Transport-Security:'; then
+        echo 'DEV HTTP must not advertise HSTS' >&2; exit 1
+    fi
+    echo "PASS DEV $base: GET-only deny checks, public pages, admin and Dash layout"
+    exit 0
+fi
+
 # The full-flow target cannot be redirected to DEV or PROD.
 base=https://127.0.0.1:18443
 network="build2-t044-smoke-$$-$RANDOM"
@@ -93,7 +139,7 @@ start_stub() {
         --mount "type=bind,src=$(native_path "$scratch/upstream.py"),dst=/upstream.py,readonly" \
         python:3.11.10-slim-bookworm python -B /upstream.py >/dev/null
 }
-start_stub "$backend" --network-alias backend --network-alias fgt_dashboard --network-alias meetup --network-alias member-card
+start_stub "$backend" --network-alias backend --network-alias fgt_dashboard
 containers+=("$gateway")
 docker run -d --name "$gateway" --network "$network" -p 127.0.0.1:18443:443 \
     -e ADMIN_AUTH_COOKIE_TOKEN=synthetic-cookie \
@@ -108,25 +154,89 @@ done
 # Official entrypoint has rendered envsubst before either syntax test or reload.
 docker exec "$gateway" nginx -t
 docker exec "$gateway" nginx -s reload
+public=www.checkin.fgctrollhattan.se
 admin=admin.fgctrollhattan.se
-no_bypass_cookie() {
-    if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
-        echo 'Unverified Basic credentials must never mint an admin bypass cookie' >&2; exit 1
-    fi
-}
-for path in / /_dash-layout; do
-    request 401 "$admin" "$path" GET --user synthetic:wrong-password
-    no_bypass_cookie
-    check_header WWW-Authenticate '.+'
+for path in "${denied[@]}" /api/events/stream /admin/ /_dash-layout /assets/style.css; do
+    request 404 "$public" "$path" GET; security_headers
 done
-# These endpoints are open in the hotfix base; even a 200 must not mint the cookie.
-for path in /auth/login /auth/callback /auth/callback/finalize /auth/logout /auth/me /auth/select-event /auth/select-event/child /api/events/stream; do
-    request 200 "$admin" "$path" GET --user synthetic:wrong-password
-    no_bypass_cookie
+for path in / /kiosk /register /register.html /health /status/Synthetic /static/js/membership_v2.js \
+    /api/participant/Synthetic/status '/api/checkin/synthetic/status?t=synthetic' \
+    /api/membership/synthetic/status /member/confirm/synthetic; do
+    request 200 "$public" "$path" GET; security_headers
 done
-request 200 "$admin" / GET --user synthetic:synthetic-password
+# The routing union includes legacy registration and ordinary check-in for off mode.
+# Backend MEMBERSHIP_FLOW enforcement is covered by the application tests, not these stubs.
+for path in /api/checkin/orchestrate /api/ebas/register /api/membership/start /api/membership/verify /api/membership/resend; do
+    request 200 "$public" "$path" POST -H 'Content-Type: application/json' --data '{}'
+done
+request 429 "$public" '/api/membership/synthetic/status?backend_rate=1' GET
+check_header Retry-After 7
+[[ $(tr -d '\r' < "$scratch/headers" | grep -ic '^Retry-After:') == 1 ]]
+request 200 "$public" /api/player/games PATCH -H 'Content-Type: application/json' --data '{}'
+for path in / /auth/select-event /auth/select-event/child /auth/select-event-extra; do
+    request 401 "$admin" "$path" GET; security_headers; check_header WWW-Authenticate '.+'
+done
+request 401 "$admin" /auth/select-event GET --user synthetic:wrong-password
+if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+    echo 'Failed Basic authentication must not issue an admin bypass cookie' >&2; exit 1
+fi
+request 200 "$admin" /auth/select-event GET --user synthetic:synthetic-password
+security_headers
 check_header Set-Cookie 'fgc_admin_auth=synthetic-cookie;.*'
-request 200 "$admin" / GET --cookie fgc_admin_auth=synthetic-cookie
+request 200 "$admin" /auth/select-event GET --cookie fgc_admin_auth=synthetic-cookie
 request 401 "$admin" / GET --cookie fgc_admin_auth=wrong-cookie
-no_bypass_cookie
-echo 'PASS standalone cookie hotfix: wrong Basic and open OAuth/SSE cannot issue bypass cookies; valid Basic/cookie still work'
+for path in /auth/login /auth/callback /auth/callback/finalize /auth/logout /auth/me; do
+    request 200 "$admin" "$path" GET --user synthetic:wrong-password
+    if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+        echo 'Open OAuth routes must not mint an admin cookie from unverified Basic headers' >&2; exit 1
+    fi
+done
+request 200 "$admin" /api/events/stream GET --user synthetic:wrong-password
+if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+    echo 'Token-authenticated SSE must not mint an admin cookie from Basic headers' >&2; exit 1
+fi
+request 200 "$admin" /_dash-layout GET --user synthetic:synthetic-password
+# Missing optional DNS records must not prevent check-in, syntax tests or reloads.
+request 502 meetup.fgctrollhattan.se / GET
+request 502 membercard.fgctrollhattan.se / GET
+request 200 "$public" /health GET
+start_stub "$meetup" --network-alias meetup
+start_stub "$membercard" --network-alias member-card
+docker exec "$gateway" nginx -t
+docker exec "$gateway" nginx -s reload
+sleep 0.5
+request 200 meetup.fgctrollhattan.se '/synthetic/child?probe=1' GET
+grep -q '/synthetic/child?probe=1' "$scratch/body"
+request 200 membercard.fgctrollhattan.se / GET
+docker rm -f "$meetup" >/dev/null
+docker exec "$gateway" nginx -t
+docker exec "$gateway" nginx -s reload
+sleep 0.5
+request 200 membercard.fgctrollhattan.se / GET
+request 200 "$public" /health GET
+
+# Flood only disposable stubs. Spoofed forwarding headers cannot evade the venue key.
+rejected=0
+for ((attempt=0; attempt<45; attempt++)); do
+    status=$(curl --noproxy '*' -ksS --max-time 5 -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' \
+        -H "Host: $public" -H "X-Forwarded-For: 192.0.2.$attempt" -X POST "$base/api/checkin/orchestrate")
+    if [[ "$status" == 429 ]]; then
+        rejected=$((rejected+1)); check_header Retry-After 60; security_headers
+    elif [[ "$status" != 200 ]]; then echo "Unexpected flood status: $status" >&2; exit 1; fi
+done
+((rejected > 0)) || { echo 'Check-in flood was not rate limited' >&2; exit 1; }
+request 200 "$public" /api/membership/start POST
+request 200 "$public" /api/membership/verify POST
+request 200 "$public" /api/membership/resend POST
+for ((attempt=0; attempt<50; attempt++)); do request 200 "$public" /api/membership/synthetic/status GET; done
+for path in /api/membership/start /api/membership/verify /api/membership/resend /member/confirm/synthetic /api/ebas/register; do
+    limited=0
+    for ((attempt=0; attempt<28; attempt++)); do
+        status=$(curl --noproxy '*' -ksS --max-time 5 -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' \
+            -H "Host: $public" -X POST "$base$path")
+        if [[ "$status" == 429 ]]; then limited=$((limited+1)); check_header Retry-After 60; security_headers
+        elif [[ "$status" != 200 ]]; then echo "Unexpected $path flood status: $status" >&2; exit 1; fi
+    done
+    ((limited > 0)) || { echo "$path flood was not rate limited" >&2; exit 1; }
+done
+echo "PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, 429/Retry-After ($rejected check-in rejections)"
