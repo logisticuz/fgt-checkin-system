@@ -75,6 +75,8 @@ n8n-backup-*/
 shared/airtable_tables_backup/*-Grid view (*).csv
 nul
 nginx/htpasswd
+# Disposable security-smoke certificates and htpasswd; may remain after SIGKILL.
+tests/.security-smoke.*/
 
 # -- Agent files -----------------------
 AGENTS.md
