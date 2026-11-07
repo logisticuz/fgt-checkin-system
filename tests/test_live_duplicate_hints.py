@@ -231,3 +231,57 @@ def test_public_check_in_response_has_no_candidate_info(app_client, pg_db, backe
         assert leak not in text, leak
     # The check-in path doesn't even compute hints; only the TO dashboard does.
     assert table_rows(pg_db, "live_duplicate_hints") == []
+
+
+# --- security review: only TO-confirmed links are trusted by archive ------------------------
+
+
+def linked_flag(database, record_id):
+    with database.pool.connection() as connection:
+        return connection.execute(
+            "SELECT player_linked_by_to FROM active_event_data WHERE record_id = %s", (record_id,)
+        ).fetchone()[0]
+
+
+def test_only_a_to_action_sets_the_link_flag(archive_db, event, kenji):  # noqa: F811
+    exact = check_in(event, "pw-kenji", phone="0700000301")  # automatic tag link
+    assert row_of(archive_db, exact)["player_uuid"] == kenji["uuid"]
+    assert linked_flag(archive_db, exact) is False
+    record = check_in(event, "pw-kenjj")
+    postgres.resolve_live_duplicate(record, kenji["uuid"], "keep_candidate", user=TO)
+    assert linked_flag(archive_db, record) is True
+
+
+def test_an_automatic_stale_link_keeps_the_old_archive_matching(archive_db, event):  # noqa: F811
+    first = seed_player(archive_db, "pw-first", name="Synthetic First", telephone="0700000311")
+    second = seed_player(archive_db, "pw-second", name="Synthetic Second", telephone="0700000312")
+    # e.g. linked automatically at check-in, then the tag was corrected by a TO
+    archive_db.seed_checkin(event_slug=event, tag="pw-second", player_uuid=first["uuid"])
+    archive(event)
+    rows = [r for r in table_rows(archive_db, "event_archive") if r["event_slug"] == event]
+    assert [r["player_uuid"] for r in rows] == [second["uuid"]]  # tag wins, as before
+    assert player(archive_db, first["uuid"])["total_events"] == first["total_events"]
+
+
+def test_editing_the_tag_or_email_drops_the_to_link(archive_db, event, kenji):  # noqa: F811
+    record = check_in(event, "pw-kenjj")
+    postgres.resolve_live_duplicate(record, kenji["uuid"], "keep_candidate", user=TO)
+    postgres.update_checkin(record, {"status": "Pending"})  # unrelated edit keeps it
+    assert linked_flag(archive_db, record) is True
+    postgres.update_checkin(record, {"tag": "PW-KENJJ"})  # case only: same identity
+    assert linked_flag(archive_db, record) is True
+    postgres.update_checkin(record, {"tag": "pw-someone-else"})
+    assert linked_flag(archive_db, record) is False
+
+
+def test_a_to_linked_profile_keeps_its_identity_fields(archive_db, event, kenji):  # noqa: F811
+    record = check_in(event, "pw-kenjj", name="Synthetic Typo Name", phone="0700000399")
+    postgres.resolve_live_duplicate(record, kenji["uuid"], "keep_candidate", user=TO)
+    archive(event)
+    kept = player(archive_db, kenji["uuid"])
+    assert (kept["tag"], kept["name"], kept["telephone"], kept["email"]) == (
+        kenji["tag"],
+        kenji["name"],
+        kenji["telephone"],
+        kenji["email"],
+    )

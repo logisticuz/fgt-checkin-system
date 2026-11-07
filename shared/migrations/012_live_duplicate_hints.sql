@@ -16,3 +16,9 @@ CREATE TABLE IF NOT EXISTS live_duplicate_hints (
     CONSTRAINT live_duplicate_hints_pair_unique UNIQUE (record_id, candidate_uuid)
 );
 CREATE INDEX IF NOT EXISTS live_duplicate_hints_event_idx ON live_duplicate_hints (event_slug);
+
+-- A check-in's player_uuid set by a TO's explicit decision (a live-duplicate Keep/Not same).
+-- Only such links are trusted by archive; automatic tag/email links keep the old matching.
+-- Cleared again whenever the row's tag or email is edited.
+ALTER TABLE active_event_data
+    ADD COLUMN IF NOT EXISTS player_linked_by_to BOOLEAN NOT NULL DEFAULT false;

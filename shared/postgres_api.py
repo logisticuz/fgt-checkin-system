@@ -740,21 +740,41 @@ def update_checkin(
                 )
             cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
             cur.execute(
-                "SELECT record_id FROM active_event_data "
+                "SELECT record_id, tag, email, "
+                "(to_jsonb(active_event_data) ? 'player_linked_by_to') "
+                "FROM active_event_data "
                 "WHERE record_id = %s AND event_slug = %s FOR UPDATE",
                 (record_id, event_slug),
             )
-            if not cur.fetchone():
+            locked = cur.fetchone()
+            if not locked:
                 return None
+            _, old_tag, old_email, has_link_column = locked
         if "member" in (fields or {}):
             provenance = member_source or fields.get("member_source") or "to"
             if provenance not in ("to", "v2", "ebas_check"):
                 raise ValueError("Invalid membership source")
             fields = {**fields, "member_source": provenance}
         result = _update_checkin_with_status(conn, record_id, fields, event_slug=event_slug)
+        if result and has_link_column and _identity_changed(fields, old_tag, old_email):
+            # T-068: a TO-confirmed player link no longer applies to an edited identity.
+            conn.execute(
+                "UPDATE active_event_data SET player_linked_by_to = false WHERE record_id = %s",
+                (record_id,),
+            )
         if result and "member" in (fields or {}) and fields.get("member_source") == "to":
             _resolve_legacy_registration_by_to(conn, record_id, event_slug, fields["member"])
         return result
+
+
+def _identity_changed(fields: Dict[str, Any], old_tag: Any, old_email: Any) -> bool:
+    def norm(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    fields = fields or {}
+    return ("tag" in fields and norm(fields["tag"]) != norm(old_tag)) or (
+        "email" in fields and norm(fields["email"]) != norm(old_email)
+    )
 
 
 def recompute_active_statuses(event_slug: str) -> int:
@@ -3528,16 +3548,18 @@ def _match_or_create_player(
     # T-068: a check-in already linked to a player (begin_checkin match, a merge or a TO's
     # live-duplicate decision) keeps that player. Without a uuid: exactly the old path.
     explicit_uuid = checkin.get("player_uuid")
-    if explicit_uuid:
+    linked_by_to = str(checkin.get("player_linked_by_to") or "").lower() == "true"
+    keep_profile_identity = False
+    if explicit_uuid and linked_by_to:
         cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (explicit_uuid,))
         player_row = cur.fetchone()
         if player_row and tag:
-            # Linked to a profile with ANOTHER tag (a merge / the TO's choice): that profile
-            # keeps its tag; today's tag stays on the archived check-in row only.
+            # Linked by the TO to a profile with ANOTHER tag: that profile keeps its own
+            # identity (tag, name, email, phone); today's details stay on the archived row.
             cur.execute("SELECT tag FROM players WHERE uuid = %s", (explicit_uuid,))
             profile_tag = (cur.fetchone() or [None])[0]
             if profile_tag and profile_tag.strip().lower() != str(tag).strip().lower():
-                tag = None
+                keep_profile_identity = True
 
     if not player_row and tag:
         cur.execute(
@@ -3627,10 +3649,10 @@ def _match_or_create_player(
             WHERE uuid = %s
             """,
             (
-                tag,
-                email,
-                checkin.get("name"),
-                checkin.get("telephone"),
+                None if keep_profile_identity else tag,
+                None if keep_profile_identity else email,
+                None if keep_profile_identity else checkin.get("name"),
+                None if keep_profile_identity else checkin.get("telephone"),
                 updated_games,
                 _Json(p_game_counts),
                 favorite,
@@ -3912,7 +3934,9 @@ def archive_event(
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
                            external_id, startgg_event_id, is_guest, added_via, acquisition_source,
-                           player_uuid
+                           player_uuid,
+                           (to_jsonb(active_event_data) ->> 'player_linked_by_to')
+                               AS player_linked_by_to
                     FROM active_event_data
                     WHERE event_slug = %s
                     ORDER BY record_id
@@ -5157,6 +5181,15 @@ def get_live_duplicate_pair(record_id: str, candidate_uuid: str) -> Optional[Dic
     }
 
 
+def _mark_player_link(cur, record_id: str) -> None:
+    """Flag the row's player_uuid as set by a TO decision (no-op before migration 012)."""
+    cur.execute(
+        "UPDATE active_event_data SET player_linked_by_to = true "
+        "WHERE record_id = %s AND (to_jsonb(active_event_data) ? 'player_linked_by_to')",
+        (record_id,),
+    )
+
+
 def _ensure_checkin_player(record_id: str, user: Optional[Dict[str, Any]] = None) -> str:
     """The check-in's player uuid; creates a stub profile from the row ONLY when it has none.
 
@@ -5189,6 +5222,7 @@ def _ensure_checkin_player(record_id: str, user: Optional[Dict[str, Any]] = None
                 if player_uuid:
                     cur.execute("SELECT 1 FROM players WHERE uuid = %s", (player_uuid,))
                     if cur.fetchone():
+                        _mark_player_link(cur, record_id)  # the TO confirmed this pairing
                         return player_uuid
                 cur.execute(
                     "INSERT INTO players (name, tag, email, telephone) VALUES (%s, %s, %s, %s) "
@@ -5200,6 +5234,7 @@ def _ensure_checkin_player(record_id: str, user: Optional[Dict[str, Any]] = None
                     "UPDATE active_event_data SET player_uuid = %s WHERE record_id = %s",
                     (stub, record_id),
                 )
+                _mark_player_link(cur, record_id)
     actor = user or {}
     log_action(
         actor,
@@ -5250,6 +5285,10 @@ def resolve_live_duplicate(
         return {"action": action, "player_uuid": own}
     keep, remove = (own, candidate_uuid) if action == "keep_checkin" else (candidate_uuid, own)
     result = merge_players(keep, remove, reason="Live duplicate: same player", user=actor)
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _mark_player_link(cur, record_id)  # now pointing at the kept profile
     # TODO(T-067): trigger its recompute here once merged.
     return {"action": action, **result}
 
