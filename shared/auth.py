@@ -42,6 +42,11 @@ OAUTH_SCOPES = "user.identity user.email tournament.manager"
 DEFAULT_TIMEOUT = 10.0
 
 
+def oauth_state_cookie_name(*, secure: bool) -> str:
+    """Use a host-bound cookie whenever the existing secure-cookie policy applies."""
+    return "__Host-fgt_oauth_state" if secure else OAUTH_STATE_COOKIE_NAME
+
+
 def _state_signature(state: str, issued_at: str) -> str:
     if not STARTGG_CLIENT_SECRET.strip():
         raise ValueError("OAuth state signing secret is not configured")
