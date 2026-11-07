@@ -114,6 +114,15 @@ def test_member_snapshot_changed_by_to_cannot_bypass_personnummer_validation(
         "000000000000",
         SYNTHETIC_PERSONNUMMER[:-1] + "3",
         SYNTHETIC_PERSONNUMMER + "0",
+        pytest.param(
+            SYNTHETIC_PERSONNUMMER.translate(str.maketrans("0123456789", "０１２３４５６７８９")),
+            id="fullwidth-digits",
+        ),
+        pytest.param(
+            SYNTHETIC_PERSONNUMMER.translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")),
+            id="arabic-indic-digits",
+        ),
+        pytest.param(SYNTHETIC_PERSONNUMMER[:-1] + "²", id="superscript-digit"),
     ],
 )
 def test_invalid_personnummer_never_claims_a_guard_or_submits(
@@ -145,6 +154,7 @@ def test_invalid_personnummer_never_claims_a_guard_or_submits(
         SYNTHETIC_PERSONNUMMER,
         SYNTHETIC_PERSONNUMMER[-10:],
         SYNTHETIC_PERSONNUMMER[:8] + "-" + SYNTHETIC_PERSONNUMMER[8:],
+        SYNTHETIC_PERSONNUMMER[:8] + "+" + SYNTHETIC_PERSONNUMMER[8:],
     ],
 )
 def test_valid_personnummer_formats_reach_one_submission(legacy_context, n8n_stub, personnummer):
@@ -157,7 +167,9 @@ def test_valid_personnummer_formats_reach_one_submission(legacy_context, n8n_stu
             )
         assert response.json()["state"] == "local_sync_pending"
         assert len(n8n_stub.calls) == 1
-        assert n8n_stub.calls[0]["json"]["personnummer"] == personnummer.replace("-", "")
+        assert n8n_stub.calls[0]["json"]["personnummer"] == personnummer.replace("-", "").replace(
+            "+", ""
+        )
 
     asyncio.run(scenario())
 

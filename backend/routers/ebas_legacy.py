@@ -261,7 +261,11 @@ async def ebas_register(request: Request):
     valid, validation_error = (
         validate_personnummer(raw_personnummer)
         if isinstance(raw_personnummer, str)
-        else (False, "Personal ID is required")
+        and re.fullmatch(r"[0-9]{6}(?:[0-9]{2})?[-+]?[0-9]{4}", raw_personnummer)
+        else (
+            False,
+            "Personal ID must use 10 or 12 ASCII digits, with an optional - or + separator",
+        )
     )
     if not valid and fields.get("member") is not True:
         raise HTTPException(status_code=400, detail=validation_error)
