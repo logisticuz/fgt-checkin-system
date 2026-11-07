@@ -123,8 +123,10 @@ def test_matching_contact_issues_authority_that_works_for_all_flows(
     _legacy_enabled(backend_app, monkeypatch)
     n8n_stub.response = {"success": True}
     legacy = member_client.post("/api/ebas/register", json=_legacy(owner, token))
-    assert legacy.status_code == 200
-    assert legacy.json()["success"] is True
+    assert legacy.status_code == 202
+    assert legacy.json()["success"] is False
+    assert legacy.json()["state"] == "outcome_unknown"
+    assert legacy.json()["retry_allowed"] is False
     assert len(n8n_stub.calls) == 1
     assert n8n_stub.calls[0]["json"]["checkin_id"] == owner["record_id"]
     assert "status_token" not in n8n_stub.calls[0]["json"]

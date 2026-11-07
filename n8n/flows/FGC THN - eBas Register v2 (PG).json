@@ -39,8 +39,22 @@
         "url": "https://ebas.sverok.se/apis/submit_member_with_lookup.json",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"api_key\": \"{{ $env.EBAS_API_KEY }}\",\n  \"member\": {\n    \"socialsecuritynumber\": \"{{ $json.pnr }}\",\n    \"renewed\": \"{{ $json.renewed }}\",\n    \"firstname\": \"\",\n    \"lastname\": \"\",\n    \"street\": \"\",\n    \"zip_code_id\": \"\",\n    \"city\": \"\",\n    \"country_id\": \"1\",\n    \"email\": \"{{ $json.email }}\",\n    \"phone1\": \"{{ $json.phone }}\",\n    \"co\": [],\n    \"member_nick\": {{ $json.nick ? '\"' + $json.nick + '\"' : 'null' }},\n    \"discord_user_id\": {{ $json.discord ? '\"' + $json.discord + '\"' : 'null' }}\n  }\n}",
-        "options": {}
+        "jsonBody": "={{ JSON.stringify({\n  api_key: $env.EBAS_API_KEY,\n  member: {\n    socialsecuritynumber: $json.pnr, renewed: $json.renewed,\n    firstname: '', lastname: '', street: '', zip_code_id: '', city: '', country_id: '1',\n    email: $json.email, phone1: $json.phone, co: [],\n    member_nick: $json.nick || null, discord_user_id: $json.discord || null\n  }\n}) }}",
+        "options": {
+          "timeout": 75000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
       },
       "name": "Call eBas API",
       "type": "n8n-nodes-base.httpRequest",
@@ -49,11 +63,13 @@
         736,
         208
       ],
-      "id": "call-ebas-v2"
+      "id": "call-ebas-v2",
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
     },
     {
       "parameters": {
-        "jsCode": "// Parse eBas submit_member_with_lookup response\nconst response = $json;\nconst input = $('Normalize Input').first().json;\nconst tag = input.tag || '';\nconst slug = input.slug || '';\nconst checkin_id = input.checkin_id || '';\n\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{\n    json: {\n      success: true,\n      registered: true,\n      message: 'Medlem registrerad i Sverok',\n      tag,\n      slug,\n      checkin_id,\n    }\n  }];\n}\n\nif (response.member_errors) {\n  const errors = Object.entries(response.member_errors)\n    .map(([field, msgs]) => field + ': ' + msgs.join(', '))\n    .join('; ');\n  return [{\n    json: {\n      success: false,\n      error: true,\n      message: errors || 'Kunde inte registrera medlem',\n      details: response.member_errors,\n      tag,\n      slug,\n      checkin_id,\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    success: false,\n    error: true,\n    message: response.request_result || 'Okänt fel',\n    raw_response: response,\n    tag,\n    slug,\n    checkin_id,\n  }\n}];"
+        "jsCode": "// Only an explicit provider rejection permits another submit. Transport ambiguity does not.\nconst input = $('Normalize Input').first().json;\nconst ctx = { tag: input.tag || '', slug: input.slug || '', checkin_id: input.checkin_id || '' };\nconst unknown = () => [{ json: { ...ctx, success: false, state: 'outcome_unknown', retry_allowed: false } }];\nconst status = $json.statusCode;\nlet response = $json.body;\nif (!Number.isInteger(status) || status < 200 || status >= 300) return unknown();\nif (typeof response === 'string') {\n  try { response = JSON.parse(response); } catch (_) { return unknown(); }\n}\nif (!response || typeof response !== 'object' || Array.isArray(response)) return unknown();\nif (Object.prototype.hasOwnProperty.call(response, 'stored_member') && typeof response.stored_member !== 'boolean') return unknown();\nif (response.stored_member === true && response.request_result === 'success') {\n  return [{ json: { ...ctx, success: true, state: 'accepted', provider_accepted: true } }];\n}\nconst errors = response.member_errors;\nconst hasErrors = errors && typeof errors === 'object' && !Array.isArray(errors)\n  && Object.values(errors).some(value => typeof value === 'string' ? !!value.trim()\n    : Array.isArray(value) && value.some(message => typeof message === 'string' && !!message.trim()));\nif (response.request_result !== 'fail' || response.stored_member === true || !hasErrors) return unknown();\nconst aliases = { socialsecuritynumber: 'personnummer', personnummer: 'personnummer', email: 'email', phone1: 'telephone', phone: 'telephone', telephone: 'telephone' };\nconst fields = {};\nfor (const [name, value] of Object.entries(errors)) {\n  const field = Object.prototype.hasOwnProperty.call(aliases, name) ? aliases[name] : null;\n  if (!field) continue;\n  const messages = typeof value === 'string' ? [value] : value;\n  if (!Array.isArray(messages)) continue;\n  const clean = messages.filter(message => typeof message === 'string' && message.trim()).slice(0, 3)\n    .map(message => message.trim().slice(0, 200).replace(/(?<!\\d)(?:\\d{12}|\\d{10}|\\d{8}[-+]\\d{4}|\\d{6}[-+]\\d{4})(?!\\d)/g, '[personal ID]'));\n  if (clean.length) fields[field] = [...(fields[field] || []), ...clean].slice(0, 3);\n}\nreturn [{ json: { ...ctx, success: false, state: 'rejected', verified_rejection: true,\n  request_result: 'fail', retry_allowed: true, field_errors: fields } }];"
       },
       "name": "Parse Response",
       "type": "n8n-nodes-base.code",
@@ -90,11 +106,19 @@
         "url": "=http://backend:8000/api/checkin/{{ $json.checkin_id }}/member-status",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ member: true }) }}",
+        "jsonBody": "={{ JSON.stringify({ member: true, ok: true, state: 'verified_true', checkin_id: $json.checkin_id }) }}",
         "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
           "response": {
             "response": {
-              "neverError": true
+              "neverError": true,
+              "fullResponse": true,
+              "responseFormat": "text"
             }
           }
         },
@@ -116,7 +140,8 @@
         112
       ],
       "id": "report-member-v2",
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
     },
     {
       "parameters": {
@@ -124,8 +149,10 @@
         "url": "http://backend:8000/api/notify/update",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"event_type\": \"member_update\",\n  \"tag\": \"{{ $('Parse Response').first().json.tag }}\",\n  \"member\": true\n}",
-        "options": {},
+        "jsonBody": "={{ JSON.stringify({ event_type: 'member_update', tag: $('Parse Response').first().json.tag, checkin_id: $('Parse Response').first().json.checkin_id }) }}",
+        "options": {
+          "timeout": 10000
+        },
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -144,11 +171,12 @@
         112
       ],
       "id": "notify-sse-v2",
-      "continueOnFail": true
+      "continueOnFail": true,
+      "retryOnFail": false
     },
     {
       "parameters": {
-        "jsCode": "// Return success response\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+        "jsCode": "// An SSE notification is never a local database acknowledgement.\nconst parsed = $('Parse Response').first().json;\nconst ack = $('Report Member Status').first().json;\nlet body = ack.body;\nif (typeof body === 'string') { try { body = JSON.parse(body); } catch (_) { body = null; } }\nconst acknowledged = Number.isInteger(ack.statusCode) && ack.statusCode >= 200 && ack.statusCode < 300\n  && body && typeof body === 'object' && body.success === true && body.member === true\n  && body.checkin_id === parsed.checkin_id;\nreturn [{ json: acknowledged\n  ? { success: true, state: 'registered', registered: true, member: true, provider_accepted: true, retry_allowed: false }\n  : { success: false, state: 'local_sync_pending', provider_accepted: true, retry_allowed: false } }];"
       },
       "name": "Return Success",
       "type": "n8n-nodes-base.code",
@@ -161,7 +189,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Return error response\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed }];"
+        "jsCode": "// Whitelist the public result. Never return provider bodies or execution errors.\nconst parsed = $('Parse Response').first().json;\nreturn [{ json: parsed.state === 'rejected' && parsed.verified_rejection === true\n  ? { success: false, state: 'rejected', verified_rejection: true, request_result: 'fail', retry_allowed: true, field_errors: parsed.field_errors }\n  : { success: false, state: 'outcome_unknown', retry_allowed: false } }];"
       },
       "name": "Return Error",
       "type": "n8n-nodes-base.code",

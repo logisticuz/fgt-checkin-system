@@ -17,9 +17,7 @@ SAVE_SETTINGS = {
     "saveManualExecutions": False,
     "saveExecutionProgress": False,
 }
-PNR_PATTERN = re.compile(
-    r"(?<!\d)(?:\d{12}|\d{10}|\d{8}[-+]\d{4}|\d{6}[-+]\d{4})(?!\d)"
-)
+PNR_PATTERN = re.compile(r"(?<!\d)(?:\d{12}|\d{10}|\d{8}[-+]\d{4}|\d{6}[-+]\d{4})(?!\d)")
 BASE = {
     "FGC THN - Checkin Orchestrator v5 (PG).json": {
         "names": {
@@ -64,7 +62,7 @@ BASE = {
             "Return Success",
             "Webhook",
         },
-        "invariant": "04ac9f19e6d4ccc0d59db1e9e6995c6a08716f828dcbe82daa1be2ea01120b8b",
+        "invariant": "b29be5796bb88c9d22e28ae8cff6a6a5fc3bf0805b84d3edbf28533a9b964f6f",
         "callbacks": 2,
     },
     "FGC THN - Start.gg Check.json": {
@@ -156,13 +154,8 @@ def semantic_digest(flow):
                     ]
                     if headers == {"parameters": []}:
                         parameters.pop("headerParameters")
-            if (
-                node.get("type") == "n8n-nodes-base.stickyNote"
-                and node["name"] == "Normalize"
-            ):
-                content = PNR_PATTERN.sub(
-                    "PNR_FORMAT_PLACEHOLDER", parameters.get("content", "")
-                )
+            if node.get("type") == "n8n-nodes-base.stickyNote" and node["name"] == "Normalize":
+                content = PNR_PATTERN.sub("PNR_FORMAT_PLACEHOLDER", parameters.get("content", ""))
                 for placeholder in ("YYYYMMDDXXXX", "YYMMDDXXXX", "YYMMDD-XXXX"):
                     content = content.replace(placeholder, "PNR_FORMAT_PLACEHOLDER")
                 parameters["content"] = content
@@ -176,7 +169,7 @@ def test_connections_executable_payloads_and_other_fields_match_reviewed_snapsho
     workflow,
 ):
     # T-028 intentionally revises three snapshots for matching, timeouts and degraded states.
-    # eBas Register remains pinned to T-016's original invariant.
+    # T-053 revises Register for typed outcomes and canonical callback acknowledgement.
     name, flow = workflow
     assert semantic_digest(flow) == BASE[name]["invariant"]
 
@@ -216,12 +209,7 @@ def test_all_repo_flow_json_files_parse():
 
 def test_operator_documentation_is_short():
     assert (
-        len(
-            (ROOT / "docs" / "n8n-pnr-hygiene.md")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        )
-        <= 30
+        len((ROOT / "docs" / "n8n-pnr-hygiene.md").read_text(encoding="utf-8").splitlines()) <= 30
     )
 
 
@@ -239,7 +227,7 @@ def node_named(version, name):
     return next(node for node in version["nodes"] if node["name"] == name)
 
 
-def run_node(version, name, current=None, named=None):
+def run_node(version, name, current=None, named=None, env=None):
     """Execute the exported Code node or body expression against synthetic n8n inputs."""
     node = shutil.which("node")
     if not node:
@@ -256,14 +244,14 @@ const lookup = name => {
   if (!(name in input.named)) throw new Error('Synthetic unavailable node');
   return { first: () => ({ json: input.named[name] }) };
 };
-const result = new Function('$json', '$', '$execution', input.code)(
-  input.current, lookup, { id: 'synthetic-execution' });
+const result = new Function('$json', '$', '$execution', '$env', input.code)(
+  input.current, lookup, { id: 'synthetic-execution' }, input.env);
 process.stdout.write(JSON.stringify(result));
 """
     result = subprocess.run(
         [node, "-e", program],
         input=json.dumps(
-            {"code": code, "current": current or {}, "named": named or {}}
+            {"code": code, "current": current or {}, "named": named or {}, "env": env or {}}
         ),
         text=True,
         capture_output=True,
@@ -284,9 +272,7 @@ def test_exported_versions_have_identical_execution_graphs(name):
 
 @pytest.mark.parametrize("name", [STARTGG, EBAS, ORCHESTRATOR])
 @pytest.mark.parametrize("published", [False, True])
-def test_integration_http_requests_are_bounded_and_continue_after_errors(
-    name, published
-):
+def test_integration_http_requests_are_bounded_and_continue_after_errors(name, published):
     requests = [
         node
         for node in flow_version(name, published)["nodes"]
@@ -295,10 +281,7 @@ def test_integration_http_requests_are_bounded_and_continue_after_errors(
     assert len(requests) == (4 if name == ORCHESTRATOR else 1)
     for node in requests:
         assert 0 < node["parameters"]["options"]["timeout"] <= 10000
-        assert (
-            node.get("continueOnFail") is True
-            or node.get("onError") == "continueRegularOutput"
-        )
+        assert node.get("continueOnFail") is True or node.get("onError") == "continueRegularOutput"
 
 
 @pytest.mark.parametrize("published", [False, True])
@@ -321,10 +304,7 @@ def test_startgg_requires_exact_trimmed_case_insensitive_match(
     assert "participant.gamerTag.trim().toLowerCase() === requestedTag" in code
     assert "participants[0]" not in code
     # Required Python mirror: the comparison is equality, never substring matching.
-    assert (
-        any(tag.strip().lower() == requested.strip().lower() for tag in candidates)
-        is expected
-    )
+    assert any(tag.strip().lower() == requested.strip().lower() for tag in candidates) is expected
     result = run_node(
         version,
         "Parse Response",
@@ -388,9 +368,7 @@ def test_graphql_variables_are_serialized_in_code_with_special_characters(publis
         {"data": {"tournament": {"participants": {}}}},
     ],
 )
-def test_startgg_errors_are_unavailable_without_registration_boolean(
-    published, response
-):
+def test_startgg_errors_are_unavailable_without_registration_boolean(published, response):
     result = run_node(
         flow_version(STARTGG, published),
         "Parse Response",
@@ -434,38 +412,19 @@ def test_ebas_requires_explicit_api_boolean_and_marks_errors_unavailable(
 @pytest.mark.parametrize("published", [False, True])
 def test_missing_input_bypasses_external_requests_and_returns_skipped(published):
     startgg = flow_version(STARTGG, published)
-    assert (
-        startgg["connections"]["Parse Input"]["main"][0][0]["node"]
-        == "IF Skip Start.gg"
-    )
-    assert (
-        startgg["connections"]["IF Skip Start.gg"]["main"][0][0]["node"]
-        == "Parse Response"
-    )
+    assert startgg["connections"]["Parse Input"]["main"][0][0]["node"] == "IF Skip Start.gg"
+    assert startgg["connections"]["IF Skip Start.gg"]["main"][0][0]["node"] == "Parse Response"
     parsed = run_node(startgg, "Parse Input")
     result = run_node(startgg, "Parse Response", parsed, {"Parse Input": parsed})
-    assert (
-        result["ok"] is False
-        and result["state"] == "skipped"
-        and "isRegistered" not in result
-    )
+    assert result["ok"] is False and result["state"] == "skipped" and "isRegistered" not in result
     ebas = flow_version(EBAS, published)
-    assert (
-        ebas["connections"]["IF Skip eBas"]["main"][0][0]["node"]
-        == "Skip - Return Result"
-    )
+    assert ebas["connections"]["IF Skip eBas"]["main"][0][0]["node"] == "Skip - Return Result"
     parsed = run_node(ebas, "Normalize Personnummer")
     assert parsed["skipEbas"] is True
     result = run_node(ebas, "Skip - Return Result", parsed)
-    assert (
-        result["ok"] is False
-        and result["state"] == "skipped"
-        and "isMember" not in result
-    )
+    assert result["ok"] is False and result["state"] == "skipped" and "isMember" not in result
     assert "personnummer" not in result and "_pnr_normalized" not in result
-    valid_input = run_node(
-        ebas, "Normalize Personnummer", {"body": {"personnummer": "0" * 12}}
-    )
+    valid_input = run_node(ebas, "Normalize Personnummer", {"body": {"personnummer": "0" * 12}})
     assert valid_input["skipEbas"] is False
 
 
@@ -509,9 +468,7 @@ def test_v5_report_payloads_distinguish_verification_from_errors(published, kind
         ("eBas", "ebas", "member"),
         ("Start.gg", "startgg", "registered"),
     ]:
-        report = run_node(
-            version, f"Report {title} Result", named={"Combine Results": combined}
-        )
+        report = run_node(version, f"Report {title} Result", named={"Combine Results": combined})
         assert report["source"] == source and report["ok"] is ok
         assert report["state"] == expected_state
         assert report["attempt_id"] == "synthetic-attempt"
@@ -553,9 +510,7 @@ def test_v5_keeps_integration_states_independent(published, run_startgg):
             "Start.gg Check": {"error": "Synthetic timeout"},
         },
     )
-    assert combined["_ebasState"] == "verified_true" and combined["_ebasData"] == {
-        "member": True
-    }
+    assert combined["_ebasState"] == "verified_true" and combined["_ebasData"] == {"member": True}
     assert combined["_startggState"] == ("unavailable" if run_startgg else "skipped")
     assert combined["_startggData"] == {} and combined["startgg"] is None
 
@@ -563,7 +518,268 @@ def test_v5_keeps_integration_states_independent(published, run_startgg):
 def test_v5_has_no_dead_startgg_email_handling():
     for version in versions(flow_version(ORCHESTRATOR)):
         for node in version["nodes"]:
-            source = node.get("parameters", {}).get("jsCode", "") + node.get(
-                "parameters", {}
-            ).get("jsonBody", "")
+            source = node.get("parameters", {}).get("jsCode", "") + node.get("parameters", {}).get(
+                "jsonBody", ""
+            )
             assert "sgg.email" not in source and "startgg_email" not in source
+
+
+REGISTER = "FGC THN - eBas Register v2 (PG).json"
+REGISTER_CONTEXT = {
+    "tag": "synthetic",
+    "slug": "synthetic-event",
+    "checkin_id": "synthetic-checkin",
+}
+
+
+def test_register_provider_submit_has_no_retry_or_redirect_and_bounded_full_text_response():
+    version = flow_version(REGISTER)
+    for name, timeout in (("Call eBas API", 75000), ("Report Member Status", 10000)):
+        node = node_named(version, name)
+        options = node["parameters"]["options"]
+        assert options["timeout"] == timeout
+        assert options["redirect"]["redirect"]["followRedirects"] is False
+        assert options["response"]["response"] == {
+            "neverError": True,
+            "fullResponse": True,
+            "responseFormat": "text",
+        }
+        assert node["onError"] == "continueRegularOutput"
+        assert node["retryOnFail"] is False
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        (
+            {"statusCode": 200, "body": {"stored_member": True, "request_result": "success"}},
+            "accepted",
+        ),
+        (
+            {"statusCode": 200, "body": '{"stored_member":true,"request_result":"success"}'},
+            "accepted",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"request_result": "fail", "member_errors": {"email": ["Check email"]}},
+            },
+            "rejected",
+        ),
+        ({"statusCode": 200, "body": ""}, "outcome_unknown"),
+        ({"statusCode": 200, "body": "not-json"}, "outcome_unknown"),
+        ({"statusCode": 200, "body": []}, "outcome_unknown"),
+        (
+            {"statusCode": 200, "body": {"stored_member": "true", "request_result": "success"}},
+            "outcome_unknown",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {
+                    "stored_member": True,
+                    "request_result": "fail",
+                    "member_errors": {"email": ["Conflict"]},
+                },
+            },
+            "outcome_unknown",
+        ),
+        (
+            {"statusCode": 200, "body": {"request_result": "fail", "member_errors": {}}},
+            "outcome_unknown",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"request_result": "fail", "member_errors": {"email": [{"raw": "bad"}]}},
+            },
+            "outcome_unknown",
+        ),
+        (
+            {"statusCode": 503, "body": {"stored_member": True, "request_result": "success"}},
+            "outcome_unknown",
+        ),
+        (
+            {
+                "statusCode": 302,
+                "body": {"request_result": "fail", "member_errors": {"email": ["Error"]}},
+            },
+            "outcome_unknown",
+        ),
+        ({"error": {"message": "synthetic timeout"}}, "outcome_unknown"),
+    ],
+)
+def test_register_distinguishes_explicit_acceptance_rejection_and_unknown(reply, expected):
+    result = run_node(
+        flow_version(REGISTER), "Parse Response", reply, {"Normalize Input": REGISTER_CONTEXT}
+    )
+    assert result["state"] == expected
+    assert result["checkin_id"] == REGISTER_CONTEXT["checkin_id"]
+    assert result.get("retry_allowed", False) is (expected == "rejected")
+    assert "raw_response" not in result and "member_errors" not in result
+    if expected == "accepted":
+        assert result["provider_accepted"] is True
+    if expected == "rejected":
+        assert result["verified_rejection"] is True and result["request_result"] == "fail"
+
+
+def test_register_field_errors_are_limited_to_form_fields_and_personal_id_is_redacted():
+    result = run_node(
+        flow_version(REGISTER),
+        "Parse Response",
+        {
+            "statusCode": 200,
+            "body": {
+                "request_result": "fail",
+                "member_errors": {
+                    "socialsecuritynumber": ["Invalid 000000000000"],
+                    "email": ["Check email"],
+                    "private_debug": ["do-not-publish"],
+                },
+                "raw_response": "do-not-publish",
+            },
+        },
+        {"Normalize Input": REGISTER_CONTEXT},
+    )
+    assert result["field_errors"] == {
+        "personnummer": ["Invalid [personal ID]"],
+        "email": ["Check email"],
+    }
+    assert "do-not-publish" not in json.dumps(result)
+
+
+def test_register_callback_sends_typed_truth_and_the_matching_checkin_id():
+    body = run_node(flow_version(REGISTER), "Report Member Status", REGISTER_CONTEXT)
+    assert body == {
+        "member": True,
+        "ok": True,
+        "state": "verified_true",
+        "checkin_id": "synthetic-checkin",
+    }
+
+
+@pytest.mark.parametrize(
+    "ack,expected",
+    [
+        (
+            {
+                "statusCode": 200,
+                "body": {
+                    "success": True,
+                    "member": True,
+                    "checkin_id": "synthetic-checkin",
+                    "status": "Pending",
+                },
+            },
+            "registered",
+        ),
+        (
+            {
+                "statusCode": 201,
+                "body": '{"success":true,"member":true,"checkin_id":"synthetic-checkin","status":"Ready"}',
+            },
+            "registered",
+        ),
+        (
+            {
+                "statusCode": 500,
+                "body": {"success": True, "member": True, "checkin_id": "synthetic-checkin"},
+            },
+            "local_sync_pending",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"success": False, "member": True, "checkin_id": "synthetic-checkin"},
+            },
+            "local_sync_pending",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"success": True, "member": False, "checkin_id": "synthetic-checkin"},
+            },
+            "local_sync_pending",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"success": True, "member": "true", "checkin_id": "synthetic-checkin"},
+            },
+            "local_sync_pending",
+        ),
+        (
+            {
+                "statusCode": 200,
+                "body": {"success": True, "member": True, "checkin_id": "another-checkin"},
+            },
+            "local_sync_pending",
+        ),
+        ({"statusCode": 200, "body": {}}, "local_sync_pending"),
+        ({"statusCode": 200, "body": "not-json"}, "local_sync_pending"),
+        ({"error": {"message": "synthetic callback timeout"}}, "local_sync_pending"),
+    ],
+)
+def test_register_success_requires_canonical_callback_acknowledgement(ack, expected):
+    result = run_node(
+        flow_version(REGISTER),
+        "Return Success",
+        {"error": "SSE failure cannot forge an acknowledgement"},
+        {
+            "Parse Response": {**REGISTER_CONTEXT, "success": True, "provider_accepted": True},
+            "Report Member Status": ack,
+        },
+    )
+    assert result["state"] == expected
+    assert result["success"] is (expected == "registered")
+    assert result["provider_accepted"] is True and result["retry_allowed"] is False
+
+
+def test_register_sse_notification_requests_refresh_without_asserting_unacknowledged_membership():
+    body = run_node(
+        flow_version(REGISTER), "Notify SSE", named={"Parse Response": REGISTER_CONTEXT}
+    )
+    assert body == {
+        "event_type": "member_update",
+        "tag": "synthetic",
+        "checkin_id": "synthetic-checkin",
+    }
+    assert "member" not in body
+
+
+def test_register_provider_body_uses_json_serialization_for_special_characters():
+    context = {
+        "pnr": "000000000000",
+        "renewed": "2026-11-14",
+        "email": 'synthetic"quote@example.invalid',
+        "phone": "+46000000000",
+        "nick": 'A"B\\C',
+        "discord": None,
+    }
+    body = run_node(
+        flow_version(REGISTER), "Call eBas API", context, env={"EBAS_API_KEY": "synthetic-only"}
+    )
+    assert body["api_key"] == "synthetic-only"
+    assert body["member"]["email"] == context["email"]
+    assert body["member"]["member_nick"] == context["nick"]
+
+
+@pytest.mark.parametrize("malformed_flag", ["true", 1, None])
+def test_register_malformed_storage_flag_cannot_turn_a_failure_into_retryable_rejection(
+    malformed_flag,
+):
+    result = run_node(
+        flow_version(REGISTER),
+        "Parse Response",
+        {
+            "statusCode": 200,
+            "body": {
+                "stored_member": malformed_flag,
+                "request_result": "fail",
+                "member_errors": {"email": ["Check email"]},
+            },
+        },
+        {"Normalize Input": REGISTER_CONTEXT},
+    )
+    assert result["state"] == "outcome_unknown"
+    assert result["retry_allowed"] is False

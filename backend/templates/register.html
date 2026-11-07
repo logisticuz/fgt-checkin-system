@@ -303,7 +303,7 @@
         Register as Member
       </button>
       <p style="margin-top: 0.75rem; color: #8aa0b6; font-size: 0.9rem;">
-        Keep this page open until you get a success or error message.
+        Keep this page open until membership is confirmed or a TO can help you.
       </p>
     </section>
 
@@ -677,6 +677,7 @@
     // eBas form validation - enables button only when all required fields are valid
     function validateEbasForm() {
       const btn = document.getElementById("btn-register-ebas");
+      if (btn.dataset.processing === "true") { btn.disabled = true; return; }
       const pnrRaw = document.getElementById("pnr-ebas").value.trim();
       const phone = document.getElementById("phone-ebas").value.trim();
       const errorEl = document.getElementById("pnr-error");
@@ -707,7 +708,9 @@
         await new Promise(resolve => setTimeout(resolve, 5000));
         if (Date.now() >= deadline) break;
         try {
-          const response = await fetch(`/api/participant/${encodeURIComponent(state.name)}/status`, {
+          const checkinId = params.get("checkin_id") || "";
+          const token = params.get("t") || "";
+          const response = await fetch(`/api/checkin/${encodeURIComponent(checkinId)}/status?t=${encodeURIComponent(token)}`, {
             signal: AbortSignal.timeout(Math.min(5000, deadline - Date.now()))
           });
           if (response.ok && (await response.json()).member === true) return true;
@@ -720,7 +723,7 @@
 
     document.getElementById("btn-register-ebas").addEventListener("click", async function() {
       const btn = this;
-      if (btn.dataset.processing === "true") return;
+      if (!state.needsEbas || btn.dataset.processing === "true") return;
       const pnrRaw = document.getElementById("pnr-ebas").value.trim();
       const email = document.getElementById("email-ebas").value.trim();
       const phone = document.getElementById("phone-ebas").value.trim();
@@ -767,7 +770,10 @@
       const disabledStates = controls.map(control => control.disabled);
       controls.forEach(control => { control.disabled = true; });
       btn.dataset.processing = "true";
-      let processing = false;
+      // Default to holding the page: only a verified rejection enables another POST.
+      let processing = true;
+      const unknownMessage = "Your registration may have gone through – a TO will check. Please don't register again.";
+      const localPendingMessage = "Your registration was received – a TO will finish it with you. Please don't register again.";
       setButtonLoading(btn, true, "Creating membership...");
       clearMessages();
 
@@ -782,24 +788,41 @@
           body: JSON.stringify({
             personnummer: pnr, email, telephone: phone, tag, slug,
             checkin_id: ownedCheckinId, status_token: ownedToken,
-          })
+          }),
+          signal: AbortSignal.timeout(90000)
         });
 
         let data = await response.json();
 
-        if (response.status === 202 && data.state === "processing") {
-          processing = true;
-          btn.textContent = "Registration in progress...";
-          showRegistrationMessage("Membership registration in progress – this can take up to 3 minutes. Don't close this page.");
-          if (!await waitForRegisteredMembership()) {
-            showRegistrationMessage("Still processing – ask a TO to check your membership");
-            return;
-          }
+        if (data && data.state === "rejected" && data.retry_allowed === true) {
           processing = false;
-          data = { success: true };
+          const labels = { personnummer: "Personal ID", email: "Email", telephone: "Phone" };
+          const details = [];
+          if (data.field_errors && typeof data.field_errors === "object") {
+            for (const [field, messages] of Object.entries(data.field_errors)) {
+              if (!Object.prototype.hasOwnProperty.call(labels, field) || !Array.isArray(messages)) continue;
+              for (const message of messages.slice(0, 3)) {
+                if (typeof message === "string" && message.trim()) details.push(`${labels[field]}: ${message.slice(0, 200)}`);
+              }
+            }
+          }
+          showRegistrationMessage(details.join(" ") || "Please check your details or ask a TO for help.", "error");
+          return;
         }
 
-        if (data.success || data.already_member) {
+        if (data && (data.state === "processing" || data.state === "local_sync_pending")) {
+          btn.textContent = "Registration in progress...";
+          showRegistrationMessage(data.state === "local_sync_pending" ? localPendingMessage
+            : "Membership registration in progress – this can take up to 3 minutes. Don't close this page.");
+          if (!await waitForRegisteredMembership()) {
+            showRegistrationMessage(data.state === "local_sync_pending" ? localPendingMessage : unknownMessage);
+            return;
+          }
+          data = { success: true, state: "registered", member: true };
+        }
+
+        if (data && data.success === true && data.member === true && data.state === "registered") {
+          processing = false;
           showRegistrationMessage(data.already_member
             ? "You are already a member - perfect!"
             : "Membership registered! Thank you for supporting us!", "success");
@@ -817,21 +840,12 @@
 
           updateFinalButton();
         } else {
-          // Handle different response formats from n8n
-          let errorMsg = "Could not complete membership registration right now";
-          if (typeof data.message === "string") {
-            errorMsg = data.message;
-          } else if (data.message?.error) {
-            errorMsg = data.message.error;
-          } else if (data.error && typeof data.error === "string") {
-            errorMsg = data.error;
-          } else if (typeof data.detail === "string") {
-            errorMsg = data.detail;
-          }
-          showRegistrationMessage(errorMsg, "error");
+          btn.textContent = "Ask a TO to check";
+          showRegistrationMessage(unknownMessage);
         }
       } catch (err) {
-        showRegistrationMessage("Could not check membership registration. Ask a TO for help.", "error");
+        btn.textContent = "Ask a TO to check";
+        showRegistrationMessage(unknownMessage);
       } finally {
         if (!processing) {
           delete btn.dataset.processing;
