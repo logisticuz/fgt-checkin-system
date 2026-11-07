@@ -1851,6 +1851,54 @@ def _canonical_game_breakdown(breakdown, aliases):
     return result
 
 
+def _game_attendances(rows, aliases):
+    """Union recorded canonical games per event/UUID; unlinked rows remain separate units."""
+    units = {}
+    for index, row in enumerate(rows):
+        player = row.get("player_uuid")
+        identity = ("player", player) if player else ("row", row.get("id", index))
+        key = (row["event_slug"], *identity)
+        unit = units.setdefault(
+            key,
+            {
+                "event_slug": row["event_slug"],
+                "games": set(),
+                "game_aliases": {},
+                "metadata_available": False,
+            },
+        )
+        raw_games = row.get("tournament_games_registered")
+        if not isinstance(raw_games, (list, tuple)):
+            continue
+        # One recorded list makes metadata available for this attendance. A missing
+        # duplicate row must not exclude an attendee whose games were recorded elsewhere.
+        unit["metadata_available"] = True
+        for raw in raw_games:
+            canonical = _canonical_game_name(raw, aliases)
+            if not canonical:
+                continue
+            unit["games"].add(canonical)
+            raw = str(raw).strip()
+            if raw.lower() != canonical.lower():
+                unit["game_aliases"].setdefault(canonical, set()).add(raw)
+    return list(units.values())
+
+
+def _event_scope_date_sql(archive_ref="event_archive"):
+    """Event metadata date, falling back only to one unambiguous archived event date.
+
+    archive_ref is an internal SQL table alias, never caller input. A range selects
+    complete events, including their NULL/conflicting-date rows, before aggregation.
+    """
+    return (
+        "COALESCE((SELECT scoped_event.event_date FROM event_stats scoped_event "
+        f"WHERE scoped_event.event_slug = {archive_ref}.event_slug), "
+        "(SELECT CASE WHEN count(DISTINCT scoped_archive.event_date) = 1 "
+        "THEN min(scoped_archive.event_date) END FROM event_archive scoped_archive "
+        f"WHERE scoped_archive.event_slug = {archive_ref}.event_slug))"
+    )
+
+
 def get_event_game_stats(
     event_slugs: Optional[List[str]] = None,
     start_date: Optional[str] = None,
@@ -1858,29 +1906,34 @@ def get_event_game_stats(
     *,
     aliases: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Aggregate distinct canonical games per archived check-in; never update rows."""
+    """Count games per archived attendance, with the same event/UUID population as participants."""
     aliases = get_game_aliases() if aliases is None else aliases
     conditions, params = [], []
     if event_slugs:
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
     where_sql = "WHERE " + " AND ".join(conditions) if conditions else ""
     with _get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT event_slug, tournament_games_registered FROM event_archive " + where_sql,
+            "SELECT id, event_slug, player_uuid, tournament_games_registered FROM event_archive "
+            + where_sql,
             params,
         )
         rows = cur.fetchall()
+    rows = [
+        dict(zip(("id", "event_slug", "player_uuid", "tournament_games_registered"), row))
+        for row in rows
+    ]
     result = {}
-    for slug, raw_games in rows:
+    for unit in _game_attendances(rows, aliases):
         stats = result.setdefault(
-            slug,
+            unit["event_slug"],
             {
                 "games_breakdown": {},
                 "game_aliases": {},
@@ -1892,29 +1945,22 @@ def get_event_game_stats(
             },
         )
         stats["total_count"] += 1
-        if not isinstance(raw_games, (list, tuple)):
+        if not unit["metadata_available"]:
             stats["unknown_game_count"] += 1
             stats["metadata_complete"] = False
-            continue
-        games = set()
-        for raw in raw_games:
-            canonical = _canonical_game_name(raw, aliases)
-            if not canonical:
-                continue
-            games.add(canonical)
-            raw = str(raw).strip()
-            if raw.lower() != canonical.lower():
-                stats["game_aliases"].setdefault(canonical, set()).add(raw)
+        games = unit["games"]
         stats["total_game_slots"] += len(games)
         stats["multi_game_count"] += len(games) >= 2
         for game in games:
             stats["games_breakdown"][game] = stats["games_breakdown"].get(game, 0) + 1
+        for canonical, labels in unit["game_aliases"].items():
+            stats["game_aliases"].setdefault(canonical, set()).update(labels)
     for stats in result.values():
         stats["games_breakdown"] = dict(
-            sorted(stats["games_breakdown"].items(), key=lambda item: item[0].lower())
+            sorted(stats["games_breakdown"].items(), key=lambda item: (item[0].lower(), item[0]))
         )
         stats["game_aliases"] = {
-            canonical: sorted(labels, key=str.lower)
+            canonical: sorted(labels, key=lambda label: (label.lower(), label))
             for canonical, labels in stats["game_aliases"].items()
         }
     return result
@@ -1972,12 +2018,9 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         archived_games = game_stats.get(event_slug)
         if archived_games:
             canonical_breakdown = archived_games["games_breakdown"]
-        unknown_game_count = (
-            archived_games["unknown_game_count"]
-            + max(int(total_participants or 0) - archived_games["total_count"], 0)
-            if archived_games
-            else 0
-        )
+        # The canonical participant overlay uses these same attendance units;
+        # stale stored row counts must not invent missing game metadata.
+        unknown_game_count = archived_games["unknown_game_count"] if archived_games else 0
         alias_labels = {
             canonical: set(labels)
             for canonical, labels in (archived_games or {}).get("game_aliases", {}).items()
@@ -2025,7 +2068,43 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             }
         )
 
-    logger.info(f"📊 Retrieved {len(result)} dashboard-history rows.")
+    # Preserve T065's canonical Games projection, then overlay T015's non-game facts.
+    with _get_pool().connection() as conn, conn.transaction():
+        context = _stats_context(conn)
+        for row in result:
+            slug = row["event_slug"]
+            projected = (
+                recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)["after"]
+                if slug in context["events"]
+                else context["metadata"].get(slug, {})
+            )
+            for key in (
+                "event_date",
+                "total_participants",
+                "total_revenue",
+                "avg_payment",
+                "member_count",
+                "member_percentage",
+                "guest_count",
+                "startgg_count",
+                "status_breakdown",
+                "new_players",
+                "returning_players",
+                "retention_rate",
+                "same_series_return_rate",
+                "same_series_base_count",
+                "same_series_returned_players",
+                "startgg_registered_count",
+                "startgg_registered_players",
+                "checked_in_count",
+                "no_show_count",
+                "no_show_rate",
+                "requirements_snapshot",
+            ):
+                if key in projected:
+                    row[key] = projected[key]
+            value = row.get("event_date")
+            row["event_date"] = value.isoformat() if hasattr(value, "isoformat") else value
     return result
 
 
@@ -2042,10 +2121,10 @@ def get_event_manual_add_stats(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2092,10 +2171,10 @@ def get_added_via_breakdown(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2130,7 +2209,7 @@ def get_multi_game_count(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict[str, int]:
-    """Count check-ins with 2+ distinct canonical games in the selected scope."""
+    """Count event/UUID attendances with 2+ distinct canonical games; unlinked rows stay separate."""
     stats = get_event_game_stats(event_slugs, start_date, end_date)
     return {
         "multi_game_count": sum(row["multi_game_count"] for row in stats.values()),
@@ -2154,10 +2233,10 @@ def get_community_health_v2_stats(
         scope_conditions.append("event_slug = ANY(%s)")
         scope_params.append(event_slugs)
     if start_date:
-        scope_conditions.append("event_date >= %s")
+        scope_conditions.append(f"{_event_scope_date_sql()} >= %s")
         scope_params.append(start_date)
     if end_date:
-        scope_conditions.append("event_date <= %s")
+        scope_conditions.append(f"{_event_scope_date_sql()} <= %s")
         scope_params.append(end_date)
 
     scope_where = f"WHERE {' AND '.join(scope_conditions)}" if scope_conditions else ""
@@ -2172,13 +2251,17 @@ def get_community_health_v2_stats(
         core_params.append(event_slugs)
 
     if anchor:
-        core_conditions.append("ea.event_date <= %s::date")
+        core_conditions.append(f"{_event_scope_date_sql('ea')} <= %s::date")
         core_params.append(anchor)
-        core_conditions.append("ea.event_date >= (%s::date - (%s || ' months')::interval)")
+        core_conditions.append(
+            f"{_event_scope_date_sql('ea')} >= (%s::date - (%s || ' months')::interval)"
+        )
         core_params.append(anchor)
         core_params.append(max(int(recent_months), 1))
     else:
-        core_conditions.append("ea.event_date >= (CURRENT_DATE - (%s || ' months')::interval)")
+        core_conditions.append(
+            f"{_event_scope_date_sql('ea')} >= (CURRENT_DATE - (%s || ' months')::interval)"
+        )
         core_params.append(max(int(recent_months), 1))
 
     core_where = f"WHERE {' AND '.join(core_conditions)}"
@@ -2236,85 +2319,60 @@ def get_player_funnel_stats(
     recent_months: int = 6,
     churn_months: int = 8,
 ) -> Dict[str, int]:
-    """Return New -> Returning -> Core funnel counts for selected scope."""
+    """Unique UUID cohorts using the same first-attendance rule as event/KPI counts.
 
-    scope_conditions: List[str] = ["player_uuid IS NOT NULL"]
-    scope_params: List[Any] = []
-
-    if event_slugs:
-        scope_conditions.append("event_slug = ANY(%s)")
-        scope_params.append(event_slugs)
-    if start_date:
-        scope_conditions.append("event_date >= %s")
-        scope_params.append(start_date)
-    if end_date:
-        scope_conditions.append("event_date <= %s")
-        scope_params.append(end_date)
-
-    scope_where = f"WHERE {' AND '.join(scope_conditions)}"
-
-    anchor = anchor_date or end_date
-    core_conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
-    core_params: List[Any] = []
-
-    if event_slugs:
-        core_conditions.append("ea.event_slug = ANY(%s)")
-        core_params.append(event_slugs)
-
-    if anchor:
-        core_conditions.append("ea.event_date <= %s::date")
-        core_params.append(anchor)
-        core_conditions.append("ea.event_date >= (%s::date - (%s || ' months')::interval)")
-        core_params.append(anchor)
-        core_params.append(max(int(recent_months), 1))
-    else:
-        core_conditions.append("ea.event_date >= (CURRENT_DATE - (%s || ' months')::interval)")
-        core_params.append(max(int(recent_months), 1))
-
-    core_where = f"WHERE {' AND '.join(core_conditions)}"
-
-    query = f"""
-        WITH scoped_players AS (
-            SELECT DISTINCT player_uuid
-            FROM event_archive
-            {scope_where}
-        ),
-        core_players AS (
-            SELECT ea.player_uuid
-            FROM event_archive ea
-            JOIN scoped_players sp ON sp.player_uuid = ea.player_uuid
-            {core_where}
-            GROUP BY ea.player_uuid
-            HAVING COUNT(DISTINCT ea.event_slug) >= 3
-        ),
-        churned_players AS (
-            SELECT p.uuid
-            FROM players p
-            WHERE p.total_events > 0
-              AND p.last_seen::date < (CURRENT_DATE - (%s || ' months')::interval)
-        )
-        SELECT
-            COUNT(*) FILTER (WHERE p.total_events = 1) AS new_count,
-            COUNT(*) FILTER (WHERE p.total_events >= 2) AS returning_count,
-            (SELECT COUNT(*) FROM core_players) AS core_count,
-            (SELECT COUNT(*) FROM churned_players) AS churned_count
-        FROM scoped_players sp
-        JOIN players p ON p.uuid = sp.player_uuid
+    A person can be new at one selected event and returning at another. Funnel cohorts
+    therefore overlap; returning is unique people here versus event visits in the KPI.
     """
 
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, scope_params + core_params + [max(int(churn_months), 1)])
-            row = cur.fetchone()
+    def as_day(value):
+        return datetime.fromisoformat(str(value)).date() if value else None
 
-    if not row:
-        return {"new_count": 0, "returning_count": 0, "core_count": 0, "churned_count": 0}
-
+    lower, upper = as_day(start_date), as_day(end_date)
+    new, returning, scoped = set(), set(), set()
+    with _get_pool().connection() as conn, conn.transaction():
+        context = _stats_context(conn)
+        for slug, rows in context["events"].items():
+            day = context["order"][slug][0]
+            if event_slugs and slug not in event_slugs:
+                continue
+            if (lower or upper) and (
+                day is None or (lower and day < lower) or (upper and day > upper)
+            ):
+                continue
+            for row in rows:
+                player = row["player_uuid"]
+                if player:
+                    scoped.add(player)
+                    if day is not None:
+                        (new if context["first"].get(player) == slug else returning).add(player)
+        # Preserve Core and Churn's existing time-window definitions.
+        row = conn.execute(
+            f"""SELECT
+                (SELECT count(*) FROM (
+                    SELECT player_uuid FROM event_archive
+                    WHERE player_uuid = ANY(%s) AND {_event_scope_date_sql()} <= coalesce(%s::date, CURRENT_DATE)
+                      AND {_event_scope_date_sql()} >= coalesce(%s::date, CURRENT_DATE) - (%s || ' months')::interval
+                      AND (%s::text[] IS NULL OR event_slug = ANY(%s))
+                    GROUP BY player_uuid HAVING count(DISTINCT event_slug) >= 3
+                ) core),
+                (SELECT count(*) FROM players WHERE total_events > 0
+                 AND last_seen::date < CURRENT_DATE - (%s || ' months')::interval)""",
+            (
+                sorted(scoped),
+                anchor_date or end_date,
+                anchor_date or end_date,
+                max(int(recent_months), 1),
+                event_slugs or None,
+                event_slugs or None,
+                max(int(churn_months), 1),
+            ),
+        ).fetchone()
     return {
-        "new_count": int(row[0] or 0),
-        "returning_count": int(row[1] or 0),
-        "core_count": int(row[2] or 0),
-        "churned_count": int(row[3] or 0),
+        "new_count": len(new),
+        "returning_count": len(returning),
+        "core_count": int(row[0] or 0),
+        "churned_count": int(row[1] or 0),
     }
 
 
@@ -2336,10 +2394,10 @@ def get_game_crossover_stats(
         conditions.append("ea.event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("ea.event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("ea.event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2399,10 +2457,10 @@ def get_acquisition_source_breakdown(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2456,10 +2514,10 @@ def get_player_churn_stats(
         conditions.append("ea.event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("ea.event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("ea.event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2521,11 +2579,11 @@ def get_top_players_history(
         params.append(event_slugs)
 
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
 
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     selected_game = str(game_filter or "").strip()
@@ -2594,10 +2652,10 @@ def get_unique_attendee_count(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2727,334 +2785,610 @@ def _build_event_stats_integrity_warnings(
     return warnings
 
 
-def recompute_event_stats(event_slug: str, *, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Recompute event_stats for one archived event_slug from event_archive rows."""
-    if not event_slug:
-        raise ValueError("event_slug is required")
-
-    from psycopg.types.json import Json as _Json  # type: ignore
-
-    def _to_iso_date(value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value.date().isoformat()
-        if hasattr(value, "isoformat"):
-            try:
-                txt = value.isoformat()
-                return str(txt)[:10]
-            except Exception:
-                pass
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
-        except Exception:
-            if len(text) >= 10:
-                return text[:10]
-            return None
-
-    with _get_pool().connection() as conn:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, event_date, event_display_name, archived_at, startgg_snapshot
-                    FROM event_stats
-                    WHERE event_slug = %s
-                    LIMIT 1
-                    """,
-                    (event_slug,),
-                )
-                stats_row = cur.fetchone()
-                if not stats_row:
-                    raise ValueError(f"No event_stats row found for '{event_slug}'")
-
-                _, stats_event_date, stats_display_name, stats_archived_at, startgg_snapshot = stats_row
-
-                cur.execute(
-                    """
-                    SELECT name, tag, email, telephone, status,
-                           member, startgg, payment_valid,
-                           payment_amount, payment_expected,
-                           tournament_games_registered, checkin_uuid,
-                           external_id, startgg_event_id, is_guest,
-                           player_uuid, event_date, event_display_name
-                    FROM event_archive
-                    WHERE event_slug = %s
-                    ORDER BY id ASC
-                    """,
-                    (event_slug,),
-                )
-                cols = [d[0] for d in cur.description]
-                rows = cur.fetchall()
-
-                if not rows:
-                    raise ValueError(f"No event_archive rows found for '{event_slug}'")
-
-                checkins = [_row_to_dict(cols, r) for r in rows]
-                stats = compute_event_stats(checkins)
-
-                event_date_val = _to_iso_date(stats_event_date)
-                if not event_date_val:
-                    sample_date = checkins[0].get("event_date")
-                    event_date_val = _to_iso_date(sample_date) or datetime.now(timezone.utc).date().isoformat()
-
-                parsed_event_date = datetime.fromisoformat(event_date_val).date()
-
-                # Funnel recompute from archive history (per player_uuid)
-                new_players = 0
-                returning_players = 0
-                for c in checkins:
-                    p_uuid = c.get("player_uuid")
-                    if not p_uuid:
-                        continue
-                    cur.execute(
-                        """
-                        SELECT EXISTS(
-                            SELECT 1
-                            FROM event_archive prev
-                            WHERE prev.player_uuid = %s
-                              AND prev.event_slug <> %s
-                              AND prev.event_date < %s
-                        )
-                        """,
-                        (p_uuid, event_slug, parsed_event_date),
-                    )
-                    had_prev = bool(cur.fetchone()[0])
-                    if had_prev:
-                        returning_players += 1
-                    else:
-                        new_players += 1
-
-                total = int(stats.get("total_participants") or 0)
-                retention_rate = (
-                    (Decimal(returning_players) / Decimal(total) * 100).quantize(Decimal("0.01"))
-                    if total > 0
-                    else Decimal("0")
-                )
-
-                # No-show recompute from snapshot
-                startgg_registered_count = 0
-                startgg_registered_players = 0
-                if isinstance(startgg_snapshot, dict):
-                    startgg_registered_count = int(startgg_snapshot.get("tournament_entrants") or 0)
-                    startgg_registered_players = int(
-                        startgg_snapshot.get("tournament_entrants_players") or 0
-                    )
-                elif isinstance(startgg_snapshot, list):
-                    startgg_registered_count = sum(
-                        int(e.get("numEntrants") or 0)
-                        for e in startgg_snapshot
-                        if isinstance(e, dict)
-                    )
-
-                checked_in_count = total
-                no_show_base = startgg_registered_players or startgg_registered_count
-                no_show_count = max(no_show_base - checked_in_count, 0)
-                no_show_rate = (
-                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(Decimal("0.01"))
-                    if no_show_base > 0
-                    else Decimal("0")
-                )
-
-                payment_valid_count = sum(1 for c in checkins if bool(c.get("payment_valid")))
-                paid_amount_count = sum(
-                    1 for c in checkins if Decimal(str(c.get("payment_amount") or 0)) > 0
-                )
-                integrity_warnings = _build_event_stats_integrity_warnings(
-                    total_participants=total,
-                    new_players=new_players,
-                    returning_players=returning_players,
-                    checked_in_count=checked_in_count,
-                    no_show_base=no_show_base,
-                    no_show_count=no_show_count,
-                    no_show_rate=no_show_rate,
-                    games_breakdown=stats.get("games_breakdown") or {},
-                    payment_valid_count=payment_valid_count,
-                    paid_amount_count=paid_amount_count,
-                )
-
-                cur.execute(
-                    """
-                    UPDATE event_stats
-                    SET event_date = %s,
-                        event_display_name = %s,
-                        archived_at = %s,
-                        total_participants = %s,
-                        total_revenue = %s,
-                        avg_payment = %s,
-                        member_count = %s,
-                        member_percentage = %s,
-                        guest_count = %s,
-                        startgg_count = %s,
-                        new_players = %s,
-                        returning_players = %s,
-                        retention_rate = %s,
-                        games_breakdown = %s,
-                        most_popular_game = %s,
-                        status_breakdown = %s,
-                        startgg_registered_count = %s,
-                        startgg_registered_players = %s,
-                        checked_in_count = %s,
-                        no_show_count = %s,
-                        no_show_rate = %s
-                    WHERE event_slug = %s
-                    """,
-                    (
-                        event_date_val,
-                        stats_display_name or (checkins[0].get("event_display_name") or event_slug),
-                        stats_archived_at,
-                        total,
-                        stats["total_revenue"],
-                        stats["avg_payment"],
-                        stats["member_count"],
-                        stats["member_percentage"],
-                        stats["guest_count"],
-                        stats["startgg_count"],
-                        new_players,
-                        returning_players,
-                        retention_rate,
-                        _Json(stats["games_breakdown"]),
-                        stats["most_popular_game"],
-                        _Json(stats["status_breakdown"]),
-                        startgg_registered_count,
-                        startgg_registered_players,
-                        checked_in_count,
-                        no_show_count,
-                        no_show_rate,
-                        event_slug,
-                    ),
-                )
-
-    if integrity_warnings:
-        logger.warning(
-            "event_stats integrity warnings for '%s': %s",
-            event_slug,
-            "; ".join(integrity_warnings),
+def _stats_context(
+    conn, *, free_events=(), event_prices=None, membership_requirements=None, member_not_recorded=()
+):
+    """Read archive facts once; optional verified corrections remain an in-memory preview."""
+    with conn.cursor() as cur:
+        # Dry runs also support pre-010 schemas; do not cache a schema-dependent row shape.
+        cur.execute("SELECT * FROM event_stats ORDER BY event_slug", prepare=False)
+        columns = [item[0] for item in cur.description]
+        metadata = {
+            row["event_slug"]: row
+            for row in (_row_to_dict(columns, value) for value in cur.fetchall())
+        }
+        cur.execute(
+            "SELECT id, event_slug, event_date, event_display_name, archived_at, player_uuid, "
+            "member, startgg, payment_valid, payment_amount, payment_expected, "
+            "tournament_games_registered, status, is_guest FROM event_archive ORDER BY event_slug, id"
         )
-
-    recompute_user = user or {"user_id": "", "user_name": "system", "user_email": ""}
-    try:
-        log_action(
-            recompute_user,
-            "event_stats_recomputed",
-            "event_stats",
-            target_event=event_slug,
-            details=json.dumps(
+        columns = [item[0] for item in cur.description]
+        rows = [_row_to_dict(columns, value) for value in cur.fetchall()]
+        # Consume T065's exact alias map through this existing read-only connection.
+        cur.execute("SELECT to_regclass('game_aliases')")
+        aliases = {}
+        if cur.fetchone()[0] is not None:
+            cur.execute("SELECT alias, canonical FROM game_aliases ORDER BY alias")
+            aliases = {
+                str(alias).strip().lower(): str(canonical).strip()
+                for alias, canonical in cur.fetchall()
+            }
+    events, corrections, price_warnings = {}, [], []
+    attendance_counts = {}
+    for row in rows:
+        if row["player_uuid"]:
+            pair = (row["event_slug"], row["player_uuid"])
+            attendance_counts[pair] = attendance_counts.get(pair, 0) + 1
+    for row in rows:
+        slug = row["event_slug"]
+        updates = {}
+        if slug in free_events:
+            if row["payment_expected"] != Decimal("0"):
+                updates["payment_expected"] = Decimal("0")
+        elif (
+            slug in (event_prices or {})
+            and attendance_counts.get((slug, row["player_uuid"]), 0) > 1
+        ):
+            # Two rows cannot establish two payment obligations for one attendance.
+            price_warnings.append(
                 {
-                    "participants": total,
-                    "new_players": new_players,
-                    "returning_players": returning_players,
-                    "integrity_warnings": integrity_warnings,
+                    "kind": "duplicate_payment_requires_review",
+                    "event_slug": slug,
+                    "archive_id": row["id"],
                 }
-            ),
-        )
-    except Exception:
-        pass
+            )
+        elif slug in (event_prices or {}):
+            amount, per_game = event_prices[slug]
+            games = {
+                _canonical_game_name(game, aliases)
+                for game in row["tournament_games_registered"] or []
+            }
+            games.discard("")
+            if per_game and not games:
+                price_warnings.append(
+                    {
+                        "kind": "price_game_count_unknown",
+                        "event_slug": slug,
+                        "archive_id": row["id"],
+                    }
+                )
+            else:
+                expected = amount * (len(games) if per_game else 1)
+                if row["payment_expected"] != expected:
+                    updates["payment_expected"] = expected
+                # A tariff establishes the expectation, never the recorded amount.
+        if updates:
+            corrections.append(
+                {
+                    "archive_id": row["id"],
+                    "event_slug": slug,
+                    "before": {key: row[key] for key in updates},
+                    "after": updates,
+                }
+            )
+            row.update(updates)
+        events.setdefault(slug, []).append(row)
+    order = {}
+    for slug, attendance in events.items():
+        dates = {row["event_date"] for row in attendance if row["event_date"] is not None}
+        meta = metadata.get(slug, {})
+        day = meta.get("event_date") or (next(iter(dates)) if len(dates) == 1 else None)
+        stamps = [row["archived_at"] for row in attendance if row["archived_at"] is not None]
+        if meta.get("archived_at") is not None:
+            stamps.append(meta["archived_at"])
+        stamp = min(stamps) if stamps else None
+        order[slug] = (day, stamp)
 
+    def key(slug):
+        day, stamp = order[slug]
+        return (
+            day is None,
+            day or datetime.max.date(),
+            stamp or datetime.max.replace(tzinfo=timezone.utc),
+            slug,
+        )
+
+    ordered = sorted(events, key=key)
+    first, previous, last_by_series = {}, {}, {}
+    for slug in ordered:
+        if order[slug][0] is None:
+            continue
+        series = (
+            "fightbox"
+            if slug.lower().startswith("fightbox")
+            else "fight-night" if slug.lower().startswith("fight-night") else None
+        )
+        if series:
+            previous[slug] = last_by_series.get(series)
+            last_by_series[series] = slug
+        for row in events[slug]:
+            if row["player_uuid"]:
+                first.setdefault(row["player_uuid"], slug)
     return {
-        "event_slug": event_slug,
-        "participants": total,
-        "new_players": new_players,
-        "returning_players": returning_players,
-        "total_revenue": float(stats["total_revenue"]),
-        "integrity_warnings": integrity_warnings,
+        "metadata": metadata,
+        "events": events,
+        "order": order,
+        "ordered": ordered,
+        "first": first,
+        "previous_same_series": previous,
+        "free_events": set(free_events),
+        "event_prices": event_prices or {},
+        "membership_requirements": membership_requirements or {},
+        "member_not_recorded": set(member_not_recorded),
+        "corrections": corrections,
+        "price_warnings": price_warnings,
+        "game_aliases": aliases,
     }
 
 
-def scan_event_stats_integrity(
-    event_slugs: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    """Run integrity checks on archived event_stats rows.
-
-    Returns only rows that contain one or more warnings.
-    """
-    where_sql = ""
-    params: List[Any] = []
-    if event_slugs:
-        where_sql = "WHERE es.event_slug = ANY(%s)"
-        params.append(event_slugs)
-
-    warnings_rows: List[Dict[str, Any]] = []
-
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT
-                    es.event_slug,
-                    es.archived_at,
-                    es.total_participants,
-                    es.new_players,
-                    es.returning_players,
-                    es.checked_in_count,
-                    es.startgg_registered_count,
-                    es.startgg_registered_players,
-                    es.no_show_count,
-                    es.no_show_rate,
-                    es.games_breakdown,
-                    COALESCE(pay.payment_valid_count, 0) AS payment_valid_count,
-                    COALESCE(pay.paid_amount_count, 0) AS paid_amount_count
-                FROM event_stats es
-                LEFT JOIN (
-                    SELECT
-                        event_slug,
-                        COUNT(*) FILTER (WHERE payment_valid IS TRUE) AS payment_valid_count,
-                        COUNT(*) FILTER (WHERE COALESCE(payment_amount, 0) > 0) AS paid_amount_count
-                    FROM event_archive
-                    GROUP BY event_slug
-                ) pay ON pay.event_slug = es.event_slug
-                {where_sql}
-                ORDER BY es.archived_at DESC NULLS LAST, es.event_slug ASC
-                """,
-                params,
-            )
-            rows = cur.fetchall()
-
-    for row in rows:
+def _stats_audit(conn, action, table, details, *, user=None, event_slug=None):
+    """Write the repair audit in the same transaction; failure must roll back the repair."""
+    actor = user or {"user_name": "system"}
+    conn.execute(
+        "INSERT INTO audit_log (user_id, user_name, user_email, action, target_table, target_event, details) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
         (
+            actor.get("user_id"),
+            actor.get("user_name", "system"),
+            actor.get("user_email"),
+            action,
+            table,
             event_slug,
-            archived_at,
-            total_participants,
-            new_players,
-            returning_players,
-            checked_in_count,
-            startgg_registered_count,
-            startgg_registered_players,
-            no_show_count,
-            no_show_rate,
-            games_breakdown,
-            payment_valid_count,
-            paid_amount_count,
-        ) = row
+            json.dumps(details, default=str),
+        ),
+    )
 
-        no_show_base = int(startgg_registered_players or 0) or int(startgg_registered_count or 0)
-        warnings = _build_event_stats_integrity_warnings(
-            total_participants=int(total_participants or 0),
-            new_players=int(new_players or 0),
-            returning_players=int(returning_players or 0),
-            checked_in_count=int(checked_in_count or 0),
-            no_show_base=int(no_show_base or 0),
-            no_show_count=int(no_show_count or 0),
-            no_show_rate=Decimal(str(no_show_rate or 0)),
-            games_breakdown=(games_breakdown or {}) if isinstance(games_breakdown, dict) else {},
-            payment_valid_count=int(payment_valid_count or 0),
-            paid_amount_count=int(paid_amount_count or 0),
+
+def recompute_event_stats(
+    event_slug: str,
+    *,
+    user: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+    _conn=None,
+    _audit: bool = True,
+    _context=None,
+) -> Dict[str, Any]:
+    """Canonical archive derivation; unknown dates never become today's date.
+
+    First attendance is ordered by event date, first archived_at, then slug. Each UUID
+    is new once, globally across all series. retention_rate retains its historic
+    returning/participants meaning, displayed as Familiar faces. The separate
+    same_series_return_rate measures the previous dated event's UUID cohort within
+    fightbox/fight-night. First events and collaborations have no series baseline.
+    A supplied context
+    lets a SELECT-only CLI preview verified price/free inputs without changing facts.
+    """
+    from contextlib import nullcontext
+    from psycopg.types.json import Json
+
+    if not event_slug:
+        raise ValueError("event_slug is required")
+    resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
+    with resource as conn, conn.transaction():
+        context = _context or _stats_context(conn)
+        checkins = context["events"].get(event_slug)
+        if not checkins:
+            raise ValueError("No archive attendance facts for selected event")
+        previous = context["metadata"].get(event_slug, {})
+        event_date, archived_at = context["order"][event_slug]
+        players = {row["player_uuid"] for row in checkins if row["player_uuid"]}
+        new_ids = sorted(player for player in players if context["first"].get(player) == event_slug)
+        returning = len(players) - len(new_ids) if event_date is not None else 0
+        stats = compute_event_stats(checkins)
+        games = {}
+        for unit in _game_attendances(checkins, context["game_aliases"]):
+            for game in unit["games"]:
+                games[game] = games.get(game, 0) + 1
+        stats["games_breakdown"] = dict(
+            sorted(games.items(), key=lambda item: (item[0].lower(), item[0]))
         )
-
-        if warnings:
-            warnings_rows.append(
-                {
-                    "event_slug": event_slug,
-                    "archived_at": archived_at.isoformat() if archived_at else "",
-                    "warnings_count": len(warnings),
-                    "warnings": warnings,
-                }
+        stats["most_popular_game"] = (
+            min(games, key=lambda game: (-games[game], game.lower(), game)) if games else None
+        )
+        # Archive rows remain immutable facts. Known identities establish one visit;
+        # unlinked rows remain separate, flagged attendances until a human links them.
+        visits = {}
+        for row in checkins:
+            key = ("player", row["player_uuid"]) if row["player_uuid"] else ("unlinked", row["id"])
+            visits.setdefault(key, []).append(row)
+        stats["total_participants"] = len(visits)
+        stats["avg_payment"] = (stats["total_revenue"] / len(visits)).quantize(Decimal("0.01"))
+        for field, flag in (
+            ("member_count", "member"),
+            ("guest_count", "is_guest"),
+            ("startgg_count", "startgg"),
+        ):
+            stats[field] = sum(any(row[flag] for row in visit) for visit in visits.values())
+        stats["member_percentage"] = (Decimal(stats["member_count"]) / len(visits) * 100).quantize(
+            Decimal("0.01")
+        )
+        statuses = {}
+        for visit in visits.values():
+            observed = {row["status"] or "Unknown" for row in visit}
+            status = (
+                "Ready"
+                if "Ready" in observed
+                else next(iter(observed)) if len(observed) == 1 else "Conflicting"
             )
+            statuses[status] = statuses.get(status, 0) + 1
+        stats["status_breakdown"] = statuses
+        # Games and participant numerators share one attendance population (C413).
+        requirements = dict(previous.get("requirements_snapshot") or {})
+        if event_slug in context["free_events"]:
+            requirements["require_payment"] = False
+            requirements.pop("event_price", None)
+        if event_slug in context["event_prices"]:
+            amount, per_game = context["event_prices"][event_slug]
+            requirements["require_payment"] = True
+            requirements["event_price"] = {
+                "amount": str(amount),
+                "basis": "game" if per_game else "person",
+            }
+        if event_slug in context["membership_requirements"]:
+            requirements["require_membership"] = context["membership_requirements"][event_slug]
+        if event_slug in context["member_not_recorded"]:
+            requirements["member_data_recorded"] = False
+        stats["member_percentage"] = (
+            stats["member_percentage"]
+            if requirements.get("require_membership") is True
+            and requirements.get("member_data_recorded") is not False
+            else None
+        )
+        prior_slug = context["previous_same_series"].get(event_slug)
+        prior = (
+            {row["player_uuid"] for row in context["events"][prior_slug] if row["player_uuid"]}
+            if prior_slug
+            else set()
+        )
+        retained = len(players & prior) if prior else None
+        baseline = len(prior) if prior else None
+        series_return = (
+            (Decimal(retained) / baseline * 100).quantize(Decimal("0.01")) if baseline else None
+        )
+        retention = (
+            (Decimal(returning) / len(visits) * 100).quantize(Decimal("0.01"))
+            if event_date is not None
+            else None
+        )
+        snapshot = previous.get("startgg_snapshot")
+        registered_slots, registered_players = 0, None
+        if isinstance(snapshot, dict):
+            registered_slots = int(snapshot.get("tournament_entrants") or 0)
+            if snapshot.get("tournament_entrants_players") is not None:
+                registered_players = int(snapshot["tournament_entrants_players"])
+        elif isinstance(snapshot, list):
+            registered_slots = sum(
+                int(item.get("numEntrants") or 0) for item in snapshot if isinstance(item, dict)
+            )
+        total = stats["total_participants"]
+        # Slots are not unique registrations; a signup is not proof of attendance.
+        no_show = max(registered_players - total, 0) if registered_players is not None else None
+        no_show_rate = (
+            (Decimal(no_show) / registered_players * 100).quantize(Decimal("0.01"))
+            if registered_players
+            else Decimal("0") if registered_players == 0 else None
+        )
+        after = {
+            "event_date": event_date,
+            "event_display_name": previous.get("event_display_name")
+            or next(
+                (row["event_display_name"] for row in checkins if row["event_display_name"]),
+                event_slug,
+            ),
+            "archived_at": archived_at,
+            **stats,
+            "new_players": len(new_ids),
+            "returning_players": returning,
+            "retention_rate": retention,
+            "same_series_return_rate": series_return,
+            "same_series_base_count": baseline,
+            "same_series_returned_players": retained,
+            "requirements_snapshot": requirements or None,
+            "startgg_registered_count": registered_slots,
+            "startgg_registered_players": registered_players,
+            "checked_in_count": total,
+            "no_show_count": no_show,
+            "no_show_rate": no_show_rate,
+        }
+        before = {key: previous.get(key) for key in after} if previous else None
+        changes = {
+            key: {"before": (before or {}).get(key), "after": value}
+            for key, value in after.items()
+            if before is None or before.get(key) != value
+        }
+        warnings = []
+        if event_date is None:
+            warnings.append("unknown_or_conflicting_event_date")
+        if len(new_ids) + returning != total:
+            warnings.append("new_returning_participant_mismatch")
+        if registered_players is None:
+            warnings.append("unique_registration_count_unknown")
+        if requirements.get("require_payment") is not False and any(
+            row["payment_valid"] and not row["payment_amount"] for row in checkins
+        ):
+            warnings.append("payment_valid_without_amount")
+        if not dry_run and changes:
+            with conn.cursor() as cur:
+                values = [
+                    (
+                        Json(value)
+                        if key in {"games_breakdown", "status_breakdown", "requirements_snapshot"}
+                        and value is not None
+                        else value
+                    )
+                    for key, value in after.items()
+                ]
+                if previous:
+                    assignments = ", ".join(f"{key} = %s" for key in after)
+                    cur.execute(
+                        f"UPDATE event_stats SET {assignments} WHERE event_slug = %s",
+                        [*values, event_slug],
+                    )
+                else:
+                    names = ", ".join(["event_slug", *after])
+                    placeholders = ", ".join(["%s"] * (len(values) + 1))
+                    cur.execute(
+                        f"INSERT INTO event_stats ({names}) VALUES ({placeholders})",
+                        [event_slug, *values],
+                    )
+        if not dry_run and _audit:
+            _stats_audit(
+                conn,
+                "event_stats_recomputed",
+                "event_stats",
+                {"changed_fields": sorted(changes)},
+                user=user,
+                event_slug=event_slug,
+            )
+    return {
+        "event_slug": event_slug,
+        "participants": total,
+        "archive_rows": len(checkins),
+        **after,
+        "total_revenue": float(stats["total_revenue"]),
+        "new_player_uuids": new_ids,
+        "before": before,
+        "after": after,
+        "changes": changes,
+        "integrity_warnings": warnings,
+    }
 
-    return warnings_rows
+
+def recompute_player_aggregates(
+    dry_run: bool = True, *, _conn=None, _audit: bool = True, _context=None
+):
+    """Count distinct event visits and sum all recorded payments; never change identity facts."""
+    from contextlib import nullcontext
+    from psycopg.types.json import Json
+
+    resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
+    differences = []
+    with resource as conn, conn.transaction():
+        context = _context or _stats_context(conn)
+        with conn.cursor() as cur:
+            fields = [
+                "total_events",
+                "total_paid",
+                "first_seen",
+                "last_seen",
+                "first_event",
+                "last_event",
+                "events_list",
+                "games_played",
+                "game_counts",
+                "favorite_game",
+            ]
+            cur.execute("SELECT uuid, " + ", ".join(fields) + " FROM players ORDER BY uuid")
+            columns = [item[0] for item in cur.description]
+            profiles = [_row_to_dict(columns, row) for row in cur.fetchall()]
+            attendance = {}
+            for slug, rows in context["events"].items():
+                for row in rows:
+                    attendance.setdefault(row["player_uuid"], []).append(row)
+            for profile in profiles:
+                rows = attendance.get(profile["uuid"], [])
+                attended = {row["event_slug"] for row in rows}
+                events = [slug for slug in context["ordered"] if slug in attended]
+                dated = [slug for slug in events if context["order"][slug][0] is not None]
+
+                def seen(slug):
+                    value = context["order"][slug][0]
+                    return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+                games = {}
+                for unit in _game_attendances(rows, context["game_aliases"]):
+                    for game in unit["games"]:
+                        games[game] = games.get(game, 0) + 1
+                games = dict(sorted(games.items()))
+                after = {
+                    "total_events": len(events),
+                    "total_paid": sum(
+                        (row["payment_amount"] or Decimal("0") for row in rows), Decimal("0")
+                    ),
+                    "first_seen": seen(dated[0]) if dated else None,
+                    "last_seen": seen(dated[-1]) if dated else None,
+                    "first_event": dated[0] if dated else None,
+                    "last_event": dated[-1] if dated else None,
+                    "events_list": events,
+                    "games_played": list(games),
+                    "game_counts": games,
+                    "favorite_game": (
+                        min(games, key=lambda game: (-games[game], game)) if games else None
+                    ),
+                }
+                before = {key: profile[key] for key in after}
+                changes = {
+                    key: {"before": before[key], "after": value}
+                    for key, value in after.items()
+                    if before[key] != value
+                }
+                if changes:
+                    differences.append(
+                        {
+                            "player_uuid": profile["uuid"],
+                            "before": before,
+                            "after": after,
+                            "changes": changes,
+                        }
+                    )
+                    if not dry_run:
+                        values = [
+                            Json(value) if key in {"events_list", "game_counts"} else value
+                            for key, value in after.items()
+                        ]
+                        assignments = ", ".join(f"{key} = %s" for key in after)
+                        cur.execute(
+                            f"UPDATE players SET {assignments} WHERE uuid = %s",
+                            [*values, profile["uuid"]],
+                        )
+        if not dry_run and _audit:
+            _stats_audit(
+                conn,
+                "player_aggregates_recomputed",
+                "players",
+                {"changed_players": len(differences)},
+            )
+    return differences
+
+
+def scan_event_stats_integrity(
+    event_slugs: Optional[List[str]] = None, *, _conn=None, _context=None
+):
+    """Separate repairable derived values from payment, attendance and identity deviations."""
+    from contextlib import nullcontext
+
+    data_errors, deviations = [], []
+    resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
+    with resource as conn, conn.transaction():
+        context = _context or _stats_context(conn)
+        slugs = sorted(set(context["events"]) | set(context["metadata"]))
+        selected = set(event_slugs) if event_slugs else set(slugs)
+        selected_players = set()
+        for slug in slugs:
+            if slug not in selected:
+                continue
+            rows = context["events"].get(slug, [])
+            if not rows:
+                deviations.append({"kind": "stats_without_attendance", "event_slug": slug})
+                continue
+            result = recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)
+            if result["changes"]:
+                data_errors.append(
+                    {
+                        "kind": "event_stats_mismatch",
+                        "event_slug": slug,
+                        "changes": result["changes"],
+                    }
+                )
+            requirements = result["after"]["requirements_snapshot"] or {}
+            for warning in result["integrity_warnings"]:
+                if warning != "payment_valid_without_amount":
+                    deviations.append({"kind": warning, "event_slug": slug})
+            if requirements.get("require_membership") is None:
+                deviations.append({"kind": "membership_requirement_unknown", "event_slug": slug})
+            if requirements.get("member_data_recorded") is False:
+                deviations.append({"kind": "member_data_not_recorded", "event_slug": slug})
+            if (
+                requirements.get("require_membership") is True
+                and result["after"]["member_count"] == 0
+            ):
+                deviations.append({"kind": "required_membership_zero_members", "event_slug": slug})
+            if requirements.get("require_payment") is None:
+                deviations.append(
+                    {"kind": "payment_requirement_or_price_unknown", "event_slug": slug}
+                )
+            counts = {}
+            for row in rows:
+                player = row["player_uuid"]
+                selected_players.add(player)
+                base = {"event_slug": slug, "archive_id": row["id"]}
+                if not player:
+                    deviations.append({"kind": "missing_player_uuid", **base})
+                else:
+                    counts[player] = counts.get(player, 0) + 1
+                amount, expected = row["payment_amount"] or Decimal("0"), row[
+                    "payment_expected"
+                ] or Decimal("0")
+                if (
+                    row["payment_valid"]
+                    and amount == 0
+                    and requirements.get("require_payment") is not False
+                ):
+                    deviations.append(
+                        {
+                            "kind": "payment_valid_without_amount",
+                            "message": "Paid, amount not recorded",
+                            **base,
+                        }
+                    )
+                if row["payment_valid"] and amount < expected:
+                    deviations.append(
+                        {
+                            "kind": "paid_below_expected",
+                            **base,
+                            "amount": amount,
+                            "expected": expected,
+                        }
+                    )
+            for player, count in counts.items():
+                if count > 1:
+                    deviations.append(
+                        {
+                            "kind": "duplicate_event_attendance",
+                            "event_slug": slug,
+                            "player_uuid": player,
+                            "rows": count,
+                        }
+                    )
+        deviations.extend(
+            item for item in context["price_warnings"] if item["event_slug"] in selected
+        )
+        for diff in recompute_player_aggregates(dry_run=True, _conn=conn, _context=context):
+            if event_slugs and diff["player_uuid"] not in selected_players:
+                continue
+            data_errors.append({"kind": "player_aggregates_mismatch", **diff})
+            if "total_paid" in diff["changes"]:
+                deviations.append(
+                    {
+                        "kind": "player_payment_aggregate_mismatch",
+                        "player_uuid": diff["player_uuid"],
+                        "before": diff["before"]["total_paid"],
+                        "after": diff["after"]["total_paid"],
+                    }
+                )
+            if "total_events" in diff["changes"]:
+                deviations.append(
+                    {"kind": "player_total_events_mismatch", "player_uuid": diff["player_uuid"]}
+                )
+        profiles = conn.execute("SELECT uuid, name, tag FROM players ORDER BY uuid").fetchall()
+        identities = {}
+        for player, name, tag in profiles:
+            for field, value in (("name", name), ("tag", tag)):
+                if value and str(value).strip():
+                    identities.setdefault((field, str(value).strip().casefold()), set()).add(player)
+        for (field, value), players in sorted(identities.items()):
+            if len(players) > 1 and (not event_slugs or players & selected_players):
+                deviations.append(
+                    {
+                        "kind": "suspected_duplicate",
+                        "field": field,
+                        "value": value,
+                        "player_uuids": sorted(players),
+                    }
+                )
+        known = {profile[0] for profile in profiles}
+        for slug, rows in context["events"].items():
+            if slug in selected:
+                for row in rows:
+                    if row["player_uuid"] and row["player_uuid"] not in known:
+                        deviations.append(
+                            {
+                                "kind": "missing_player_profile",
+                                "event_slug": slug,
+                                "archive_id": row["id"],
+                            }
+                        )
+    return {"data_errors": data_errors, "deviations": deviations}
 
 
 def _find_player_uuid(tag: Optional[str], email: Optional[str], cur=None) -> Optional[str]:
@@ -3622,148 +3956,45 @@ def archive_event(
                     ],
                 )
 
-                # 4. Compute stats + retention from player matching results
-                stats = compute_event_stats(checkins)
-
-                new_players = sum(1 for _, is_new in player_results if is_new)
-                total = stats["total_participants"]
-                returning_players = total - new_players
-                retention_rate = (
-                    (Decimal(returning_players) / Decimal(total) * 100).quantize(Decimal("0.01"))
-                    if total > 0
-                    else Decimal("0")
-                )
-
-                # 4b. No-show computation (person-based when available)
-                checked_in_count = total
-                startgg_registered_count = 0  # slot total (backward compat)
-                startgg_registered_players = 0  # unique players
-                if startgg_snapshot:
-                    if isinstance(startgg_snapshot, dict):
-                        startgg_registered_count = int(
-                            startgg_snapshot.get("tournament_entrants") or 0
-                        )
-                        startgg_registered_players = int(
-                            startgg_snapshot.get("tournament_entrants_players") or 0
-                        )
-                    elif isinstance(startgg_snapshot, list):
-                        # Legacy format: sum per-event numEntrants
-                        startgg_registered_count = sum(
-                            int(e.get("numEntrants") or 0)
-                            for e in startgg_snapshot
-                            if isinstance(e, dict)
-                        )
-                # Use player count for no-show; fall back to slot count for old data
-                no_show_base = startgg_registered_players or startgg_registered_count
-                no_show_count = max(no_show_base - checked_in_count, 0)
-                no_show_rate = (
-                    (Decimal(no_show_count) / Decimal(no_show_base) * 100).quantize(Decimal("0.01"))
-                    if no_show_base > 0
-                    else Decimal("0")
-                )
-                if no_show_base > 0:
-                    logger.info(
-                        f"No-show: {no_show_count}/{no_show_base} "
-                        f"({'players' if startgg_registered_players else 'slots (legacy)'})"
-                    )
-
-                payment_valid_count = sum(1 for c in checkins if bool(c.get("payment_valid")))
-                paid_amount_count = sum(
-                    1 for c in checkins if Decimal(str(c.get("payment_amount") or 0)) > 0
-                )
-                integrity_warnings = _build_event_stats_integrity_warnings(
-                    total_participants=total,
-                    new_players=new_players,
-                    returning_players=returning_players,
-                    checked_in_count=checked_in_count,
-                    no_show_base=no_show_base,
-                    no_show_count=no_show_count,
-                    no_show_rate=no_show_rate,
-                    games_breakdown=stats.get("games_breakdown") or {},
-                    payment_valid_count=payment_valid_count,
-                    paid_amount_count=paid_amount_count,
-                )
-                if integrity_warnings:
-                    logger.warning(
-                        "archive_event integrity warnings for '%s': %s",
-                        event_slug,
-                        "; ".join(integrity_warnings),
-                    )
-
-                # 5. Upsert event_stats (including startgg_snapshot + no-show)
+                # 4. Snapshot requirements only for a new archive of the matching active event.
+                # Historic metadata is not backfilled from today's unrelated settings.
                 cur.execute(
-                    """
-                    INSERT INTO event_stats (
-                        event_slug, event_date, event_display_name, archived_at,
-                        total_participants, total_revenue, avg_payment,
-                        member_count, member_percentage, guest_count, startgg_count,
-                        new_players, returning_players, retention_rate,
-                        games_breakdown, most_popular_game, status_breakdown,
-                        startgg_snapshot,
-                        startgg_registered_count, startgg_registered_players,
-                        checked_in_count,
-                        no_show_count, no_show_rate
-                    ) VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s,
-                        %s,
-                        %s, %s,
-                        %s,
-                        %s, %s
-                    )
-                    ON CONFLICT (event_slug) DO UPDATE SET
-                        event_date = EXCLUDED.event_date,
-                        event_display_name = EXCLUDED.event_display_name,
-                        archived_at = EXCLUDED.archived_at,
-                        total_participants = EXCLUDED.total_participants,
-                        total_revenue = EXCLUDED.total_revenue,
-                        avg_payment = EXCLUDED.avg_payment,
-                        member_count = EXCLUDED.member_count,
-                        member_percentage = EXCLUDED.member_percentage,
-                        guest_count = EXCLUDED.guest_count,
-                        startgg_count = EXCLUDED.startgg_count,
-                        new_players = EXCLUDED.new_players,
-                        returning_players = EXCLUDED.returning_players,
-                        retention_rate = EXCLUDED.retention_rate,
-                        games_breakdown = EXCLUDED.games_breakdown,
-                        most_popular_game = EXCLUDED.most_popular_game,
-                        status_breakdown = EXCLUDED.status_breakdown,
-                        startgg_snapshot = EXCLUDED.startgg_snapshot,
-                        startgg_registered_count = EXCLUDED.startgg_registered_count,
-                        startgg_registered_players = EXCLUDED.startgg_registered_players,
-                        checked_in_count = EXCLUDED.checked_in_count,
-                        no_show_count = EXCLUDED.no_show_count,
-                        no_show_rate = EXCLUDED.no_show_rate
-                    """,
+                    "SELECT require_payment, require_membership, require_startgg FROM settings "
+                    "WHERE is_active = true AND active_event_slug = %s LIMIT 1",
+                    (event_slug,),
+                )
+                requirement_row = cur.fetchone()
+                requirements = None
+                if requirement_row is not None:
+                    requirements = dict(zip(
+                        ("require_payment", "require_membership", "require_startgg"), requirement_row
+                    ))
+                cur.execute(
+                    "INSERT INTO event_stats (event_slug, event_date, event_display_name, archived_at, "
+                    "startgg_snapshot, requirements_snapshot) VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (event_slug) DO UPDATE SET event_date = EXCLUDED.event_date, "
+                    "event_display_name = EXCLUDED.event_display_name, startgg_snapshot = EXCLUDED.startgg_snapshot",
                     (
                         event_slug,
                         event_date,
                         event_display_name,
                         now,
-                        stats["total_participants"],
-                        stats["total_revenue"],
-                        stats["avg_payment"],
-                        stats["member_count"],
-                        stats["member_percentage"],
-                        stats["guest_count"],
-                        stats["startgg_count"],
-                        new_players,
-                        returning_players,
-                        retention_rate,
-                        Json(stats["games_breakdown"]),
-                        stats["most_popular_game"],
-                        Json(stats["status_breakdown"]),
-                        Json(startgg_snapshot) if startgg_snapshot else None,
-                        startgg_registered_count,
-                        startgg_registered_players,
-                        checked_in_count,
-                        no_show_count,
-                        no_show_rate,
+                        Json(startgg_snapshot) if startgg_snapshot is not None else None,
+                        Json(requirements) if requirements is not None else None,
                     ),
                 )
+                computed = recompute_event_stats(event_slug, user=user, _conn=conn, _audit=False)
+                stats = computed["after"]
+                new_players = stats["new_players"]
+                returning_players = stats["returning_players"]
+                retention_rate = stats["retention_rate"]
+                startgg_registered_count = stats["startgg_registered_count"]
+                startgg_registered_players = stats["startgg_registered_players"]
+                checked_in_count = stats["checked_in_count"]
+                no_show_count = stats["no_show_count"]
+                no_show_rate = stats["no_show_rate"]
+                integrity_warnings = computed["integrity_warnings"]
+                recompute_player_aggregates(dry_run=False, _conn=conn, _audit=False)
 
                 # 6. Optionally clear active data
                 deleted_count = 0
@@ -3818,7 +4049,7 @@ def archive_event(
 
     return {
         "event_slug": event_slug,
-        "archived": stats["total_participants"],
+        "archived": len(checkins),
         "total_revenue": float(stats["total_revenue"]),
         "avg_payment": float(stats["avg_payment"]),
         "member_count": stats["member_count"],
@@ -3826,14 +4057,14 @@ def archive_event(
         "startgg_count": stats["startgg_count"],
         "new_players": new_players,
         "returning_players": returning_players,
-        "retention_rate": float(retention_rate),
+        "retention_rate": float(retention_rate) if retention_rate is not None else None,
         "games_breakdown": stats["games_breakdown"],
         "most_popular_game": stats["most_popular_game"],
         "status_breakdown": stats["status_breakdown"],
         "startgg_registered_count": startgg_registered_count,
         "checked_in_count": checked_in_count,
         "no_show_count": no_show_count,
-        "no_show_rate": float(no_show_rate),
+        "no_show_rate": float(no_show_rate) if no_show_rate is not None else None,
         "integrity_warnings": integrity_warnings,
         "replaced_rows": replaced_rows,
         "cleared_active": deleted_count if clear_active else 0,

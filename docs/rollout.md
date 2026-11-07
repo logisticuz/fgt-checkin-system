@@ -438,3 +438,18 @@ with no Set-Cookie in both profiles. Every other internal public path must be
 404; 401/405 is a failure because it indicates the request reached an upstream.
 The old main-branch gateway can therefore report FAIL until integration is deployed.
 Report those findings; do not weaken the gate or send credentials to make it pass.
+
+
+## Historical statistics repair (T-015)
+
+The current DEV report is a preview, not PROD repair approval. After 2026-11-14:
+
+1. Finish/archive the event and close active check-ins. Take a **fresh PROD dump** using the existing approved backup procedure; do not reuse the older DEV restore.
+2. Restore that dump to the isolated review database. Run `scripts/recompute_stats.py --dry-run --json` there with the explicitly verified free-event, per-game price, membership-required and member-not-recorded slug lists. Never infer historical prices or policy from current settings.
+3. Review every event's participants, new/returning, Familiar faces %, same-series return, missing membership data, recorded revenue and expected-payment edits. Explain every profile without a global first attendance. Reconcile **all** profile `total_paid` with archived payments and event revenue; all three must agree. The older DEV snapshot reconciles to 2325 kr; the fresh dump may include later events and needs its own totals.
+4. Show the fresh counts-only report to the user and obtain their explicit OK for that concrete repair. If the source facts change, repeat the fresh-dump/dry-run review.
+5. Only after that OK, run the separately authorized PROD migration 010/preflight and `--apply` with exactly the approved assertions during an inactive maintenance window. The CLI refuses active settings/check-in rows and busy archive/activation work; it never closes an event automatically.
+6. Keep the audit entry: it contains each changed field's before/after values and row keys, plus whether a stats row was newly created. This is the repair reversal record; do not replace it with a counts-only export. Any reversal is a separately reviewed maintenance action using those recorded values.
+7. Re-run the SELECT-only report and money reconciliation after apply, confirm idempotency, and retain the counts-only result with the migration and audit reference.
+
+No PROD dump, migration, apply, service change or reversal is authorized by this documentation alone.

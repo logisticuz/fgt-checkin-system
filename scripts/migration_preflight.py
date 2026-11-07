@@ -1,4 +1,4 @@
-"""Read-only deployment gate: migrations 001-006 and duplicate check-in tags."""
+"""Read-only deployment gate: migrations 001-007/010 and duplicate check-in tags."""
 
 import argparse
 import json
@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from shared import migrate
 
-REQUIRED = frozenset({"001", "002", "003", "004", "005", "006"})
+REQUIRED = frozenset({"001", "002", "003", "004", "005", "006", "007", "010"})
 
 
 def inspect_database(connection, *, verbose=False):

@@ -25,11 +25,12 @@ Denna sektion laser "what over what" for KPI:er som anvands i korten.
 | Ready Rate | `sum(ready_count)` | `sum(total_participants)` | Ratio of sums |
 | Revenue | `sum(total_revenue)` | - (currency KPI) | Sum |
 | New Players | `sum(new_players)` | - (count KPI) | Sum |
-| Returning Players | `sum(returning_players)` | - (count KPI) | Sum |
-| Retention Rate | `event_retention_rate` | `event_total_participants` | Weighted avg over events |
+| Returning visits | `sum(returning_players)` | - (one UUID per event) | Sum |
+| Familiar faces (`retention_rate`) | returning visits | unique participant visits | Ratio of sums |
+| Came back from previous (same series) | shared UUIDs with previous event in same series | that previous event UUID cohort | No baseline for first/collab |
 | Guest Share | `sum(guest_count)` | `sum(total_participants)` | Ratio of sums |
 | Start.gg Account Rate | `sum(startgg_count - guest_count)` | `sum(total_participants)` | Ratio of sums |
-| Member Rate | `sum(member_count)` | `sum(total_participants)` | Ratio of sums |
+| Member Rate | members at requirement-enabled events | participants at those events | Unknown if any historical requirement is unknown |
 | Avg Games/Player | `total_slots` | `sum(total_participants)` | Ratio of sums |
 | Multi-Game Players | `count(players with 2+ games)` | `sum(total_participants)` | Ratio of sums |
 | No-Show Rate | `sum(startgg_registered_count - checked_in_count)` | `sum(startgg_registered_count)` | Ratio of sums |
@@ -95,26 +96,26 @@ Snabb overblick — de forsta siffrorna en TO tittar pa.
 Svarar pa "vaxer scenen eller stagnerar den?"
 
 ### New Players
-- Definition: spelare som deltar for forsta gangen (aldrig setts i event_archive/players fore).
-- Formel: `sum(new_players)` fran event_stats.
-- Status: **LIVE**
+- First attendance uses event date, then the earliest recorded `archived_at`, then slug.
+- One UUID is new at most once across the full archive. Selecting a period does not reset history.
+- Unknown or conflicting event dates are excluded from new/returning and flagged.
+- KPI: sum of per-event first arrivals, equivalent to unique first arrivals in scope.
 
-### Returning Players
-- Definition: spelare som deltagit i minst ett tidigare event.
-- Formel: `sum(returning_players)` fran event_stats.
-- Status: **LIVE**
+### Returning visits
+- One UUID counts once for each selected event after its first dated archived event.
+- The KPI sums returning **visits**. The funnel counts **unique people** with a returning visit.
+- A person may be new at one selected event and returning at another; funnel cohorts overlap.
+- Attendance is counted once per `(event_slug, player_uuid)`. Duplicate check-ins remain archive facts and are flagged as counted once; all recorded payments are summed.
+- Unlinked rows remain separate provisional attendances and are flagged; no identity merge or attendance is inferred.
 
-### Retention Rate (%)
-- Definition: andel aterkommande spelare i vald scope.
-- Formel: viktad retention over events (INTE enkel ratio per period):
-  - `weighted_avg(event_retention_rate, weight=event_total_participants)`.
-  - Varje events `retention_rate` beraknas vid arkivering (returning_players / total_participants).
-  - Multi-event scope viktas sa storre events har mer inflytande.
-- Riktvarden:
-  - `< 30%` — svag scen
-  - `40-50%` — normal local
-  - `50-70%` — stark scen
-- Status: **LIVE**
+### Familiar faces (%) and same-series return
+- `retention_rate` keeps its historical meaning: returning visits / unique participant visits.
+- Display it as **Familiar faces %**, weighted by current event participants across a selected scope.
+- New remains GLOBAL first attendance, even when a series filter is active; never silently "new to series".
+- **Came back from previous (same series)** is separate: the prior dated event in the same series supplies the UUID cohort; count the share attending again.
+- Series are explicit slug prefixes `fightbox*` and `fight-night*`. Other collaborations have no series baseline.
+- First-in-series and unknown dates show `–` for same-series return. First global event has 0% familiar faces.
+- Date/archived_at/slug ties use the same order for global first attendance and previous-in-series selection.
 
 ### Core Players
 - Definition: spelare med 3+ events senaste 6 manaderna (strikt — events INOM perioden).
@@ -153,9 +154,15 @@ Svarar pa "vaxer scenen eller stagnerar den?"
 - Status: **LIVE**
 
 ### Member Rate (%)
-- Definition: andel medlemmar i vald scope.
-- Formel: `sum(member_count) / sum(total_participants) * 100`.
-- Status: **LIVE**
+- Future archives snapshot `require_payment`, `require_membership`, and `require_startgg` in `event_stats.requirements_snapshot` (migration 010).
+- Re-archiving preserves the first snapshot. Today's settings never establish a past event's requirements.
+- `require_membership=true`: actual member count / attendance count, including a real 0%.
+- `false`: `– (not required)`. Missing historical snapshot: `– (unknown)`.
+- `--member-not-recorded slug1,slug2` explicitly sets `member_data_recorded=false`: display `– (not recorded)` instead of a misleading 0%.
+- The integrity scan always flags a membership-required event with zero recorded members, including an explicit data gap.
+- Aggregate only requirement-enabled events; any unknown requirement or explicit missing membership data makes the aggregate unavailable.
+- Verified free-event input establishes only `require_payment=false`, not membership or Start.gg policy.
+- Backfill membership policy only with explicit `--required-membership slug1,slug2` or `--no-membership slug3`; conflicting assertions are rejected. Other requirements remain unchanged/unknown.
 
 ---
 
@@ -277,7 +284,7 @@ FGC-specifika metrics — "hur ser spelmixen ut?"
 Inte nodvandiga nu, men varde nar mer historik finns.
 
 ### Player Funnel
-- Definition: New -> Returning -> Core pipeline.
+- Definition: unique first arrivals and unique returning visitors, using the canonical event-date rule above; cohorts can overlap.
 - Visar community-mognad over tid.
 - Status: **LIVE (v2 summary in Players view)** — New -> Returning -> Core (6m) -> Churned (8m, global).
 - Scope-regel: visas i period/series-scope; single-event visar notis om att funnel ar multi-event.
@@ -365,3 +372,61 @@ Rangena ar "coach notes" for trendtolkning, inte hard alarms.
 - Advanced-tools:
   - `Recompute Selected Event` (owner/dev)
   - `Scan Archived Events` (TO-visible) for att hitta events med varningar.
+
+## Archive repair (T-015)
+
+`python scripts/recompute_stats.py` defaults to SELECT-only REPEATABLE READ / READ ONLY,
+without initializing the application pool or running startup DDL. `--json` exports only event
+counts, dates, money, and grouped deviation counts. `--player-details` adds UUID-level derived
+totals/first-seen diffs for authorized review; contacts are never printed.
+
+`--free-events slug1,slug2` is an explicit verified assertion. It resets expected payment and
+records only the free requirement; existing nonzero payment amounts remain unchanged.
+`--event-price slug=25` asserts a per-person price; `slug=25/game` uses only recorded nonempty
+game counts, deduplicated through T065's exact canonical alias map when installed. These inputs change ONLY `payment_expected`; NULL, zero and nonzero recorded
+`payment_amount` values are always preserved, including when `payment_valid=true`. A paid flag
+with a missing/zero amount is a human deviation: "paid, amount not recorded". Underpayments and
+unknown game counts are flagged. Neither payment amounts nor paid flags are inferred from a tariff.
+Verified price inputs are stored as `requirements_snapshot.event_price={amount,basis}` (`game` or `person`)
+so reopening can restore the event's actual tariff. A verified free assertion clears the inactive tariff.
+No price is assumed from current settings or old expected amounts.
+`--compare-price slug=25` is dry-run only and shows both bases without choosing one.
+
+`--event` restricts event-stat repair and explicit inputs; player aggregates still use the whole
+archive. `players.total_events` counts distinct event visits, `total_paid` sums every recorded payment amount, and
+first/last seen use known event dates at UTC midnight. Duplicate facts remain flagged for a human.
+Duplicate paid check-ins are not given automatic expected-payment edits; their single-attendance obligation needs review.
+No-show is unknown when only game slots (not a unique registration count) were recorded.
+Unknown no-show points remain gaps in the trend and show `n/a` in Ops, with no Low/OK rating.
+All non-game numerators (Ready, Start.gg, guests and members) use the same unique visits as participants.
+
+Apply migration 010 with the migration runner before a separately authorized `--apply`. The
+repair and audit commit atomically; no provider is contacted. Apply refuses any active event/check-in rows or busy archive/activation; table and advisory locks protect that check.
+The audit stores every changed field before/after with its archive row id, event slug or player UUID, including whether a new stats row existed. Profile metadata timestamps are not changed by derived repairs.
+Before and after apply, reconcile ALL profile payment totals against archived payments and event revenue. Unassigned money or an off-scope revenue mismatch blocks apply. Counts-only output explains profiles without global first attendance (zero archive rows or only undated visits). Read-only dry-run supports a
+pre-010 database. PROD apply is forbidden until after 2026-11-14 and the user's explicit OK.
+
+
+### Games attendance population (C413)
+
+Games use the same `(event_slug, player_uuid)` attendance units as participants. Each unit
+contributes its DISTINCT canonical games, unioned across that attendee's archive rows using
+the T065 alias map. Per-game counts, total slots, multi-game counts and derived player game
+histories count a game once per attendance. Across events these are player-event visits.
+Rows without a UUID each remain their own unit; names/tags never infer identity.
+A recorded games list on any row makes that attendance's game metadata available; a NULL
+duplicate row does not exclude an attendee whose recorded games contribute to the numerator.
+No archive fact or payment is deleted/rewritten by this grouping. Crossover's explicitly
+labelled "Shared players" remains a separate distinct-person overlap measure.
+
+### Event date ranges (C417/C418)
+
+Date ranges select whole events using `event_stats.event_date` first. If it is absent,
+use the single distinct non-NULL archived date for that event; zero or conflicting dates
+remain unknown. Every row from a selected event participates, even when a row's date is
+NULL or disagrees with the event date. The canonical context uses the identical rule.
+This applies to Games/multi-game, manual/added-via/acquisition sources, crossover,
+unique/top participants, churn scope, community scope/core rolling windows and funnel/core.
+Existing rolling-window lengths, distinct-person and attendance definitions stay intact.
+All-time includes unknown-date events; bounded ranges exclude them and Insights explicitly
+shows the count of events without a date. Unknown dates never become today's date.
