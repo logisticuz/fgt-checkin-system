@@ -22,6 +22,7 @@ def table_result(dashboard, rows, search=None, game_filter=None):
         "all",
         search,
         game_filter,
+        0,  # live-dup-version (T-068)
         {},
     )
 

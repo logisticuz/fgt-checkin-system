@@ -83,6 +83,9 @@
         } else {
             console.log('Refresh button not found');
         }
+        // T-068: shared views outside the Live tab (merge history, duplicate cards).
+        const sync = document.getElementById('live-sync');
+        if (sync) sync.click();
     }
 
     function triggerRefresh() {

@@ -8,6 +8,7 @@ Connection uses DATABASE_URL from environment, with a connection pool
 managed by psycopg3.
 """
 
+import hashlib
 import hmac
 import json
 import logging
@@ -3525,12 +3526,29 @@ def _match_or_create_player(
         events_list, game_counts, first_seen, last_seen, last_event
     """
 
-    if tag:
+    # T-068: a TO's merge decision is durable in merge_log. First: a check-in the decision
+    # itself covered (unchanged identity) stays on that profile. Then, only when no profile
+    # has the tag (or email) itself, a tag/email of a merged-away profile resolves to the
+    # profile that absorbed it; that profile keeps its own identity fields.
+    merged_into = False
+    confirmed = _confirmed_row_survivor(cur, checkin)
+    if confirmed:
+        cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (confirmed,))
+        player_row = cur.fetchone()
+        # The profile the TO chose keeps its own identity fields, always (today's details
+        # stay on the archived row only).
+        merged_into = player_row is not None
+
+    if not player_row and tag:
         cur.execute(
             f"SELECT {select_cols} FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
             (tag,),
         )
         player_row = cur.fetchone()
+
+    if not player_row and tag:
+        player_row = _merged_identity_player(cur, "tag", tag, select_cols)
+        merged_into = player_row is not None
 
     if not player_row and email:
         cur.execute(
@@ -3538,6 +3556,10 @@ def _match_or_create_player(
             (email,),
         )
         player_row = cur.fetchone()
+
+    if not player_row and email:
+        player_row = _merged_identity_player(cur, "email", email, select_cols)
+        merged_into = player_row is not None
 
     new_games = checkin.get("tournament_games_registered") or []
     payment = Decimal(str(checkin.get("payment_amount") or 0))
@@ -3613,10 +3635,10 @@ def _match_or_create_player(
             WHERE uuid = %s
             """,
             (
-                tag,
-                email,
-                checkin.get("name"),
-                checkin.get("telephone"),
+                None if merged_into else tag,
+                None if merged_into else email,
+                None if merged_into else checkin.get("name"),
+                None if merged_into else checkin.get("telephone"),
                 updated_games,
                 _Json(p_game_counts),
                 favorite,
@@ -3678,6 +3700,128 @@ def _match_or_create_player(
         )
         new_uuid = cur.fetchone()[0]
         return (new_uuid, True)
+
+
+def _row_identity_hash(name: Any, tag: Any, email: Any, telephone: Any) -> str:
+    """Opaque hash of a check-in's identity (case/space-insensitive, phone digits only)."""
+    raw = "\x1f".join(
+        [
+            str(name or "").strip().lower(),
+            str(tag or "").strip().lower(),
+            str(email or "").strip().lower(),
+            _phone_digits(telephone),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _has_confirmed_rows(cur, table: str) -> bool:
+    """Whether migration 012's confirmed_rows column exists on merge_log / dismissals."""
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = %s AND column_name = 'confirmed_rows'",
+        (table,),
+    )
+    return cur.fetchone() is not None
+
+
+def _merge_log_has_confirmed_rows(cur) -> bool:
+    return _has_confirmed_rows(cur, "merge_log")
+
+
+def _current_survivor(cur, survivor: Optional[str]) -> Optional[str]:
+    """Follow later merges (not undone) until an existing profile; None if it ends."""
+    for _hop in range(20):
+        if not survivor:
+            return None
+        cur.execute("SELECT 1 FROM players WHERE uuid = %s", (survivor,))
+        if cur.fetchone():
+            return survivor
+        cur.execute(
+            "SELECT keep_uuid FROM merge_log WHERE remove_uuid = %s AND undone IS NOT TRUE "
+            "ORDER BY id DESC LIMIT 1",
+            (survivor,),
+        )
+        found = cur.fetchone()
+        survivor = found[0] if found else None
+    return None
+
+
+def _confirmed_row_survivor(cur, checkin: Dict[str, Any]) -> Optional[str]:
+    """The profile a TO decision put THIS check-in on (T-068), while its identity is still
+    what it was then. Covers name-only check-ins too. Two durable sources, newest wins:
+    merge_log.confirmed_rows (record_id -> identity hash; the kept profile) for a merge,
+    player_duplicate_dismissals.confirmed_rows (record_id -> {hash, player}) for "Not
+    same". An undone merge or a removed dismissal no longer counts."""
+    record_id = checkin.get("record_id")
+    if not record_id:
+        return None
+    current = _row_identity_hash(
+        checkin.get("name"), checkin.get("tag"), checkin.get("email"), checkin.get("telephone")
+    )
+    decisions = []  # (decided_at, player)
+    if _has_confirmed_rows(cur, "merge_log"):
+        cur.execute(
+            "SELECT merged_at, keep_uuid FROM merge_log "
+            "WHERE undone IS NOT TRUE "
+            "AND confirmed_rows @> jsonb_build_object(%s::text, %s::text) "
+            "ORDER BY id DESC LIMIT 1",
+            (record_id, current),
+        )
+        decisions += cur.fetchall()
+    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+        cur.execute(
+            "SELECT dismissed_at, confirmed_rows -> %s ->> 'player' "
+            "FROM player_duplicate_dismissals "
+            "WHERE confirmed_rows -> %s ->> 'hash' = %s "
+            "ORDER BY dismissed_at DESC, id DESC LIMIT 1",
+            (record_id, record_id, current),
+        )
+        for decided_at, chosen in cur.fetchall():
+            # Defence in depth: a proof pointing at a profile the row only reached by being
+            # MOVED there in a merge that is now undone does not count.
+            if chosen:
+                cur.execute(
+                    "SELECT undone FROM merge_log WHERE keep_uuid = %s "
+                    "AND %s = ANY(moved_active_ids) ORDER BY id DESC LIMIT 1",
+                    (chosen, record_id),
+                )
+                via = cur.fetchone()
+                if via and via[0]:
+                    continue
+            decisions.append((decided_at, chosen))
+    decisions = [d for d in decisions if d[1]]
+    if not decisions:
+        return None  # no decision, or the row was edited since: match it as it is now
+    newest = max(decisions, key=lambda d: d[0] or datetime.min.replace(tzinfo=timezone.utc))
+    return _current_survivor(cur, newest[1])
+
+
+def _merged_survivor(cur, kind: str, value: Any) -> Optional[str]:
+    """The current profile that absorbed a merged-away profile's tag or email (T-068).
+
+    Reads merge_log, the existing merge history: the newest merge (not undone) whose removed
+    profile had this tag/email, then follows later merges of that survivor. An undone merge
+    no longer counts, so undo needs no extra bookkeeping. Indexed (migration 012).
+    """
+    if kind not in ("tag", "email") or not str(value or "").strip():
+        return None
+    cur.execute(
+        "SELECT keep_uuid FROM merge_log WHERE undone IS NOT TRUE "
+        f"AND lower(removed_player_snapshot ->> '{kind}') = lower(%s) "
+        "ORDER BY id DESC LIMIT 1",
+        (value,),
+    )
+    found = cur.fetchone()
+    return _current_survivor(cur, found[0] if found else None)
+
+
+def _merged_identity_player(cur, kind: str, value: Any, select_cols: str):
+    survivor = _merged_survivor(cur, kind, value)
+    if not survivor:
+        return None
+    cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (survivor,))
+    return cur.fetchone()
 
 
 class ArchiveError(ValueError):
@@ -4504,6 +4648,47 @@ def log_action(
     after_state: str = "",
 ) -> Optional[str]:
     """Write an entry to the audit log. Returns record ID or None."""
+    user = user or {}
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            record_id = _insert_audit(
+                cur,
+                user,
+                action,
+                target_table,
+                target_event=target_event,
+                target_record=target_record,
+                target_player=target_player,
+                reason=reason,
+                details=details,
+                before_state=before_state,
+                after_state=after_state,
+            )
+
+    if record_id:
+        logger.info(f"📋 Audit: {user.get('user_name', '?')} -> {action} on {target_table}")
+        return record_id
+
+    logger.error(f"❌ Failed to write audit log: {action}")
+    return None
+
+
+def _insert_audit(
+    cur,
+    user: Dict[str, Any],
+    action: str,
+    target_table: str,
+    *,
+    target_event: str = "",
+    target_record: str = "",
+    target_player: str = "",
+    reason: str = "",
+    details: str = "",
+    before_state: str = "",
+    after_state: str = "",
+) -> Optional[str]:
+    """log_action's INSERT on the caller's cursor, so it commits or rolls back with the
+    change it records (T-068 live decisions)."""
     now = datetime.now(timezone.utc)
     user = user or {}
 
@@ -4532,22 +4717,12 @@ def log_action(
 
     placeholders = ", ".join(["%s"] * len(columns))
     col_sql = ", ".join(columns)
-
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO audit_log ({col_sql}) VALUES ({placeholders}) RETURNING id",
-                values,
-            )
-            row = cur.fetchone()
-
-    if row:
-        record_id = str(row[0])
-        logger.info(f"📋 Audit: {user.get('user_name', '?')} -> {action} on {target_table}")
-        return record_id
-
-    logger.error(f"❌ Failed to write audit log: {action}")
-    return None
+    cur.execute(
+        f"INSERT INTO audit_log ({col_sql}) VALUES ({placeholders}) RETURNING id",
+        values,
+    )
+    row = cur.fetchone()
+    return str(row[0]) if row else None
 
 
 def get_audit_log(
@@ -4689,37 +4864,7 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
             if pair_key in seen_pairs or pair_key in dismissed:
                 continue
 
-            reasons = []
-            confidence = "low"
-
-            # 1. Phone match (strongest signal)
-            if a["telephone"] and b["telephone"] and a["telephone"] == b["telephone"]:
-                reasons.append("same_phone")
-                confidence = "high"
-
-            # 2. Tag similarity (case-insensitive)
-            if a["tag"] and b["tag"]:
-                tag_a = a["tag"].lower()
-                tag_b = b["tag"].lower()
-                if tag_a == tag_b:
-                    # Exact case-insensitive match — should have been caught by _match_or_create
-                    reasons.append("exact_tag")
-                    confidence = "high"
-                elif _levenshtein(tag_a, tag_b) <= 2:
-                    reasons.append("similar_tag")
-                    if confidence != "high":
-                        confidence = "medium"
-
-            # 3. Name similarity (case-insensitive)
-            if a["name"] and b["name"]:
-                name_a = a["name"].lower()
-                name_b = b["name"].lower()
-                if name_a == name_b:
-                    reasons.append("exact_name")
-                    if confidence != "high":
-                        confidence = "medium"
-                elif _levenshtein(name_a, name_b) <= 2:
-                    reasons.append("similar_name")
+            reasons, confidence = _duplicate_signals(a, b)
 
             if reasons:
                 seen_pairs.add(pair_key)
@@ -4879,6 +5024,25 @@ def get_dismissed_pair_keys() -> set:
             return _dismissed_pair_keys(cur)
 
 
+def stale_duplicate_pairs(pairs: List[List[str]]) -> List[List[str]]:
+    """Of the given (uuid_a, uuid_b) pairs, those already resolved elsewhere: a player no
+    longer exists (merged) or the pair is marked "Not same". For pruning cards on screen."""
+    pairs = [list(pair) for pair in pairs or [] if len(pair) == 2]
+    if not pairs:
+        return []
+    uuids = sorted({uuid for pair in pairs for uuid in pair if uuid})
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT uuid FROM players WHERE uuid = ANY(%s)", (uuids,))
+            existing = {row[0] for row in cur.fetchall()}
+            dismissed = _dismissed_pair_keys(cur)
+    return [
+        pair
+        for pair in pairs
+        if not set(pair) <= existing or ordered_duplicate_pair(*pair) in dismissed
+    ]
+
+
 def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """Dismissed pairs whose players both still exist, newest first (names/tags only)."""
     with _get_pool().connection() as conn:
@@ -4909,6 +5073,523 @@ def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str
         }
         for row in rows
     ]
+
+
+def _phone_digits(value: Any) -> str:
+    """Digits only: the same normaliser as backend/validation.py sanitize_phone."""
+    return "".join(c for c in str(value or "") if c.isdigit())
+
+
+def _duplicate_signals(a: Dict[str, Any], b: Dict[str, Any]) -> tuple:
+    """The duplicate tool's pair scoring: (reasons, confidence). Shared by the Insights scan
+    and the live check-in hints (T-068), so both always agree on what a duplicate is."""
+    reasons: List[str] = []
+    confidence = "low"
+
+    # 1. Phone match (strongest signal), digits only like backend/validation.py's
+    #    sanitize_phone ("070-000 01 05" and "0700000105" are the same number)
+    phone_a, phone_b = _phone_digits(a["telephone"]), _phone_digits(b["telephone"])
+    if phone_a and phone_a == phone_b:
+        reasons.append("same_phone")
+        confidence = "high"
+
+    # 2. Tag similarity (case-insensitive)
+    if a["tag"] and b["tag"]:
+        tag_a = a["tag"].lower()
+        tag_b = b["tag"].lower()
+        if tag_a == tag_b:
+            # Exact case-insensitive match — should have been caught by _match_or_create
+            reasons.append("exact_tag")
+            confidence = "high"
+        elif _levenshtein(tag_a, tag_b) <= 2:
+            reasons.append("similar_tag")
+            if confidence != "high":
+                confidence = "medium"
+
+    # 3. Name similarity (case-insensitive)
+    if a["name"] and b["name"]:
+        name_a = a["name"].lower()
+        name_b = b["name"].lower()
+        if name_a == name_b:
+            reasons.append("exact_name")
+            if confidence != "high":
+                confidence = "medium"
+        elif _levenshtein(name_a, name_b) <= 2:
+            reasons.append("similar_name")
+
+    return reasons, confidence
+
+
+# ---------------------------------------------------------------------------
+# Live duplicate hints (T-068): the duplicate tool, applied to the active event
+# ---------------------------------------------------------------------------
+LIVE_HINTS_TABLE = "live_duplicate_hints"
+LIVE_HINTS_PER_CHECKIN = 3
+_CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+class StaleLiveDuplicate(ValueError):
+    """The pair changed after the TO opened the dialog (or is gone); nothing was written."""
+
+
+def _identity(name: Any, tag: Any, telephone: Any) -> Dict[str, str]:
+    return {
+        "name": str(name or "").strip(),
+        "tag": str(tag or "").strip(),
+        "telephone": str(telephone or "").strip(),
+    }
+
+
+def _like_prefix(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _live_context_version(cur) -> str:
+    """Changes whenever players or "Not same" decisions change (a merge, an undo, a new
+    profile, a dismissal or its undo), so every cached result is re-checked then.
+    Cheap aggregates; the check-in path itself never writes players."""
+    cur.execute(
+        "SELECT count(*), coalesce(max(id), 0), coalesce(max(updated_at)::text, '') FROM players"
+    )
+    parts = [str(value) for value in cur.fetchone()]
+    if _dismissals_table_exists(cur):
+        cur.execute(
+            "SELECT count(*), coalesce(max(id), 0), coalesce(sum(id), 0) "
+            "FROM player_duplicate_dismissals"
+        )
+        parts += [str(value) for value in cur.fetchone()]
+    return "|".join(parts)
+
+
+def _live_fingerprint(row: Dict[str, Any], context: str) -> str:
+    """Opaque hash of the check-in's identity plus the player/dismissal context."""
+    phone = _phone_digits(row.get("telephone"))  # exactly what the scoring compares
+    raw = "\x1f".join(
+        [
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("tag") or "").strip().lower(),
+            str(row.get("email") or "").strip().lower(),
+            phone,
+            str(row.get("player_uuid") or ""),
+            context,
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _live_hints_table_exists(cur) -> bool:
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL", (LIVE_HINTS_TABLE,))
+    return bool(cur.fetchone()[0])
+
+
+def detect_live_duplicate_hints(event_slug: str) -> int:
+    """(Re)check the event's check-ins whose identity, or the player/"Not same" context,
+    changed since they were last checked; returns how many were re-checked.
+
+    Candidate parity with the Insights scan: every changed row is scored against every
+    player with the same _duplicate_signals (one players read per run; a few thousand
+    players at most). Runs from the dashboard's own detection callback (not the table
+    response, not the check-in path). Best effort: an exception must never affect check-in.
+    """
+    if not event_slug:
+        return 0
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                if not _live_hints_table_exists(cur):
+                    return 0
+                # One detector per event at a time (several TO dashboards may refresh).
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('fgt-live-dup:' || %s))", (event_slug,)
+                )
+                # Only the active event is ever checked: drop leftovers of archived events.
+                cur.execute(
+                    "DELETE FROM live_duplicate_hints WHERE event_slug <> %s", (event_slug,)
+                )
+                cur.execute(
+                    "SELECT record_id, name, tag, email, telephone, player_uuid "
+                    "FROM active_event_data WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                columns = ["record_id", "name", "tag", "email", "telephone", "player_uuid"]
+                rows = [dict(zip(columns, r)) for r in cur.fetchall()]
+                cur.execute(
+                    "DELETE FROM live_duplicate_hints WHERE event_slug = %s "
+                    "AND NOT (record_id = ANY(%s))",
+                    (event_slug, [r["record_id"] for r in rows]),
+                )
+                cur.execute(
+                    "SELECT DISTINCT record_id, fingerprint FROM live_duplicate_hints "
+                    "WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                stored: Dict[str, set] = {}
+                for record_id, fingerprint in cur.fetchall():
+                    stored.setdefault(record_id, set()).add(fingerprint)
+                context = _live_context_version(cur)
+                changed = [
+                    r
+                    for r in rows
+                    if stored.get(r["record_id"]) != {_live_fingerprint(r, context)}
+                ]
+                players: List[Dict[str, Any]] = []
+                dismissed: set = set()
+                if changed:
+                    cur.execute("SELECT uuid, name, tag, telephone FROM players")
+                    players = [
+                        {**_identity(p[1], p[2], p[3]), "uuid": p[0]} for p in cur.fetchall()
+                    ]
+                    dismissed = _dismissed_pair_keys(cur)
+                for row in changed:
+                    own = row.get("player_uuid") or ""
+                    me = _identity(row["name"], row["tag"], row["telephone"])
+                    found = []
+                    for player in players:
+                        if player["uuid"] == own:
+                            continue
+                        if own and tuple(sorted((own, player["uuid"]))) in dismissed:
+                            continue
+                        reasons, confidence = _duplicate_signals(me, player)
+                        if reasons:
+                            found.append((player["uuid"], reasons, confidence))
+                    found.sort(key=lambda f: (_CONFIDENCE_ORDER.get(f[2], 3), -len(f[1]), f[0]))
+                    fingerprint = _live_fingerprint(row, context)
+                    cur.execute(
+                        "DELETE FROM live_duplicate_hints WHERE record_id = %s",
+                        (row["record_id"],),
+                    )
+                    for candidate, reasons, confidence in found[:LIVE_HINTS_PER_CHECKIN] or [
+                        ("", [], "low")
+                    ]:
+                        cur.execute(
+                            """
+                            INSERT INTO live_duplicate_hints
+                                (event_slug, record_id, fingerprint, candidate_uuid,
+                                 reasons, confidence)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (record_id, candidate_uuid) DO NOTHING
+                            """,
+                            (
+                                event_slug,
+                                row["record_id"],
+                                fingerprint,
+                                candidate,
+                                reasons,
+                                confidence,
+                            ),
+                        )
+                return len(changed)
+
+
+def get_live_duplicate_hints(event_slug: str) -> Dict[str, List[Dict[str, Any]]]:
+    """The stored hints for the event's check-ins, by record_id (read only, no detection).
+
+    Pairs dismissed with "Not same" (T-056), candidates that no longer exist and the
+    check-in's own player are filtered out on every read.
+    """
+    if not event_slug:
+        return {}
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if not _live_hints_table_exists(cur):
+                return {}
+            cur.execute(
+                """
+                SELECT h.record_id, h.candidate_uuid, h.reasons, h.confidence,
+                       p.tag, p.name, a.player_uuid
+                FROM live_duplicate_hints h
+                JOIN active_event_data a ON a.record_id = h.record_id
+                JOIN players p ON p.uuid = h.candidate_uuid
+                WHERE h.event_slug = %s AND h.candidate_uuid <> ''
+                  AND h.candidate_uuid IS DISTINCT FROM a.player_uuid
+                """,
+                (event_slug,),
+            )
+            hits = cur.fetchall()
+            dismissed = _dismissed_pair_keys(cur)
+    hints: Dict[str, List[Dict[str, Any]]] = {}
+    for record_id, candidate, reasons, confidence, tag, name, own in hits:
+        if own and tuple(sorted((own, candidate))) in dismissed:
+            continue
+        hints.setdefault(record_id, []).append(
+            {
+                "candidate_uuid": candidate,
+                "candidate_tag": (tag or "").strip(),
+                "candidate_name": (name or "").strip(),
+                "reasons": list(reasons or []),
+                "confidence": confidence,
+            }
+        )
+    for items in hints.values():
+        items.sort(key=lambda h: (_CONFIDENCE_ORDER.get(h["confidence"], 3), -len(h["reasons"])))
+    return hints
+
+
+def refresh_live_duplicate_hints(event_slug: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Detect, then read: the possible duplicates for the event's check-ins."""
+    detect_live_duplicate_hints(event_slug)
+    return get_live_duplicate_hints(event_slug)
+
+
+def _live_pair_snapshot(cur, record_id: str, candidate_uuid: str) -> Optional[Dict[str, Any]]:
+    """Both sides of one hint as the TO sees them, plus `version`: an opaque hash of
+    everything the decision depends on (the check-in's identity and linked player, both
+    profiles in full). None when the hint no longer applies (gone, same player, or the
+    pair is already marked "Not same")."""
+    cur.execute(
+        "SELECT record_id, event_slug, name, tag, email, telephone, player_uuid "
+        "FROM active_event_data WHERE record_id = %s",
+        (record_id,),
+    )
+    row = cur.fetchone()
+    if not row or not candidate_uuid:
+        return None
+    checkin = dict(
+        zip(["record_id", "event_slug", "name", "tag", "email", "telephone", "player_uuid"], row)
+    )
+    own_uuid = checkin["player_uuid"] or ""
+    if own_uuid == candidate_uuid:
+        return None
+    cur.execute(
+        "SELECT uuid, name, tag, telephone, total_events, md5(to_jsonb(p)::text) "
+        "FROM players p WHERE uuid = ANY(%s)",
+        ([candidate_uuid, own_uuid or candidate_uuid],),
+    )
+    profiles = {
+        r[0]: dict(zip(["uuid", "name", "tag", "telephone", "total_events", "digest"], r))
+        for r in cur.fetchall()
+    }
+    candidate = profiles.get(candidate_uuid)
+    if not candidate:
+        return None
+    own = profiles.get(own_uuid) if own_uuid else None
+    if own and _dismissals_table_exists(cur):
+        cur.execute(
+            "SELECT 1 FROM player_duplicate_dismissals WHERE uuid_a = %s AND uuid_b = %s",
+            ordered_duplicate_pair(own_uuid, candidate_uuid),
+        )
+        if cur.fetchone():
+            return None
+    cur.execute(
+        "SELECT 1 FROM active_event_data WHERE event_slug = %s AND player_uuid = %s LIMIT 1",
+        (checkin["event_slug"], candidate_uuid),
+    )
+    candidate_today = cur.fetchone() is not None
+    version = hashlib.sha256(
+        json.dumps(
+            [
+                record_id,
+                checkin["event_slug"],
+                checkin["name"],
+                checkin["tag"],
+                checkin["email"],
+                checkin["telephone"],
+                own_uuid,
+                (own or {}).get("digest") or "",
+                candidate_uuid,
+                candidate["digest"],
+            ],
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    reasons, confidence = _duplicate_signals(
+        _identity(checkin["name"], checkin["tag"], checkin["telephone"]),
+        _identity(candidate["name"], candidate["tag"], candidate["telephone"]),
+    )
+    return {
+        "record_id": record_id,
+        "event_slug": checkin["event_slug"],
+        "version": version,
+        "checkin": {
+            "name": (checkin["name"] or "").strip(),
+            "tag": (checkin["tag"] or "").strip(),
+            "telephone": (checkin["telephone"] or "").strip(),
+            "player_uuid": own_uuid if own else None,
+            "total_events": (own or {}).get("total_events") or 0,
+            "has_profile": own is not None,
+            "today": True,
+        },
+        "candidate": {
+            "uuid": candidate_uuid,
+            "name": (candidate["name"] or "").strip(),
+            "tag": (candidate["tag"] or "").strip(),
+            "telephone": (candidate["telephone"] or "").strip(),
+            "total_events": candidate["total_events"] or 0,
+            "today": candidate_today,
+        },
+        "reasons": reasons,
+        "confidence": confidence,
+    }
+
+
+def get_live_duplicate_pair(record_id: str, candidate_uuid: str) -> Optional[Dict[str, Any]]:
+    """Both sides of one live hint, freshly read, for the TO's confirmation dialog."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            return _live_pair_snapshot(cur, record_id, candidate_uuid)
+
+
+def _create_checkin_stub(cur, record_id: str, actor: Dict[str, Any], event_slug: str) -> str:
+    """A profile for a check-in that has none, made only inside a TO's live decision."""
+    cur.execute(
+        "SELECT name, tag, email, telephone FROM active_event_data WHERE record_id = %s",
+        (record_id,),
+    )
+    name, tag, email, telephone = cur.fetchone()
+    cur.execute(
+        "INSERT INTO players (name, tag, email, telephone) VALUES (%s, %s, %s, %s) "
+        "RETURNING uuid",
+        (name, tag, email, telephone),
+    )
+    stub = cur.fetchone()[0]
+    cur.execute(
+        "UPDATE active_event_data SET player_uuid = %s WHERE record_id = %s", (stub, record_id)
+    )
+    _insert_audit(
+        cur,
+        actor,
+        "player_stub_created",
+        "players",
+        target_event=event_slug,
+        target_record=record_id,
+        target_player=stub,
+        reason="live_duplicate",
+        details=json.dumps({"created_by": "TO action", "source": "live_duplicate"}),
+    )
+    return stub
+
+
+def resolve_live_duplicate(
+    record_id: str,
+    candidate_uuid: str,
+    action: str,
+    user: Optional[Dict[str, Any]] = None,
+    *,
+    version: str = "",
+) -> Dict[str, Any]:
+    """Apply the TO's choice for a live hint, all in ONE transaction.
+
+    `version` is the dialog's snapshot version: if the check-in, its linked player or the
+    candidate changed since (or the pair was dismissed/merged), StaleLiveDuplicate is
+    raised and nothing at all is written. Locks: merge_players' order (events → player
+    merges → rows/players). A stub profile (only when the check-in has none), the merge
+    (merge_log + undo) or the T-056 dismissal, and their audit rows commit together.
+    "keep_checkin" / "keep_candidate" keep the clicked profile. The merge history is what
+    makes the decision durable: archive resolves a merged-away tag/email through it.
+    """
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    if action not in ("keep_checkin", "keep_candidate", "not_same"):
+        raise ValueError("Unknown action")
+    if not version:
+        raise StaleLiveDuplicate("Open the possible duplicate again before deciding")
+    actor = user or {"user_id": "", "user_name": "system", "user_email": ""}
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL lock_timeout = '10s'")
+                cur.execute(
+                    "SELECT event_slug, player_uuid FROM active_event_data WHERE record_id = %s",
+                    (record_id,),
+                )
+                seen = cur.fetchone()
+                if not seen:
+                    raise StaleLiveDuplicate("This check-in no longer exists")
+                event_slug, own_seen = seen
+                _lock_player_merge_scope(
+                    cur, [own_seen, candidate_uuid], [event_slug], what="decision"
+                )
+                cur.execute(
+                    "SELECT event_slug, player_uuid FROM active_event_data "
+                    "WHERE record_id = %s FOR UPDATE",
+                    (record_id,),
+                )
+                if cur.fetchone() != (event_slug, own_seen):
+                    raise StaleLiveDuplicate("This check-in changed since you opened it")
+                cur.execute(
+                    "SELECT uuid FROM players WHERE uuid = ANY(%s) ORDER BY uuid FOR UPDATE",
+                    ([u for u in (own_seen, candidate_uuid) if u],),
+                )
+                pair = _live_pair_snapshot(cur, record_id, candidate_uuid)
+                if pair is None:
+                    raise StaleLiveDuplicate("This possible duplicate is no longer current")
+                if pair["version"] != version:
+                    raise StaleLiveDuplicate("Something changed since you opened it")
+                own = pair["checkin"]["player_uuid"]
+                if not own:
+                    own = _create_checkin_stub(cur, record_id, actor, event_slug)
+                if action == "not_same":
+                    if not _dismissals_table_exists(cur):
+                        raise ValueError("Not same is not available (migration 007 missing)")
+                    a, b = ordered_duplicate_pair(own, candidate_uuid)
+                    cur.execute(
+                        """
+                        INSERT INTO player_duplicate_dismissals (uuid_a, uuid_b, dismissed_by)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (uuid_a, uuid_b) DO NOTHING
+                        """,
+                        (a, b, str(actor.get("user_name") or "")[:120]),
+                    )
+                    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+                        cur.execute(
+                            "SELECT name, tag, email, telephone FROM active_event_data "
+                            "WHERE record_id = %s",
+                            (record_id,),
+                        )
+                        identity = _row_identity_hash(*cur.fetchone())
+                        cur.execute(
+                            "UPDATE player_duplicate_dismissals SET confirmed_rows = "
+                            "coalesce(confirmed_rows, '{}'::jsonb) || %s::jsonb "
+                            "WHERE uuid_a = %s AND uuid_b = %s",
+                            (_Json({record_id: {"hash": identity, "player": own}}), a, b),
+                        )
+                    _insert_audit(
+                        cur,
+                        actor,
+                        "duplicate_dismissed",
+                        "players",
+                        target_event=event_slug,
+                        target_record=record_id,
+                        target_player=own,
+                        details=json.dumps(
+                            {"pair": [own, candidate_uuid], "source": "live_duplicate"}
+                        ),
+                        reason="TO marked as not same player (live)",
+                    )
+                    result: Dict[str, Any] = {"action": action, "player_uuid": own}
+                else:
+                    keep, remove = (
+                        (own, candidate_uuid)
+                        if action == "keep_checkin"
+                        else (candidate_uuid, own)
+                    )
+                    reason = "Live duplicate: same player"
+                    merged = _merge_players_locked(
+                        cur, keep, remove, reason, actor, confirm_records=(record_id,)
+                    )
+                    _insert_audit(
+                        cur,
+                        actor,
+                        "player_merged",
+                        "players",
+                        target_event=event_slug,
+                        target_record=record_id,
+                        target_player=keep,
+                        reason=reason,
+                        details=json.dumps(
+                            {
+                                "merge_id": merged["merge_id"],
+                                "keep_uuid": keep,
+                                "remove_uuid": remove,
+                                "archive_rows_updated": merged["archive_rows_updated"],
+                                "active_rows_updated": merged["active_rows_updated"],
+                                "source": "live_duplicate",
+                            }
+                        ),
+                    )
+                    result = {"action": action, **merged}
+    # TODO(T-067): trigger its recompute here once merged.
+    return {**result, "event_slug": event_slug}
 
 
 def _levenshtein(s1: str, s2: str) -> int:
@@ -4951,8 +5632,6 @@ def merge_players(
 
     Returns merge summary dict.
     """
-    from psycopg.types.json import Json as _Json  # type: ignore
-
     if not keep_uuid or not remove_uuid:
         raise ValueError("Both keep_uuid and remove_uuid are required")
     if keep_uuid == remove_uuid:
@@ -4963,234 +5642,13 @@ def merge_players(
     with _get_pool().connection() as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                # 1. Load both players
+                # 1. Lock every affected event, then the global merge lock (docs/locking.md)
                 cur.execute("SET LOCAL lock_timeout = '10s'")
-                for lock_attempt in range(3):
-                    # Retry only the lock phase if an incoming check-in adds a new event.
-                    cur.execute("SAVEPOINT player_event_locks")
-                    cur.execute(
-                        "SELECT DISTINCT event_slug FROM active_event_data "
-                        "WHERE player_uuid = ANY(%s)",
-                        ([keep_uuid, remove_uuid],),
-                    )
-                    locked_slugs = sorted(row[0] for row in cur.fetchall())
-                    for slug in locked_slugs:
-                        cur.execute(
-                            "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (slug,)
-                        )
-                    cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
-                    cur.execute(
-                        "SELECT DISTINCT event_slug FROM active_event_data "
-                        "WHERE player_uuid = ANY(%s)",
-                        ([keep_uuid, remove_uuid],),
-                    )
-                    if any(row[0] not in locked_slugs for row in cur.fetchall()):
-                        cur.execute("ROLLBACK TO SAVEPOINT player_event_locks")
-                        cur.execute("RELEASE SAVEPOINT player_event_locks")
-                        continue
-                    cur.execute("RELEASE SAVEPOINT player_event_locks")
-                    break
-                else:
-                    raise ValueError(
-                        "Active check-ins changed during lock acquisition; retry the merge"
-                    )
-                cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (keep_uuid,))
-                keep_row = cur.fetchone()
-                if not keep_row:
-                    raise ValueError(f"Keep player not found: {keep_uuid}")
-                keep_cols = [desc[0] for desc in cur.description]
-                keep_player = _row_to_dict(keep_cols, keep_row)
-
-                cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (remove_uuid,))
-                remove_row = cur.fetchone()
-                if not remove_row:
-                    raise ValueError(f"Remove player not found: {remove_uuid}")
-                remove_player = _row_to_dict(keep_cols, remove_row)
-
-                # 2. Snapshot removed player (for undo)
-                # Convert non-serializable types
-                snapshot = {}
-                for k, v in remove_player.items():
-                    if isinstance(v, Decimal):
-                        snapshot[k] = float(v)
-                    elif isinstance(v, datetime):
-                        snapshot[k] = v.isoformat()
-                    elif hasattr(v, "isoformat"):
-                        snapshot[k] = v.isoformat()
-                    else:
-                        snapshot[k] = v
-
-                # 3. Re-point event_archive rows
-                cur.execute(
-                    "UPDATE event_archive SET player_uuid = %s WHERE player_uuid = %s RETURNING id",
-                    (keep_uuid, remove_uuid),
-                )
-                moved_archive_ids = sorted(row[0] for row in cur.fetchall())
-                archive_updated = len(moved_archive_ids)
-
-                # 4. Re-point active_event_data rows
-                cur.execute(
-                    "UPDATE active_event_data SET player_uuid = %s WHERE player_uuid = %s RETURNING record_id",
-                    (keep_uuid, remove_uuid),
-                )
-                moved_active_ids = sorted(row[0] for row in cur.fetchall())
-                active_updated = len(moved_active_ids)
-
-                # 5. Merge stats into keep player
-                keep_events = keep_player.get("events_list") or []
-                if not isinstance(keep_events, list):
-                    keep_events = []
-                remove_events = remove_player.get("events_list") or []
-                if not isinstance(remove_events, list):
-                    remove_events = []
-                merged_events = list(dict.fromkeys(keep_events + remove_events))
-
-                keep_games = keep_player.get("games_played") or []
-                remove_games = remove_player.get("games_played") or []
-                merged_games = list(set(keep_games) | set(remove_games))
-
-                keep_game_counts = keep_player.get("game_counts") or {}
-                if not isinstance(keep_game_counts, dict):
-                    keep_game_counts = {}
-                remove_game_counts = remove_player.get("game_counts") or {}
-                if not isinstance(remove_game_counts, dict):
-                    remove_game_counts = {}
-                merged_game_counts = dict(keep_game_counts)
-                for g, cnt in remove_game_counts.items():
-                    merged_game_counts[g] = merged_game_counts.get(g, 0) + (cnt or 0)
-                merged_favorite = (
-                    max(merged_game_counts, key=merged_game_counts.get)
-                    if merged_game_counts
-                    else keep_player.get("favorite_game")
-                )
-
-                merged_total_events = len(merged_events)
-                merged_total_paid = Decimal(str(keep_player.get("total_paid") or 0)) + Decimal(
-                    str(remove_player.get("total_paid") or 0)
-                )
-
-                # Use earliest first_seen, latest last_seen
-                keep_first = keep_player.get("first_seen")
-                remove_first = remove_player.get("first_seen")
-                if keep_first and remove_first:
-                    merged_first = min(keep_first, remove_first)
-                else:
-                    merged_first = keep_first or remove_first
-
-                keep_last = keep_player.get("last_seen")
-                remove_last = remove_player.get("last_seen")
-                if keep_last and remove_last:
-                    merged_last = max(keep_last, remove_last)
-                else:
-                    merged_last = keep_last or remove_last
-
-                # Prefer keep player's identity fields, fill gaps from removed
-                merged_name = keep_player.get("name") or remove_player.get("name")
-                merged_tag = keep_player.get("tag") or remove_player.get("tag")
-                merged_email = keep_player.get("email") or remove_player.get("email")
-                merged_phone = keep_player.get("telephone") or remove_player.get("telephone")
-                merged_member = (keep_player.get("is_member") or False) or (
-                    remove_player.get("is_member") or False
-                )
-
-                now = datetime.now(timezone.utc)
-                cur.execute(
-                    """
-                    UPDATE players SET
-                        name = %s,
-                        tag = %s,
-                        email = %s,
-                        telephone = %s,
-                        games_played = %s,
-                        game_counts = %s,
-                        favorite_game = %s,
-                        total_events = %s,
-                        total_paid = %s,
-                        first_seen = %s,
-                        last_seen = %s,
-                        first_event = %s,
-                        last_event = %s,
-                        events_list = %s,
-                        is_member = %s,
-                        updated_at = %s
-                    WHERE uuid = %s
-                    """,
-                    (
-                        merged_name,
-                        merged_tag,
-                        merged_email,
-                        merged_phone,
-                        merged_games,
-                        _Json(merged_game_counts),
-                        merged_favorite,
-                        merged_total_events,
-                        merged_total_paid,
-                        merged_first,
-                        merged_last,
-                        merged_events[0] if merged_events else keep_player.get("first_event"),
-                        merged_events[-1] if merged_events else keep_player.get("last_event"),
-                        _Json(merged_events),
-                        merged_member,
-                        now,
-                        keep_uuid,
-                    ),
-                )
-
-                # A "not same" decision belongs to these profiles, not a different survivor.
-                if _dismissals_table_exists(cur):
-                    cur.execute(
-                        "DELETE FROM player_duplicate_dismissals WHERE uuid_a = %s OR uuid_b = %s",
-                        (remove_uuid, remove_uuid),
-                    )
-
-                # 6. Delete the removed player
-                cur.execute("DELETE FROM players WHERE uuid = %s", (remove_uuid,))
-
-                # 7. Write to merge_log
-                cur.execute(
-                    "SELECT md5(to_jsonb(p)::text) FROM players p WHERE uuid = %s",
-                    (keep_uuid,),
-                )
-                after_state = {"player": cur.fetchone()[0]}
-                cur.execute(
-                    """SELECT id, md5(to_jsonb(a)::text) FROM event_archive a
-                       WHERE player_uuid = %s ORDER BY id FOR UPDATE""",
-                    (keep_uuid,),
-                )
-                after_state["archive"] = [list(row) for row in cur.fetchall()]
-                cur.execute(
-                    """SELECT record_id, md5(to_jsonb(a)::text) FROM active_event_data a
-                       WHERE player_uuid = %s ORDER BY record_id FOR UPDATE""",
-                    (keep_uuid,),
-                )
-                after_state["active"] = [list(row) for row in cur.fetchall()]
-                before_totals = {"keep": keep_player, "remove": remove_player, "after": after_state}
-                cur.execute(
-                    """
-                    INSERT INTO merge_log (
-                        keep_uuid, remove_uuid,
-                        user_id, user_name, reason,
-                        removed_player_snapshot,
-                        archive_rows_updated, active_rows_updated,
-                        moved_archive_ids, moved_active_ids, before_totals
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (
-                        keep_uuid,
-                        remove_uuid,
-                        merge_user.get("user_id", ""),
-                        merge_user.get("user_name", "system"),
-                        reason,
-                        _Json(snapshot),
-                        archive_updated,
-                        active_updated,
-                        moved_archive_ids,
-                        moved_active_ids,
-                        _Json(before_totals, dumps=lambda value: json.dumps(value, default=str)),
-                    ),
-                )
-                merge_id = cur.fetchone()[0]
+                _lock_player_merge_scope(cur, [keep_uuid, remove_uuid])
+                result = _merge_players_locked(cur, keep_uuid, remove_uuid, reason, merge_user)
+    merge_id = result["merge_id"]
+    archive_updated = result["archive_rows_updated"]
+    active_updated = result["active_rows_updated"]
 
     # Audit log (outside transaction — non-critical)
     log_action(
@@ -5214,6 +5672,264 @@ def merge_players(
         f"🔀 Merged player {remove_uuid[:8]}… into {keep_uuid[:8]}… "
         f"(archive={archive_updated}, active={active_updated}, merge_id={merge_id})"
     )
+
+    return result
+
+
+def _lock_player_merge_scope(cur, uuids, extra_slugs=(), what: str = "merge") -> List[str]:
+    """Take merge_players' locks: every event with an active row of these players (plus
+    extra_slugs), sorted, then the global player-merge lock. Retried if a check-in moves."""
+    uuids = [u for u in uuids if u]
+    extra = {slug for slug in extra_slugs if slug}
+    for _lock_attempt in range(3):
+        # Retry only the lock phase if an incoming check-in adds a new event.
+        cur.execute("SAVEPOINT player_event_locks")
+        cur.execute(
+            "SELECT DISTINCT event_slug FROM active_event_data WHERE player_uuid = ANY(%s)",
+            (uuids,),
+        )
+        locked_slugs = sorted({row[0] for row in cur.fetchall()} | extra)
+        for slug in locked_slugs:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (slug,))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+        cur.execute(
+            "SELECT DISTINCT event_slug FROM active_event_data WHERE player_uuid = ANY(%s)",
+            (uuids,),
+        )
+        if any(row[0] not in locked_slugs for row in cur.fetchall()):
+            cur.execute("ROLLBACK TO SAVEPOINT player_event_locks")
+            cur.execute("RELEASE SAVEPOINT player_event_locks")
+            continue
+        cur.execute("RELEASE SAVEPOINT player_event_locks")
+        return locked_slugs
+    raise ValueError(f"Active check-ins changed during lock acquisition; retry the {what}")
+
+
+def _merge_players_locked(
+    cur,
+    keep_uuid: str,
+    remove_uuid: str,
+    reason: str,
+    merge_user: Dict[str, Any],
+    confirm_records: tuple = (),
+) -> Dict[str, Any]:
+    """merge_players' writes on the caller's transaction; _lock_player_merge_scope is held.
+
+    T-068: merge_log.confirmed_rows records the active check-ins this decision covers (the
+    rows moved to the kept profile, plus confirm_records) with their identity hash, so
+    archive keeps them on the kept profile even without a tag/email to match by."""
+    from psycopg.types.json import Json as _Json  # type: ignore
+
+    cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (keep_uuid,))
+    keep_row = cur.fetchone()
+    if not keep_row:
+        raise ValueError(f"Keep player not found: {keep_uuid}")
+    keep_cols = [desc[0] for desc in cur.description]
+    keep_player = _row_to_dict(keep_cols, keep_row)
+
+    cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (remove_uuid,))
+    remove_row = cur.fetchone()
+    if not remove_row:
+        raise ValueError(f"Remove player not found: {remove_uuid}")
+    remove_player = _row_to_dict(keep_cols, remove_row)
+
+    # 2. Snapshot removed player (for undo)
+    # Convert non-serializable types
+    snapshot = {}
+    for k, v in remove_player.items():
+        if isinstance(v, Decimal):
+            snapshot[k] = float(v)
+        elif isinstance(v, datetime):
+            snapshot[k] = v.isoformat()
+        elif hasattr(v, "isoformat"):
+            snapshot[k] = v.isoformat()
+        else:
+            snapshot[k] = v
+
+    # 3. Re-point event_archive rows
+    cur.execute(
+        "UPDATE event_archive SET player_uuid = %s WHERE player_uuid = %s RETURNING id",
+        (keep_uuid, remove_uuid),
+    )
+    moved_archive_ids = sorted(row[0] for row in cur.fetchall())
+    archive_updated = len(moved_archive_ids)
+
+    # T-068: the check-ins this decision covers, with their identity at decision time.
+    cur.execute(
+        "SELECT record_id, name, tag, email, telephone FROM active_event_data "
+        "WHERE player_uuid = %s OR record_id = ANY(%s)",
+        (remove_uuid, list(confirm_records)),
+    )
+    confirmed_rows = {r[0]: _row_identity_hash(r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
+
+    # 4. Re-point active_event_data rows
+    cur.execute(
+        "UPDATE active_event_data SET player_uuid = %s WHERE player_uuid = %s RETURNING record_id",
+        (keep_uuid, remove_uuid),
+    )
+    moved_active_ids = sorted(row[0] for row in cur.fetchall())
+    active_updated = len(moved_active_ids)
+
+    # 5. Merge stats into keep player
+    keep_events = keep_player.get("events_list") or []
+    if not isinstance(keep_events, list):
+        keep_events = []
+    remove_events = remove_player.get("events_list") or []
+    if not isinstance(remove_events, list):
+        remove_events = []
+    merged_events = list(dict.fromkeys(keep_events + remove_events))
+
+    keep_games = keep_player.get("games_played") or []
+    remove_games = remove_player.get("games_played") or []
+    merged_games = list(set(keep_games) | set(remove_games))
+
+    keep_game_counts = keep_player.get("game_counts") or {}
+    if not isinstance(keep_game_counts, dict):
+        keep_game_counts = {}
+    remove_game_counts = remove_player.get("game_counts") or {}
+    if not isinstance(remove_game_counts, dict):
+        remove_game_counts = {}
+    merged_game_counts = dict(keep_game_counts)
+    for g, cnt in remove_game_counts.items():
+        merged_game_counts[g] = merged_game_counts.get(g, 0) + (cnt or 0)
+    merged_favorite = (
+        max(merged_game_counts, key=merged_game_counts.get)
+        if merged_game_counts
+        else keep_player.get("favorite_game")
+    )
+
+    merged_total_events = len(merged_events)
+    merged_total_paid = Decimal(str(keep_player.get("total_paid") or 0)) + Decimal(
+        str(remove_player.get("total_paid") or 0)
+    )
+
+    # Use earliest first_seen, latest last_seen
+    keep_first = keep_player.get("first_seen")
+    remove_first = remove_player.get("first_seen")
+    if keep_first and remove_first:
+        merged_first = min(keep_first, remove_first)
+    else:
+        merged_first = keep_first or remove_first
+
+    keep_last = keep_player.get("last_seen")
+    remove_last = remove_player.get("last_seen")
+    if keep_last and remove_last:
+        merged_last = max(keep_last, remove_last)
+    else:
+        merged_last = keep_last or remove_last
+
+    # Prefer keep player's identity fields, fill gaps from removed
+    merged_name = keep_player.get("name") or remove_player.get("name")
+    merged_tag = keep_player.get("tag") or remove_player.get("tag")
+    merged_email = keep_player.get("email") or remove_player.get("email")
+    merged_phone = keep_player.get("telephone") or remove_player.get("telephone")
+    merged_member = (keep_player.get("is_member") or False) or (
+        remove_player.get("is_member") or False
+    )
+
+    now = datetime.now(timezone.utc)
+    cur.execute(
+        """
+        UPDATE players SET
+            name = %s,
+            tag = %s,
+            email = %s,
+            telephone = %s,
+            games_played = %s,
+            game_counts = %s,
+            favorite_game = %s,
+            total_events = %s,
+            total_paid = %s,
+            first_seen = %s,
+            last_seen = %s,
+            first_event = %s,
+            last_event = %s,
+            events_list = %s,
+            is_member = %s,
+            updated_at = %s
+        WHERE uuid = %s
+        """,
+        (
+            merged_name,
+            merged_tag,
+            merged_email,
+            merged_phone,
+            merged_games,
+            _Json(merged_game_counts),
+            merged_favorite,
+            merged_total_events,
+            merged_total_paid,
+            merged_first,
+            merged_last,
+            merged_events[0] if merged_events else keep_player.get("first_event"),
+            merged_events[-1] if merged_events else keep_player.get("last_event"),
+            _Json(merged_events),
+            merged_member,
+            now,
+            keep_uuid,
+        ),
+    )
+
+    # A "not same" decision belongs to these profiles, not a different survivor.
+    if _dismissals_table_exists(cur):
+        cur.execute(
+            "DELETE FROM player_duplicate_dismissals WHERE uuid_a = %s OR uuid_b = %s",
+            (remove_uuid, remove_uuid),
+        )
+
+    # 6. Delete the removed player
+    cur.execute("DELETE FROM players WHERE uuid = %s", (remove_uuid,))
+
+    # 7. Write to merge_log
+    cur.execute(
+        "SELECT md5(to_jsonb(p)::text) FROM players p WHERE uuid = %s",
+        (keep_uuid,),
+    )
+    after_state = {"player": cur.fetchone()[0]}
+    cur.execute(
+        """SELECT id, md5(to_jsonb(a)::text) FROM event_archive a
+           WHERE player_uuid = %s ORDER BY id FOR UPDATE""",
+        (keep_uuid,),
+    )
+    after_state["archive"] = [list(row) for row in cur.fetchall()]
+    cur.execute(
+        """SELECT record_id, md5(to_jsonb(a)::text) FROM active_event_data a
+           WHERE player_uuid = %s ORDER BY record_id FOR UPDATE""",
+        (keep_uuid,),
+    )
+    after_state["active"] = [list(row) for row in cur.fetchall()]
+    before_totals = {"keep": keep_player, "remove": remove_player, "after": after_state}
+    cur.execute(
+        """
+        INSERT INTO merge_log (
+            keep_uuid, remove_uuid,
+            user_id, user_name, reason,
+            removed_player_snapshot,
+            archive_rows_updated, active_rows_updated,
+            moved_archive_ids, moved_active_ids, before_totals
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            keep_uuid,
+            remove_uuid,
+            merge_user.get("user_id", ""),
+            merge_user.get("user_name", "system"),
+            reason,
+            _Json(snapshot),
+            archive_updated,
+            active_updated,
+            moved_archive_ids,
+            moved_active_ids,
+            _Json(before_totals, dumps=lambda value: json.dumps(value, default=str)),
+        ),
+    )
+    merge_id = cur.fetchone()[0]
+    if confirmed_rows and _merge_log_has_confirmed_rows(cur):
+        cur.execute(
+            "UPDATE merge_log SET confirmed_rows = %s WHERE id = %s",
+            (_Json(confirmed_rows), merge_id),
+        )
 
     return {
         "merge_id": merge_id,
@@ -5365,6 +6081,7 @@ def undo_merge(
             cur.execute(
                 "UPDATE merge_log SET undone = true, undone_at = now() WHERE id = %s", (merge_id,)
             )
+            _invalidate_proofs_after_undo(cur, entry, undo_user)
 
     log_action(
         undo_user,
@@ -5393,6 +6110,47 @@ def undo_merge(
         "archive_reverted": archive_reverted,
         "active_reverted": active_reverted,
     }
+
+
+def _invalidate_proofs_after_undo(cur, entry: Dict[str, Any], user: Dict[str, Any]) -> None:
+    """T-068: once a merge is undone, later decision proofs for the check-ins it MOVED
+    (moved_active_ids: their uuid went from the removed profile to the survivor) that point
+    at its survivor no longer hold (e.g. a "Not same" made while the row was on the kept
+    profile). Rows that kept their uuid (the kept side, e.g. the clicked row of "Keep A")
+    are untouched. Remove them in the undo's transaction and audit what was removed;
+    archive then matches those rows normally again (which finds the restored profile)."""
+    covered = sorted(entry.get("moved_active_ids") or [])
+    if not covered:
+        return
+    merge_id, survivor = entry["id"], entry["keep_uuid"]
+    merged_at = entry.get("merged_at")
+    removed: Dict[str, List[Any]] = {"dismissals": [], "merges": []}
+    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+        for record_id in covered:
+            cur.execute(
+                "UPDATE player_duplicate_dismissals SET confirmed_rows = confirmed_rows - %s "
+                "WHERE confirmed_rows -> %s ->> 'player' = %s "
+                "AND (%s::timestamptz IS NULL OR dismissed_at >= %s::timestamptz) RETURNING id",
+                (record_id, record_id, survivor, merged_at, merged_at),
+            )
+            removed["dismissals"] += [[row[0], record_id] for row in cur.fetchall()]
+    for record_id in covered:
+        cur.execute(
+            "UPDATE merge_log SET confirmed_rows = confirmed_rows - %s "
+            "WHERE id > %s AND keep_uuid = %s AND confirmed_rows ? %s RETURNING id",
+            (record_id, merge_id, survivor, record_id),
+        )
+        removed["merges"] += [[row[0], record_id] for row in cur.fetchall()]
+    if removed["dismissals"] or removed["merges"]:
+        _insert_audit(
+            cur,
+            user,
+            "decision_proofs_invalidated",
+            "players",
+            target_player=survivor,
+            reason="Merge undone: later decisions for its check-ins no longer apply",
+            details=json.dumps({"merge_id": merge_id, **removed}),
+        )
 
 
 def get_merge_history(limit: int = 50) -> List[Dict[str, Any]]:

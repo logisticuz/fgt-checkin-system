@@ -87,7 +87,15 @@ def test_table_holds_no_contact_data_and_rejects_unordered_pairs(archive_db):  #
                 (archive_db.schema,),
             ).fetchall()
         }
-        assert columns == {"id", "uuid_a", "uuid_b", "dismissed_at", "dismissed_by"}
+        # T-068 adds confirmed_rows: record_id -> {opaque identity hash, profile uuid} only.
+        assert columns == {
+            "id",
+            "uuid_a",
+            "uuid_b",
+            "dismissed_at",
+            "dismissed_by",
+            "confirmed_rows",
+        }
         with pytest.raises(CheckViolation):
             connection.execute(
                 "INSERT INTO player_duplicate_dismissals (uuid_a, uuid_b) VALUES ('b', 'a')"

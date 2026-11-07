@@ -15,6 +15,7 @@ Acquire multiple event keys using Python's sorted slug order in every writer, in
 | archive_event / clear-active | Exclusive | Exclusive |
 | recompute_active_statuses | Exclusive | None |
 | merge_players / undo_merge | Exclusive, all affected slugs | Exclusive |
+| resolve_live_duplicate (T-068: stub + merge/dismissal + audit, one transaction) | Exclusive, affected slugs + the check-in's event | Exclusive |
 
 ID-only writers read the slug without row locks, acquire event locks, then recheck the row.
 Merge/undo discover affected slugs without row locks and recheck after acquiring global.
