@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
@@ -52,7 +53,7 @@ BASE = {
             "Skip - Return Result",  # T-028: skipped/unavailable no longer means false.
             "Webhook - eBas Check",
         },
-        "invariant": "381f665a6e529aff5968b51e8ccd947f49a97559ac648980f736c6ac925f7cf5",
+        "invariant": "22680732f524793dbd847a5bb8cf3c35c67c737955edfe68453671efe01ae173",
         "callbacks": 0,
     },
     "FGC THN - eBas Register v2 (PG).json": {
@@ -541,10 +542,14 @@ def test_ebas_webhook_has_explicit_private_success_and_error_routes(published):
 
 @pytest.mark.parametrize("published", [False, True])
 @pytest.mark.parametrize("member", [True, False])
-def test_ebas_success_keeps_the_exact_legacy_json(published, member):
+@pytest.mark.parametrize("request_result", [None, "success"])
+def test_ebas_success_keeps_the_exact_legacy_json(published, member, request_result):
+    provider_response = {"response": {"member_found": member}}
+    if request_result is not None:
+        provider_response["response"]["request_result"] = request_result
     response = ebas_webhook_response(
         flow_version(EBAS, published),
-        {"statusCode": 200, "headers": {}, "body": {"response": {"member_found": member}}},
+        {"statusCode": 200, "headers": {}, "body": provider_response},
     )
     expected = {
         "ok": True,
@@ -569,6 +574,14 @@ def test_ebas_success_keeps_the_exact_legacy_json(published, member):
         {"response": {"member_found": "false"}},
         {"response": {"member_found": 0}},
         {"response": {"member_found": None}},
+        {"response": {"member_found": False, "request_result": "fail"}},
+        {"response": {"member_found": True, "request_result": "fail"}},
+        {
+            "statusCode": 200,
+            "body": {"response": {"member_found": False, "request_result": "fail"}},
+        },
+        {"statusCode": 200, "body": {"response": {"member_found": False, "request_result": None}}},
+        {"statusCode": 200, "body": {"request_result": False, "response": {"member_found": True}}},
         {"response": {"member_found": False}, "error": None},
         {"response": {"member_found": True}, "errors": []},
         {"response": {"member_found": False, "error": False}},
@@ -598,12 +611,15 @@ def test_ebas_ambiguous_and_failed_replies_are_non_json_503(published, provider_
 
 
 @pytest.mark.parametrize("published", [False, True])
-@pytest.mark.parametrize("outcome", ["member", "not_member", "timeout"])
+@pytest.mark.parametrize("outcome", ["member", "not_member", "timeout", "provider_error"])
 def test_member_card_existing_json_decode_pattern_preserves_all_three_outcomes(published, outcome):
     version = flow_version(EBAS, published)
+    provider_response = {"response": {"member_found": outcome == "member"}}
+    if outcome == "provider_error":
+        provider_response["response"]["request_result"] = "fail"
     response = ebas_webhook_response(
         version,
-        {"statusCode": 200, "body": {"response": {"member_found": outcome == "member"}}},
+        {"statusCode": 200, "body": provider_response},
         transport_error=outcome == "timeout",
     )
 
@@ -638,7 +654,7 @@ def test_member_card_existing_json_decode_pattern_preserves_all_three_outcomes(p
         return 200, {"ok": True}
 
     status, body = asyncio.run(caller())
-    if outcome == "timeout":
+    if outcome in {"timeout", "provider_error"}:
         assert status == 502
         assert body == {
             "ok": False,
@@ -652,6 +668,18 @@ def test_member_card_existing_json_decode_pattern_preserves_all_three_outcomes(p
         }
     else:
         assert status == 200 and body == {"ok": True}
+
+
+def test_ebas_export_has_a_fresh_consistent_published_version():
+    flow = flow_version(EBAS)
+    version_id = flow["versionId"]
+    assert UUID(version_id).version == 4
+    assert version_id != "259229f0-7ee2-4be3-8fa0-47a515ae138a"
+    assert flow["activeVersionId"] == flow["activeVersion"]["versionId"] == version_id
+    assert all(
+        history["versionId"] == version_id
+        for history in flow["activeVersion"].get("workflowPublishHistory", [])
+    )
 
 
 @pytest.mark.parametrize("published", [False, True])

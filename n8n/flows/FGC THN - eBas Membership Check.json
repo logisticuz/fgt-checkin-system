@@ -73,7 +73,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Only explicit booleans in a successful response can verify membership.\nconst attempt_id = $('Normalize Personnummer').first().json.attempt_id;\nconst hasBody = Object.prototype.hasOwnProperty.call($json, 'body');\nconst payload = hasBody ? $json.body : $json;\nconst status = $json.statusCode;\nconst validStatus = status === undefined ? !hasBody :\n  Number.isInteger(status) && status >= 200 && status < 300;\n// The presence of either error field is ambiguous, even with a false/null/empty value.\nconst hasError = value => value !== null && typeof value === 'object' &&\n  Object.entries(value).some(([key, child]) =>\n    key === 'error' || key === 'errors' || hasError(child));\nconst memberFound = payload?.response?.member_found;\nif (!validStatus || hasError($json) || typeof memberFound !== 'boolean') {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'eBas kunde inte verifieras' } }];\n}\nreturn [{ json: { ok: true, state: memberFound ? 'verified_true' : 'verified_false',\n  isMember: memberFound, attempt_id,\n  message: memberFound ? 'Medlem i Sverok' : 'Ej medlem i Sverok' } }];"
+        "jsCode": "// Only explicit booleans in a successful response can verify membership.\nconst attempt_id = $('Normalize Personnummer').first().json.attempt_id;\nconst hasBody = Object.prototype.hasOwnProperty.call($json, 'body');\nconst payload = hasBody ? $json.body : $json;\nconst status = $json.statusCode;\nconst validStatus = status === undefined ? !hasBody :\n  Number.isInteger(status) && status >= 200 && status < 300;\n// The presence of either error field is ambiguous, even with a false/null/empty value.\nconst hasError = value => value !== null && typeof value === 'object' &&\n  Object.entries(value).some(([key, child]) =>\n    key === 'error' || key === 'errors' ||\n    (key === 'request_result' && child !== 'success') || hasError(child));\nconst memberFound = payload?.response?.member_found;\nif (!validStatus || hasError($json) || typeof memberFound !== 'boolean') {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'eBas kunde inte verifieras' } }];\n}\nreturn [{ json: { ok: true, state: memberFound ? 'verified_true' : 'verified_false',\n  isMember: memberFound, attempt_id,\n  message: memberFound ? 'Medlem i Sverok' : 'Ej medlem i Sverok' } }];"
       },
       "name": "Parse Response",
       "type": "n8n-nodes-base.code",
@@ -416,8 +416,8 @@
   "staticData": null,
   "meta": null,
   "pinData": {},
-  "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
-  "activeVersionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+  "versionId": "bb5fa029-7b24-46f0-819d-37e75c0471c1",
+  "activeVersionId": "bb5fa029-7b24-46f0-819d-37e75c0471c1",
   "versionCounter": 10,
   "triggerCount": 1,
   "shared": [
@@ -481,7 +481,7 @@
   "activeVersion": {
     "updatedAt": "2026-01-31T00:05:46.000Z",
     "createdAt": "2026-01-30T15:37:31.080Z",
-    "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+    "versionId": "bb5fa029-7b24-46f0-819d-37e75c0471c1",
     "workflowId": "LAfnY2YOq5kJgLGV",
     "nodes": [
       {
@@ -550,7 +550,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Only explicit booleans in a successful response can verify membership.\nconst attempt_id = $('Normalize Personnummer').first().json.attempt_id;\nconst hasBody = Object.prototype.hasOwnProperty.call($json, 'body');\nconst payload = hasBody ? $json.body : $json;\nconst status = $json.statusCode;\nconst validStatus = status === undefined ? !hasBody :\n  Number.isInteger(status) && status >= 200 && status < 300;\n// The presence of either error field is ambiguous, even with a false/null/empty value.\nconst hasError = value => value !== null && typeof value === 'object' &&\n  Object.entries(value).some(([key, child]) =>\n    key === 'error' || key === 'errors' || hasError(child));\nconst memberFound = payload?.response?.member_found;\nif (!validStatus || hasError($json) || typeof memberFound !== 'boolean') {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'eBas kunde inte verifieras' } }];\n}\nreturn [{ json: { ok: true, state: memberFound ? 'verified_true' : 'verified_false',\n  isMember: memberFound, attempt_id,\n  message: memberFound ? 'Medlem i Sverok' : 'Ej medlem i Sverok' } }];"
+          "jsCode": "// Only explicit booleans in a successful response can verify membership.\nconst attempt_id = $('Normalize Personnummer').first().json.attempt_id;\nconst hasBody = Object.prototype.hasOwnProperty.call($json, 'body');\nconst payload = hasBody ? $json.body : $json;\nconst status = $json.statusCode;\nconst validStatus = status === undefined ? !hasBody :\n  Number.isInteger(status) && status >= 200 && status < 300;\n// The presence of either error field is ambiguous, even with a false/null/empty value.\nconst hasError = value => value !== null && typeof value === 'object' &&\n  Object.entries(value).some(([key, child]) =>\n    key === 'error' || key === 'errors' ||\n    (key === 'request_result' && child !== 'success') || hasError(child));\nconst memberFound = payload?.response?.member_found;\nif (!validStatus || hasError($json) || typeof memberFound !== 'boolean') {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'eBas kunde inte verifieras' } }];\n}\nreturn [{ json: { ok: true, state: memberFound ? 'verified_true' : 'verified_false',\n  isMember: memberFound, attempt_id,\n  message: memberFound ? 'Medlem i Sverok' : 'Ej medlem i Sverok' } }];"
         },
         "name": "Parse Response",
         "type": "n8n-nodes-base.code",
@@ -890,7 +890,7 @@
         "createdAt": "2026-01-31T00:05:46.230Z",
         "id": 1,
         "workflowId": "LAfnY2YOq5kJgLGV",
-        "versionId": "259229f0-7ee2-4be3-8fa0-47a515ae138a",
+        "versionId": "bb5fa029-7b24-46f0-819d-37e75c0471c1",
         "event": "activated",
         "userId": "6833b6c3-90f7-479e-98d9-9c2d39599238"
       }

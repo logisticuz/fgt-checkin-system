@@ -294,8 +294,9 @@ Only a successful provider response containing an explicit boolean `response.mem
 can return HTTP 200 JSON. Both positive and negative results keep the existing payload:
 `{ok:true,state:"verified_true"|"verified_false",isMember:true|false,attempt_id:...,message:...}`.
 The messages remain `Medlem i Sverok` and `Ej medlem i Sverok`, respectively.
-Any `error` or `errors` field (including nested or empty-valued fields), non-2xx status,
-timeout or missing/malformed membership result instead returns HTTP **503**, header
+Any `error` or `errors` field (including nested or empty-valued fields), a present
+`request_result` other than `"success"`, non-2xx status, timeout or missing/malformed
+membership result instead returns HTTP **503**, header
 `Content-Type: text/plain`, with the literal **non-JSON** body `ebas_unavailable`.
 Missing/invalid input and processing-node errors also use this fixed response. No personal
 ID, provider payload or membership boolean is included in it.
