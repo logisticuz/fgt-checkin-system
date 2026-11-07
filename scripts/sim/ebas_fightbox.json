@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "description": "DEV rehearsal only. Skatteverket reserved test IDs; the invalid-checksum case deliberately changes one check digit. Use EBAS_TRANSPORT=stub and EBAS_STUB_SCENARIO=scripts/sim/ebas_fightbox.json. Restart to replay the seeded request order.",
+  "source": "https://skatteverket.entryscape.net/rowstore/dataset/b4de7df7-63c0-4e7e-bb59-1f156a591763/json",
+  "seed": 20261107,
+  "defaults": {"confirm": "member", "validate": "member", "submit": "member"},
+  "latency": {"p50_ms": 400, "p95_ms": 2500, "timeout_rate": 0.02},
+  "people": {
+    "189001019802": {"key": "member-01"},
+    "189001029819": {"key": "member-02"},
+    "189001039800": {"key": "member-03"},
+    "189001049817": {"key": "member-04"},
+    "189001059808": {"key": "member-05"},
+    "189001069815": {"key": "member-06"},
+    "189001079806": {"key": "member-07"},
+    "189001089813": {"key": "member-08"},
+    "189001099804": {"key": "member-09"},
+    "189001109819": {"key": "member-10"},
+    "189001119800": {"key": "member-11"},
+    "189001129817": {"key": "register-01", "confirm": "not_member"},
+    "189001139808": {"key": "register-02", "confirm": "not_member"},
+    "189001149815": {"key": "register-03", "confirm": "not_member"},
+    "189001159806": {"key": "slow-confirm", "confirm": "slow(3500)"},
+    "189001169813": {"key": "slow-registration", "validate": {"delay_ms": 3000}, "submit": {"delay_ms": 4500}},
+    "189001179804": {"key": "confirm-timeout", "confirm": "timeout"},
+    "189001189811": {"key": "non-json-unavailable", "confirm": "non_json_503"},
+    "189001199802": {"key": "provider-error", "confirm": "error_500"},
+    "189001209818": {"key": "invalid-checksum"}
+  }
+}
