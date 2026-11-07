@@ -5890,7 +5890,8 @@ def register_callbacks(app):
         if not slug or settings.get("active_event_slug") != slug:
             return refuse(f"⚠️ {name}: the active event changed – nothing saved.")
         games = pending.get("games")
-        allowed = [g for g in (settings.get("default_game") or []) if isinstance(g, str)]
+        game_options, _game_help = _manual_game_choices(slug)
+        allowed = [option["value"] for option in game_options]
         if (
             not isinstance(games, list)
             or not games

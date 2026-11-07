@@ -122,6 +122,40 @@ def test_manual_submit_accepts_selected_event_raw_game_and_rejects_other_event(m
     dashboard.storage.begin_checkin.assert_not_called()
 
 
+@pytest.mark.parametrize("answer", ["yes", "no"])
+@pytest.mark.parametrize("source", ["saved", "provider", "recorded"])
+def test_payment_confirmation_accepts_selected_event_games_beyond_active_defaults(
+    dashboard, games, manual, answer, source
+):
+    selected_games = ["Street Fighter 6", RAW_GG]
+    settings = {
+        "active_event_slug": "fightbox-4",
+        "default_game": ["Street Fighter 6"],
+        "swish_expected_per_game": 25,
+        "require_payment": True,
+    }
+    dashboard.storage.get_active_settings.return_value = settings
+    dashboard.storage.get_recorded_event_games.return_value = []
+    if source == "saved":
+        settings["events_json"] = [{"name": name} for name in selected_games]
+    elif source == "provider":
+        manual[1].return_value = (selected_games, "")
+    else:
+        dashboard.storage.get_recorded_event_games.return_value = selected_games
+    pending = dashboard.callbacks["add_manual_checkin"](
+        1, "Player One", "p1", selected_games, "fightbox-4", {}
+    )[4]
+    assert pending["games"] == selected_games and pending["new_expected"] == 50
+    assert RAW_GG not in settings["default_game"]
+    dashboard.storage.update_checkin.assert_not_called()
+    feedback, cleared, style, _ = dashboard.callbacks[f"games_paid_difference_{answer}"](1, pending)
+    fields = {"tournament_games_registered": selected_games, "payment_expected": 50}
+    fields.update({"payment_amount": 50} if answer == "yes" else {"payment_valid": False})
+    dashboard.storage.update_checkin.assert_called_once_with("rec-1", fields)
+    assert cleared is None and style == {"display": "none"}
+    assert "nothing saved" not in feedback.children
+
+
 @pytest.mark.parametrize(
     "settings",
     [
