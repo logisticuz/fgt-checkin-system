@@ -283,6 +283,7 @@ def _manual_game_choices(selected_slug, *, include_variants=False):
             sources.append(f"from start.gg event {selected_slug}")
     try:
         counts_reader = getattr(storage_api, "get_recorded_event_game_counts", None)
+        reader = getattr(storage_api, "get_recorded_event_games", None)
         if callable(counts_reader):
             recorded_counts = counts_reader(selected_slug)
             if not isinstance(recorded_counts, dict):
@@ -292,15 +293,19 @@ def _manual_game_choices(selected_slug, *, include_variants=False):
                 for name, count in recorded_counts.items()
                 if isinstance(name, str) and name.strip() and type(count) is int and count > 0
             }
+            recorded = reader(selected_slug) if callable(reader) else list(recorded_counts)
+            if not isinstance(recorded, list):
+                raise RuntimeError("Recorded games unavailable")
+            recorded = [name for name in recorded if isinstance(name, str) and name.strip()]
+            recorded = list(set(recorded) | set(recorded_counts))
         else:
-            reader = getattr(storage_api, "get_recorded_event_games", None)
             recorded = reader(selected_slug) if callable(reader) else None
             if not isinstance(recorded, list):
                 raise RuntimeError("Recorded games unavailable")
             recorded_counts = {
                 name: 1 for name in recorded if isinstance(name, str) and name.strip()
             }
-        recorded = list(recorded_counts)
+            recorded = list(recorded_counts)
         if recorded:
             sources.append("from recorded check-ins")
     except Exception:
