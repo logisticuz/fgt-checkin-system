@@ -1,5 +1,6 @@
 """Repo-only workflow hygiene and reviewed T-016/T-028 semantic invariants."""
 
+import asyncio
 import hashlib
 import json
 import re
@@ -7,7 +8,9 @@ import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
+from uuid import UUID
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,14 +43,17 @@ BASE = {
             "API Call",
             "Call eBas confirm_membership",
             "IF Skip eBas",
+            "IF Verified Membership",
             "Normalize",
             "Normalize Personnummer",
             "Overview",
             "Parse Response",
+            "Respond Membership",
+            "Respond Unavailable",
             "Skip - Return Result",  # T-028: skipped/unavailable no longer means false.
             "Webhook - eBas Check",
         },
-        "invariant": "17a9a321edfc29be478fb07e440a03916f81267c8c3fd5d523d5ecb15fbdc59e",
+        "invariant": "22680732f524793dbd847a5bb8cf3c35c67c737955edfe68453671efe01ae173",
         "callbacks": 0,
     },
     "FGC THN - eBas Register v2 (PG).json": {
@@ -248,15 +254,15 @@ def node_named(version, name):
     return next(node for node in version["nodes"] if node["name"] == name)
 
 
-def run_node(version, name, current=None, named=None, env=None):
+def run_node(version, name, current=None, named=None, env=None, *, expression=None):
     """Execute the exported Code node or body expression against synthetic n8n inputs."""
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable; static and mirrored Python checks still run")
     parameters = node_named(version, name)["parameters"]
-    code = parameters.get("jsCode")
+    code = parameters.get("jsCode") if expression is None else None
     if code is None:
-        expression = parameters["jsonBody"]
+        expression = expression if expression is not None else parameters["jsonBody"]
         assert expression.startswith("={{") and expression.endswith("}}")
         code = "return (" + expression[3:-2].strip() + ");"
     program = r"""
@@ -280,7 +286,9 @@ process.stdout.write(JSON.stringify(result));
     )
     assert result.returncode == 0, result.stderr
     value = json.loads(result.stdout)
-    return json.loads(value) if isinstance(value, str) else value[0]["json"]
+    if isinstance(value, str):
+        return json.loads(value)
+    return value[0]["json"] if isinstance(value, list) else value
 
 
 @pytest.mark.parametrize("name", [STARTGG, EBAS, ORCHESTRATOR])
@@ -294,15 +302,20 @@ def test_exported_versions_have_identical_execution_graphs(name):
 @pytest.mark.parametrize("name", [STARTGG, EBAS, ORCHESTRATOR])
 @pytest.mark.parametrize("published", [False, True])
 def test_integration_http_requests_are_bounded_and_continue_after_errors(name, published):
-    requests = [
-        node
-        for node in flow_version(name, published)["nodes"]
-        if node["type"] == "n8n-nodes-base.httpRequest"
-    ]
+    version = flow_version(name, published)
+    requests = [node for node in version["nodes"] if node["type"] == "n8n-nodes-base.httpRequest"]
     assert len(requests) == (4 if name == ORCHESTRATOR else 1)
     for node in requests:
         assert 0 < node["parameters"]["options"]["timeout"] <= 10000
-        assert node.get("continueOnFail") is True or node.get("onError") == "continueRegularOutput"
+        if name == EBAS:
+            assert node["onError"] == "continueErrorOutput"
+            assert version["connections"][node["name"]]["main"][1] == [
+                {"node": "Respond Unavailable", "type": "main", "index": 0}
+            ]
+        else:
+            assert (
+                node.get("continueOnFail") is True or node.get("onError") == "continueRegularOutput"
+            )
 
 
 @pytest.mark.parametrize("published", [False, True])
@@ -428,6 +441,257 @@ def test_ebas_requires_explicit_api_boolean_and_marks_errors_unavailable(
         assert result["ok"] is True and result["isMember"] is expected
         assert result["state"] == ("verified_true" if expected else "verified_false")
     assert result["attempt_id"] == "synthetic-attempt"
+
+
+def ebas_webhook_response(version, provider_response, *, transport_error=False):
+    """Run exported parsing/routing expressions and render the configured response.
+
+    This is a repository contract harness, not an n8n runtime or provider call.
+    """
+
+    def target(name, output):
+        links = version["connections"][name]["main"][output]
+        assert len(links) == 1
+        assert links[0]["type"] == "main" and links[0]["index"] == 0
+        return links[0]["node"]
+
+    if transport_error:
+        responder = target("Call eBas confirm_membership", 1)
+        result = {}
+    else:
+        assert target("Call eBas confirm_membership", 0) == "Parse Response"
+        result = run_node(
+            version,
+            "Parse Response",
+            provider_response,
+            {"Normalize Personnummer": {"attempt_id": "synthetic-attempt"}},
+        )
+        gate = target("Parse Response", 0)
+        conditions = node_named(version, gate)["parameters"]["conditions"]
+        assert conditions["combinator"] == "and"
+        assert len(conditions["conditions"]) == 1
+        condition = conditions["conditions"][0]
+        assert condition["rightValue"] is True
+        assert condition["operator"] == {"type": "boolean", "operation": "equals"}
+        verified = run_node(version, gate, result, expression=condition["leftValue"])
+        assert isinstance(verified, bool)
+        responder = target(gate, 0 if verified else 1)
+
+    parameters = node_named(version, responder)["parameters"]
+    options = parameters["options"]
+    headers = {
+        entry["name"]: entry["value"]
+        for entry in options.get("responseHeaders", {}).get("entries", [])
+    }
+    if parameters["respondWith"] == "json":
+        body = run_node(version, responder, result, expression=parameters["responseBody"])
+        return httpx.Response(
+            options["responseCode"],
+            content=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(),
+            headers={"Content-Type": "application/json", **headers},
+        )
+    assert parameters["respondWith"] == "text"
+    return httpx.Response(
+        options["responseCode"], content=parameters["responseBody"].encode(), headers=headers
+    )
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_ebas_webhook_has_explicit_private_success_and_error_routes(published):
+    version = flow_version(EBAS, published)
+    webhook = node_named(version, "Webhook - eBas Check")
+    assert webhook["parameters"] == {
+        "httpMethod": "POST",
+        "path": "ebas/check",
+        "responseMode": "responseNode",
+        "options": {},
+    }
+    assert webhook["webhookId"] == "ebas-check"
+    request = node_named(version, "Call eBas confirm_membership")
+    assert request["parameters"]["options"]["timeout"] == 8000
+    assert request.get("retryOnFail", False) is False
+    assert request["parameters"]["options"]["redirect"] == {"redirect": {"followRedirects": False}}
+    assert request["parameters"]["options"]["response"] == {
+        "response": {"fullResponse": True, "neverError": False, "responseFormat": "json"}
+    }
+    # Every processing-node error goes to a fixed response, never provider data/PNR.
+    for node in version["nodes"]:
+        if node["type"] in {"n8n-nodes-base.stickyNote", "n8n-nodes-base.webhook"}:
+            continue
+        if node["name"] == "Respond Unavailable":
+            assert node["parameters"] == {
+                "respondWith": "text",
+                "responseBody": "ebas_unavailable",
+                "options": {
+                    "responseCode": 503,
+                    "responseHeaders": {
+                        "entries": [{"name": "Content-Type", "value": "text/plain"}]
+                    },
+                },
+            }
+            continue
+        assert node["onError"] == "continueErrorOutput"
+        output = 2 if node["type"] == "n8n-nodes-base.if" else 1
+        assert version["connections"][node["name"]]["main"][output] == [
+            {"node": "Respond Unavailable", "type": "main", "index": 0}
+        ]
+    assert version["connections"]["Skip - Return Result"]["main"][0][0]["node"] == (
+        "Respond Unavailable"
+    )
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("member", [True, False])
+@pytest.mark.parametrize("request_result", [None, "success"])
+def test_ebas_success_keeps_the_exact_legacy_json(published, member, request_result):
+    provider_response = {"response": {"member_found": member}}
+    if request_result is not None:
+        provider_response["response"]["request_result"] = request_result
+    response = ebas_webhook_response(
+        flow_version(EBAS, published),
+        {"statusCode": 200, "headers": {}, "body": provider_response},
+    )
+    expected = {
+        "ok": True,
+        "state": "verified_true" if member else "verified_false",
+        "isMember": member,
+        "attempt_id": "synthetic-attempt",
+        "message": "Medlem i Sverok" if member else "Ej medlem i Sverok",
+    }
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert response.json() == expected
+    assert (
+        response.content == json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize(
+    "provider_response",
+    [
+        {},
+        {"response": {"member_found": "false"}},
+        {"response": {"member_found": 0}},
+        {"response": {"member_found": None}},
+        {"response": {"member_found": False, "request_result": "fail"}},
+        {"response": {"member_found": True, "request_result": "fail"}},
+        {
+            "statusCode": 200,
+            "body": {"response": {"member_found": False, "request_result": "fail"}},
+        },
+        {"statusCode": 200, "body": {"response": {"member_found": False, "request_result": None}}},
+        {"statusCode": 200, "body": {"request_result": False, "response": {"member_found": True}}},
+        {"response": {"member_found": False}, "error": None},
+        {"response": {"member_found": True}, "errors": []},
+        {"response": {"member_found": False, "error": False}},
+        {"response": {"member_found": False, "details": [{"errors": "Synthetic failure"}]}},
+        {"statusCode": 200, "body": "Synthetic non-JSON body"},
+        {"statusCode": 200, "body": None},
+        {"statusCode": 200, "body": [{"response": {"member_found": False}}]},
+        {"statusCode": 200, "body": {"response": {"member_found": False}, "errors": {}}},
+        {"statusCode": 200, "body": {"response": {"member_found": True}}, "error": ""},
+        {"statusCode": 201, "body": {"response": {"member_found": False, "errors": None}}},
+        {"statusCode": 204, "body": {}},
+        {"statusCode": 302, "body": {"response": {"member_found": False}}},
+        {"statusCode": 401, "body": {"response": {"member_found": False}}},
+        {"statusCode": 429, "body": {"response": {"member_found": True}}},
+        {"statusCode": 500, "body": {"response": {"member_found": False}}},
+        {"statusCode": "200", "body": {"response": {"member_found": False}}},
+        {"body": {"response": {"member_found": False}}},
+    ],
+)
+def test_ebas_ambiguous_and_failed_replies_are_non_json_503(published, provider_response):
+    response = ebas_webhook_response(flow_version(EBAS, published), provider_response)
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "text/plain"
+    assert response.content == b"ebas_unavailable"
+    with pytest.raises(ValueError):
+        response.json()
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("outcome", ["member", "not_member", "timeout", "provider_error"])
+def test_member_card_existing_json_decode_pattern_preserves_all_three_outcomes(published, outcome):
+    version = flow_version(EBAS, published)
+    provider_response = {"response": {"member_found": outcome == "member"}}
+    if outcome == "provider_error":
+        provider_response["response"]["request_result"] = "fail"
+    response = ebas_webhook_response(
+        version,
+        {"statusCode": 200, "body": provider_response},
+        transport_error=outcome == "timeout",
+    )
+
+    def handle(request):
+        assert request.method == "POST" and request.url.path == "/webhook/ebas/check"
+        assert json.loads(request.content) == {"personnummer": "0" * 12}
+        return response
+
+    async def caller():
+        # Read-only sibling backend/main.py:78-97. Deliberately no raise_for_status().
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, transport=httpx.MockTransport(handle)
+            ) as client:
+                resp = await client.post(
+                    "http://synthetic-n8n.invalid/webhook/ebas/check",
+                    json={"personnummer": "0" * 12},
+                )
+                result = resp.json()
+        except Exception:
+            return 502, {
+                "ok": False,
+                "error": "Kunde inte verifiera medlemskap just nu. Försök igen.",
+            }
+        is_member = result.get("isMember", False)
+        if not is_member:
+            return 404, {
+                "ok": False,
+                "error": "Inget aktivt medlemskap hittades. Kontakta styrelsen.",
+            }
+        # The unchanged sibling continues with player/card processing here.
+        return 200, {"ok": True}
+
+    status, body = asyncio.run(caller())
+    if outcome in {"timeout", "provider_error"}:
+        assert status == 502
+        assert body == {
+            "ok": False,
+            "error": "Kunde inte verifiera medlemskap just nu. Försök igen.",
+        }
+    elif outcome == "not_member":
+        assert status == 404
+        assert body == {
+            "ok": False,
+            "error": "Inget aktivt medlemskap hittades. Kontakta styrelsen.",
+        }
+    else:
+        assert status == 200 and body == {"ok": True}
+
+
+def test_ebas_export_has_a_fresh_consistent_published_version():
+    flow = flow_version(EBAS)
+    version_id = flow["versionId"]
+    assert UUID(version_id).version == 4
+    assert version_id != "259229f0-7ee2-4be3-8fa0-47a515ae138a"
+    assert flow["activeVersionId"] == flow["activeVersion"]["versionId"] == version_id
+    assert all(
+        history["versionId"] == version_id
+        for history in flow["activeVersion"].get("workflowPublishHistory", [])
+    )
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("prefix, century", [("25", "20"), ("30", "20"), ("31", "19")])
+def test_ebas_ten_and_twelve_digit_normalization_is_unchanged(published, prefix, century):
+    version = flow_version(EBAS, published)
+    short = prefix + "0" * 8
+    long = century + short
+    for raw in [short, short[:6] + "-" + short[6:], long]:
+        result = run_node(version, "Normalize Personnummer", {"body": {"personnummer": raw}})
+        assert result["skipEbas"] is False
+        assert result["_pnr_normalized"] == long
 
 
 @pytest.mark.parametrize("published", [False, True])
