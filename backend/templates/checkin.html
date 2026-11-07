@@ -732,13 +732,23 @@
         return true;
       });
 
+      // T-034 (contract "Orchestrate response: integrations/degraded"): when eBas could not
+      // be checked, member is null and "Membership" is left out of `missing`. That means
+      // UNKNOWN, not done: tell register so it shows the TO message instead of either
+      // marking membership done or offering "become a member".
+      const ebasState = data.integrations && data.integrations.ebas;
+      const membershipUnknown = REQUIRE_MEMBERSHIP && data.member !== true && (
+        ebasState === "unavailable" || ebasState === "skipped" ||
+        (data.member === null && data.degraded === true)
+      );
+
       const flags = missing.map(s => {
         const t = String(s).toLowerCase();
         if (t.includes("payment")) return "payment=true";
-        if (t.includes("membership")) return "ebas=true";
+        if (t.includes("membership")) return membershipUnknown ? "" : "ebas=true";
         if (t.includes("start")) return "startgg=false";
         return "";
-      }).filter(Boolean).join("&");
+      }).concat(membershipUnknown ? ["membership=unknown"] : []).filter(Boolean).join("&");
 
       // Event slug and tag go in the URL (register.html reads them from there first); they
       // used to be kept in localStorage, where the next kiosk user could inherit them.
