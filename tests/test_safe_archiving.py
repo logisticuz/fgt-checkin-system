@@ -3,7 +3,8 @@
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event
+from contextlib import contextmanager
+from threading import Barrier, Event, local
 
 import pytest
 from psycopg import sql
@@ -252,6 +253,57 @@ def seed_player(database, tag, **overrides):
                 list(values.values()),
             )
             return cursor.fetchone()
+
+
+def test_standalone_player_lookup_keeps_tag_priority_and_email_fallback(archive_db):
+    tagged = seed_player(archive_db, "test-tag-priority")
+    emailed = seed_player(archive_db, "test-email-fallback")
+    assert postgres._find_player_uuid(tagged["tag"].upper(), emailed["email"]) == tagged["uuid"]
+    assert postgres._find_player_uuid("test-unmatched", emailed["email"].upper()) == emailed["uuid"]
+    assert postgres._find_player_uuid(None, "test-missing@example.invalid") is None
+    assert postgres._find_player_uuid(None, None) is None
+
+
+@pytest.mark.parametrize("match_by", ["tag", "email"])
+def test_saturated_checkins_keep_player_links_without_nested_pool_checkouts(
+    archive_db, event, monkeypatch, match_by
+):
+    size = archive_db.pool.max_size
+    players = [seed_player(archive_db, f"test-pool-player-{index}") for index in range(size)]
+    barrier, state, checkouts = Barrier(size), local(), []
+    original_lookup = postgres._find_player_uuid
+
+    class CountingPool:
+        @contextmanager
+        def connection(self):
+            checkouts.append(1)
+            depth = getattr(state, "depth", 0)
+            with archive_db.pool.connection(timeout=0.25 if depth else 5) as connection:
+                state.depth = depth + 1
+                try:
+                    yield connection
+                finally:
+                    state.depth = depth
+
+    def synchronized_lookup(*args, **kwargs):
+        # Every outer check-in owns a connection before any player lookup starts.
+        barrier.wait(timeout=5)
+        return original_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(postgres, "_get_pool", lambda: CountingPool())
+    monkeypatch.setattr(postgres, "_find_player_uuid", synchronized_lookup)
+    monkeypatch.setattr(postgres, "CANONICAL_PLAYER_ID_ENABLED", True)
+
+    def checkin(player):
+        payload = {"name": player["name"], match_by: player[match_by].upper()}
+        return postgres.begin_checkin(event, payload)
+
+    with ThreadPoolExecutor(max_workers=size) as executor:
+        results = list(executor.map(checkin, players))
+    assert [result["player_uuid"] for result in results] == [player["uuid"] for player in players]
+    assert len(checkouts) == size
+    stored = {row["record_id"]: row["player_uuid"] for row in archive_db.checkins()}
+    assert stored == {result["checkin_id"]: result["player_uuid"] for result in results}
 
 
 @pytest.fixture

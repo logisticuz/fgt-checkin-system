@@ -767,7 +767,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             matched_player_uuid = None
             if CANONICAL_PLAYER_ID_ENABLED:
                 try:
-                    matched_player_uuid = _find_player_uuid(tag, payload.get("email"))
+                    matched_player_uuid = _find_player_uuid(tag, payload.get("email"), cur=cur)
                 except Exception as exc:
                     logger.warning(f"⚠️ Player UUID lookup failed (non-blocking): {exc}")
 
@@ -2179,7 +2179,7 @@ def scan_event_stats_integrity(
     return warnings_rows
 
 
-def _find_player_uuid(tag: Optional[str], email: Optional[str]) -> Optional[str]:
+def _find_player_uuid(tag: Optional[str], email: Optional[str], cur=None) -> Optional[str]:
     """
     Lightweight player lookup — match only, no creation or stat updates.
 
@@ -2187,29 +2187,32 @@ def _find_player_uuid(tag: Optional[str], email: Optional[str]) -> Optional[str]
     existing player profile.  Returns the player UUID if found, else None.
 
     Match priority: tag (case-insensitive) > email (case-insensitive).
+    Reuse a supplied cursor when the caller already owns a pool connection.
     """
     if not tag and not email:
         return None
 
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            if tag:
-                cur.execute(
-                    "SELECT uuid FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
-                    (tag,),
-                )
-                row = cur.fetchone()
-                if row:
-                    return row[0]
+    if cur is None:
+        with _get_pool().connection() as conn, conn.cursor() as lookup_cursor:
+            return _find_player_uuid(tag, email, cur=lookup_cursor)
 
-            if email:
-                cur.execute(
-                    "SELECT uuid FROM players WHERE LOWER(email) = LOWER(%s) LIMIT 1",
-                    (email,),
-                )
-                row = cur.fetchone()
-                if row:
-                    return row[0]
+    if tag:
+        cur.execute(
+            "SELECT uuid FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
+            (tag,),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    if email:
+        cur.execute(
+            "SELECT uuid FROM players WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+            (email,),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
 
     return None
 
