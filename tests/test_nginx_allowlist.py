@@ -1,6 +1,10 @@
 """Public routing contracts, independent of Docker and provider credentials."""
 
+import os
 import re
+import shutil
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -500,3 +504,248 @@ def test_dev_dash_requests_have_independent_generous_capacity():
         assert directives(location(block, path), "limit_req") == [
             ["zone=dev_admin", "burst=300", "nodelay"]
         ]
+
+
+def log_map(config, source, destination, value):
+    block = next(children for words, children in config if words == ["map", source, destination])
+    fallback = ""
+    for words, _ in block:
+        if words[0] == "default":
+            fallback = words[1]
+        elif words[0].startswith("~"):
+            match = re.search(words[0][1:], value)
+            if match:
+                return re.sub(r"\$(\w+)", lambda item: match.groupdict()[item[1]], words[1])
+        elif words[0] == value:
+            return words[1]
+    return fallback
+
+
+def test_persistent_logging_uses_only_safe_fields_and_separate_native_stderr(public):
+    _, config, _ = public
+    args = directives(config, "log_format")[0]
+    assert args[:2] == ["fgt_privacy", "escape=json"]
+    template = "".join(args[2:])
+    assert set(re.findall(r"\$\w+", template)) == {
+        "$time_iso8601",
+        "$fgt_log_ip",
+        "$host",
+        "$request_method",
+        "$fgt_log_uri",
+        "$fgt_log_route_group",
+        "$status",
+        "$body_bytes_sent",
+        "$request_time",
+        "$upstream_status",
+        "$upstream_response_time",
+        "$limit_req_status",
+    }
+    for forbidden in (
+        "$request_uri",
+        "$args",
+        "$http_cookie",
+        "$http_authorization",
+        "$remote_addr",
+        "$remote_user",
+        "$request\"",
+    ):
+        assert forbidden not in template
+    assert directives(config, "access_log") == [
+        ["/var/log/nginx/fgt/access.log", "fgt_privacy"],
+        ["/var/log/nginx/fgt/error.log", "fgt_privacy", "if=$fgt_log_5xx"],
+        ["/dev/stdout", "fgt_privacy"],
+    ]
+    assert directives(config, "error_log") == [
+        ["/var/log/nginx/fgt/error.log", "emerg"],
+        ["stderr", "warn"],
+    ]
+    for words, children in config:
+        if words == ["server"]:
+            assert not directives(children, "access_log")
+            assert not directives(children, "error_log")
+    for status, expected in (("200", "0"), ("429", "0"), ("502", "1"), ("504", "1")):
+        assert log_map(config, "$status", "$fgt_log_5xx", status) == expected
+
+
+@pytest.mark.parametrize(
+    "address,expected",
+    [
+        ("192.0.2.123", "192.0.2.0/24"),
+        ("127.0.0.1", "127.0.0.0/24"),
+        ("::ffff:192.0.2.123", "192.0.2.0/24"),
+        ("2001:db8::1234", "redacted"),
+    ],
+)
+def test_logging_never_keeps_the_full_client_ip(public, address, expected):
+    assert log_map(public[1], "$remote_addr", "$fgt_log_ip", address) == expected
+
+
+@pytest.mark.parametrize(
+    "path,expected,group",
+    [
+        ("/api/participant/Synthetic%20Private/status", "/api/participant/*/status", "polling"),
+        ("/status/SyntheticPrivate", "/status/*", "pages"),
+        ("/api/checkin/synthetic-checkin/status", "/api/checkin/*/status", "polling"),
+        ("/api/membership/synthetic-attempt/status", "/api/membership/*/status", "polling"),
+        ("/member/confirm/synthetic-capability", "/member/confirm/*", "membership_confirm"),
+        ("/arbitrary/synthetic-capability", "/[other]", "other"),
+        ("/api/ebas/register", "/api/ebas/register", "legacy_ebas"),
+        ("/api/player/games", "/api/player/games", "games"),
+        ("/api/checkin/orchestrate", "/api/checkin/orchestrate", "checkin"),
+        ("/api/membership/start", "/api/membership/start", "membership_start"),
+        ("/api/membership/verify", "/api/membership/verify", "membership_verify"),
+        ("/api/membership/resend", "/api/membership/resend", "membership_resend"),
+    ],
+)
+def test_sensitive_paths_are_canonicalized_with_a_rate_group(public, path, expected, group):
+    config = public[1]
+    canonical = log_map(config, "$uri", "$fgt_log_uri", path)
+    assert canonical == expected
+    assert log_map(config, "$fgt_log_uri", "$fgt_log_route_group", canonical) == group
+
+
+def test_compose_mounts_only_the_nginx_log_directory_and_git_ignores_it():
+    for filename in ("docker-compose.prod.yml", "docker-compose.dev.yml"):
+        text = (ROOT / filename).read_text(encoding="utf-8")
+        block = re.search(r"(?ms)^  nginx:\n.*?(?=^  [a-z_]+:|^volumes:)", text)[0]
+        assert block.count("      - ./logs/nginx:/var/log/nginx/fgt") == 1
+        assert text.count("./logs/nginx:") == 1
+    assert "logs/" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+@pytest.fixture
+def rotation_runner(tmp_path):
+    bash = Path("C:/Program Files/Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+    if not bash or not Path(bash).is_file():
+        pytest.skip("Bash unavailable for host rotation checks")
+    log_dir = tmp_path / "private logs"
+    log_dir.mkdir()
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    docker = binary_dir / "docker"
+    docker.write_text(
+        '''#!/usr/bin/env bash
+set -eu
+dir=$ROTATE_TEST_DIR
+if command -v cygpath >/dev/null; then dir=$(cygpath -u "$dir"); fi
+printf '%s\\n' "$*" >> "$dir/docker-calls"
+if [[ "$1" == inspect ]]; then printf 'true\\n'; exit 0; fi
+[[ "$1" == exec && "$3 $4 $5" == 'nginx -s reopen' ]]
+[[ "${ROTATE_FAIL_REOPEN:-0}" != 1 ]] || exit 1
+: > "$dir/access.log"
+: > "$dir/error.log"
+''',
+        encoding="utf-8",
+        newline="\n",
+    )
+    docker.chmod(0o700)
+
+    def run(*args, fail=False):
+        environment = os.environ.copy()
+        environment.update(ROTATE_TEST_DIR=str(log_dir), ROTATE_FAIL_REOPEN=str(int(fail)))
+        return subprocess.run(
+            [
+                str(bash),
+                "-c",
+                'bin=$1; shift; if command -v cygpath >/dev/null; then bin=$(cygpath -u "$bin"); fi; PATH="$bin:$PATH" exec bash "$@"',
+                "rotation-test",
+                str(binary_dir),
+                str(ROOT / "scripts/rotate_nginx_logs.sh"),
+                "--container",
+                "synthetic-nginx",
+                "--log-dir",
+                str(log_dir),
+                *args,
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    return log_dir, run
+
+
+def test_rotation_renames_then_reopens_without_restart(rotation_runner):
+    directory, run = rotation_runner
+    for name in ("access", "error"):
+        (directory / f"{name}.log").write_text(f"synthetic {name}", encoding="utf-8")
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("access", "error"):
+        archives = list(directory.glob(f"{name}.log.*"))
+        assert len(archives) == 1
+        assert archives[0].read_text(encoding="utf-8") == f"synthetic {name}"
+        assert (directory / f"{name}.log").read_text(encoding="utf-8") == ""
+    assert "exec synthetic-nginx nginx -s reopen" in (directory / "docker-calls").read_text()
+    assert not (directory / ".rotate.lock").exists()
+
+
+def test_failed_reopen_retains_archive_without_overwriting_a_new_active_file(rotation_runner):
+    directory, run = rotation_runner
+    (directory / "access.log").write_text("synthetic retained data", encoding="utf-8")
+    result = run(fail=True)
+    assert result.returncode != 0
+    assert (directory / "access.log").exists()
+    archives = list(directory.glob("access.log.*"))
+    assert len(archives) == 1
+    assert archives[0].read_text(encoding="utf-8") == "synthetic retained data"
+    assert (directory / ".reopen.pending").exists()
+    assert not (directory / ".rotate.lock").exists()
+
+
+@pytest.mark.parametrize("recovery_succeeds", [False, True])
+def test_next_size_check_recovers_failed_reopen_before_any_pruning(
+    rotation_runner, recovery_succeeds
+):
+    directory, run = rotation_runner
+    original = "synthetic data larger than the archive cap"
+    (directory / "access.log").write_text(original, encoding="utf-8")
+    first = run("--max-archive-bytes", "10", fail=True)
+    assert first.returncode != 0
+    archive = next(directory.glob("access.log.*"))
+    assert archive.read_text(encoding="utf-8") == original
+    assert (directory / "access.log").stat().st_size == 0
+    second = run(
+        "--if-large", "--max-bytes", "100", "--max-archive-bytes", "10", fail=not recovery_succeeds
+    )
+    calls = (directory / "docker-calls").read_text()
+    assert calls.count("exec synthetic-nginx nginx -s reopen") == 2
+    if recovery_succeeds:
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert not (directory / ".reopen.pending").exists()
+        assert not archive.exists()  # Pruning is safe only after the second signal succeeded.
+    else:
+        assert second.returncode != 0
+        assert (directory / ".reopen.pending").exists()
+        assert archive.read_text(encoding="utf-8") == original
+
+
+def test_rotation_prunes_expired_then_oldest_archives_under_size_cap(rotation_runner):
+    directory, run = rotation_runner
+    (directory / "access.log").write_text("live", encoding="utf-8")
+    for name, age in (
+        ("access.log.20000101", 15 * 86400),
+        ("error.log.20200101", 3600),
+        ("access.log.20200102", 1800),
+    ):
+        file = directory / name
+        file.write_bytes(b"123456")
+        os.utime(file, (time.time() - age, time.time() - age))
+    result = run("--if-large", "--max-bytes", "100", "--max-archive-bytes", "10")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (directory / "access.log.20000101").exists()
+    assert not (directory / "error.log.20200101").exists()
+    assert (directory / "access.log.20200102").exists()
+    assert (directory / "access.log").read_text(encoding="utf-8") == "live"
+
+
+def test_archive_age_starts_at_first_request_not_rotation_time(rotation_runner):
+    directory, run = rotation_runner
+    (directory / "access.log").write_text(
+        '{"time":"2000-01-01T00:00:00+00:00","status":200}\n', encoding="utf-8"
+    )
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not list(directory.glob("access.log.*"))
+    assert (directory / "access.log").exists()

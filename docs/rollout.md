@@ -191,3 +191,69 @@ Bypass-cookie issuance requires a successful 2xx/3xx response on a Basic-gated
 route. A failed password, an open OAuth endpoint or SSE must never issue that cookie,
 even when an Authorization header supplied a username. Include these negative checks
 when reviewing future changes to the authentication maps.
+
+## Persistent nginx logs and rotation
+
+The nginx service in both Compose files binds `./logs/nginx` to
+`/var/log/nginx/fgt`. Provision that private directory before the separately authorized
+container replacement that adds the mount. Give nginx's worker traversal rights:
+the pinned image uses uid/gid 101, so provision with
+`install -d -m 0750 -o 101 -g 101 logs/nginx` as root (verify `id nginx` if the image
+changes). A root-owned 0750 directory would prevent worker reopening. A reload
+cannot add a bind mount. The files remain on the host when the container is replaced;
+they are ignored by git. Keep the existing pre-recreate backup gate during migration.
+
+`access.log` is JSON with time, an IPv4 /24 prefix, host, method, canonical URI, route
+group, status, body bytes, request time, upstream status/time and nginx limit status.
+IPv6 is fully redacted. Query strings, cookies, credentials, names, attempt IDs and
+confirmation capabilities are absent. Sensitive path segments become `*`; unknown
+paths become `/[other]`. `error.log` receives the same sanitized JSON for 5xx responses,
+plus native emergency diagnostics only. Native warnings/errors stay on stderr for
+live debugging; those ephemeral Docker diagnostics can contain full IPs and URLs.
+Never copy them into the persistent JSON files. `REJECTED` identifies nginx throttling;
+an upstream 429 with a different limit status is an application response.
+
+For nginx after this change, refine the earlier raw Docker-export example to retain
+only sanitized stdout records (replace the container/date placeholders):
+
+```sh
+docker logs <nginx-container> 2>/dev/null | awk '/^\{"time":/' > ~/logs/nginx-<date>.log
+```
+
+Use `sudo bash scripts/rotate_nginx_logs.sh --container <nginx-container>` on the host.
+It renames the active files, pre-creates replacements without truncation, and sends
+`nginx -s reopen`; it does not restart workers. Pre-creation also handles Docker
+Desktop's host-bind rename behavior. A failed signal retains the archives and active
+files and a durable `.reopen.pending` marker. Every later run retries that signal
+before retention or size pruning, even when replacement files are empty. A failed
+retry keeps the marker and skips all archive deletion; resolve the reported failure.
+The script needs Bash and the host's GNU core utilities, not logrotate in the image.
+The log directory must be the same bind source used by the chosen container; pass
+`--log-dir` when it differs from this checkout's `logs/nginx`.
+
+Install both entries in the Pi's root crontab, replacing `/path/to/repo` and including
+the deployment's Compose project selection if needed:
+
+```cron
+0 3 * * 0 cd /path/to/repo && bash scripts/rotate_nginx_logs.sh --container "$(docker compose -f docker-compose.prod.yml ps -q nginx)"
+*/15 * * * * cd /path/to/repo && bash scripts/rotate_nginx_logs.sh --container "$(docker compose -f docker-compose.prod.yml ps -q nginx)" --if-large
+```
+
+The weekly job forces rotation; the 15-minute job rotates files at 10 MiB and performs
+retention/size pruning even when no rotation is needed. Archives expire after 14 days,
+dated from their first JSON request rather than the rename date. Combined archives
+are capped at 50 MiB, deleting oldest first; the size cap can shorten retention.
+Each active file can grow between checks, so this is a scheduled threshold rather
+than a hard filesystem quota. Tune `--max-bytes` and `--max-archive-bytes` deliberately
+for the Pi's SD-card budget. An interrupted job normally releases `.rotate.lock`;
+after a forced kill, verify no rotation is running before removing a stale lock.
+
+Count 429/5xx by canonical path for an event date (adjust `day`):
+
+```sh
+awk -v day=2026-11-14 'index($0,"\"time\":\""day) && match($0,/"status":[0-9]+/) {s=substr($0,RSTART+9,RLENGTH-9); if(s==429 || s~/^5/) {match($0,/"uri":"[^"]*"/); p=substr($0,RSTART+7,RLENGTH-8); n[s" "p]++}} END {for(k in n) print n[k],k}' logs/nginx/access.log* | sort -nr
+```
+
+The masked URI/route group and `limit_req_status` retain venue-rate evidence across
+recreation. The access log is authoritative for counts; do not add the duplicated
+5xx entries in `error.log` to the totals.

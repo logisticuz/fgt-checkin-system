@@ -88,3 +88,6 @@ GEMINI.md
 docs/roadmap.md
 docs/PROJECT_STATUS.md
 docs/ANALYS_KODBAS.md
+
+# Persistent local nginx logs (contain operational metadata)
+logs/
