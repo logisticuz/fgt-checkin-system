@@ -200,12 +200,51 @@ def _reopen_confirmation_text(target_slug, restore_active, settings, reopen_opti
     return "\n".join(lines)
 
 
-def _fetch_confirmation_text(target_slug, settings):
+def _active_slug_now():
+    return (get_active_settings() or {}).get("active_event_slug") or ""
+
+
+def _active_changed_feedback(target):
+    """None if the active event is still the one the dialog showed, else an abort message.
+
+    A confirmation is only valid for the context it displayed: if the active event changed
+    meanwhile, nothing happens and the admin has to confirm again (T-029 review).
+    """
+    now = _active_slug_now()
+    if now == ((target or {}).get("active_slug") or ""):
+        return None
+    return html.Span(
+        f"⚠️ The active event changed to '{now or 'none'}' since the dialog opened – nothing "
+        "was changed. Click the button again to confirm with the current event.",
+        style={"color": "#f59e0b"},
+    )
+
+
+def _row_fingerprint(fields):
+    """Stable digest of the fields a games/payment decision depends on."""
+    import hashlib
+
+    relevant = {
+        key: fields.get(key)
+        for key in (
+            "event_slug",
+            "tournament_games_registered",
+            "payment_valid",
+            "payment_amount",
+            "payment_expected",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(relevant, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _fetch_confirmation_text(target_slug, target_name, settings):
     active = settings.get("active_event_slug") or ""
     lines = [
         "Fetch event data from Start.gg?",
         "",
-        f"New event: {target_slug} (the name is read from Start.gg)",
+        f"New event: {target_name} ({target_slug})",
         f"Current active event: {_event_label(active, settings)}",
     ]
     if active and target_slug != active:
@@ -952,9 +991,39 @@ def register_callbacks(app):
         slug = _startgg_slug_from_link(link)
         if not slug:
             return False, no_update, None, "❌ Invalid Start.gg tournament link."
+        if not STARTGG_API_KEY:
+            return False, no_update, None, "❌ Missing STARTGG_API_KEY."
+        # Read-only lookup so the dialog can name the target event; nothing is written here.
+        try:
+            resp = requests.post(
+                "https://api.start.gg/gql/alpha",
+                json={
+                    "query": "query T($slug: String!) { tournament(slug: $slug) { name } }",
+                    "variables": {"slug": slug},
+                },
+                headers={
+                    "Authorization": f"Bearer {STARTGG_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            tournament = ((resp.json() or {}).get("data") or {}).get("tournament") or {}
+        except Exception as e:
+            logger.warning(f"Start.gg name lookup failed for {slug}: {e}")
+            return False, no_update, None, f"❌ Could not read the event from Start.gg: {e}"
+        name = (tournament.get("name") or "").strip()
+        if not name:
+            return False, no_update, None, "❌ Tournament not found on Start.gg."
         settings = get_active_settings() or {}
-        message = _fetch_confirmation_text(slug, settings)
-        return True, message, {"link": link.strip(), "slug": slug}, no_update
+        message = _fetch_confirmation_text(slug, name, settings)
+        target = {
+            "link": link.strip(),
+            "slug": slug,
+            "name": name,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
 
     @app.callback(
         Output("settings-output", "children"),
@@ -1084,6 +1153,9 @@ def register_callbacks(app):
 
         if not link:
             return "❌ Enter a Start.gg link first.", no_update, no_update
+        changed = _active_changed_feedback(fetch_target)
+        if changed is not None:
+            return changed, no_update, no_update
 
         def _fetch_event_games_summary(event_id: Any, headers: Dict[str, str]) -> Dict[str, int]:
             """Fetch set scores for one event and aggregate game counts."""
@@ -1191,6 +1263,9 @@ def register_callbacks(app):
             logger.info(f"Extracted slug: {slug}")
         except Exception:
             return "❌ Invalid URL format.", no_update, no_update
+        # Only the confirmed target may be committed.
+        if slug != (fetch_target or {}).get("slug"):
+            return "❌ The link no longer matches the confirmed event.", no_update, no_update
 
         # 2) Query Start.gg (GraphQL)
         gql = {
@@ -1322,6 +1397,12 @@ def register_callbacks(app):
             f"{' [partial data]' if partial_participant_data else ''}"
         )
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
+
+        # The Start.gg read can take a while: re-check that the active event is still the one
+        # the admin confirmed against before anything is written.
+        changed = _active_changed_feedback(fetch_target)
+        if changed is not None:
+            return changed, no_update, no_update
 
         # 3) Find active settings row using storage backend
         settings_data = get_active_settings_with_id()
@@ -5192,11 +5273,7 @@ def register_callbacks(app):
                     return warn(f"⚠️ {name}: {change['error']}")
                 if change.get("needs_prompt"):
                     pending = {**change["pending"], "name": name, "slug": selected_slug}
-                    question = (
-                        f"{name}: spel {', '.join(change['old_games']) or '–'} → "
-                        f"{', '.join(selected_games)}. Nytt förväntat belopp "
-                        f"{change['new_expected']} kr, betalat {change['old_amount']} kr."
-                    )
+                    question = _games_question(name, change)
                     return (
                         html.Span(
                             f"⏳ {name} is already paid and the expected amount went up – "
@@ -5297,12 +5374,23 @@ def register_callbacks(app):
                     "old_games": old_games,
                     "new_expected": new_expected,
                     "old_amount": old_amount,
+                    # Lets the confirmation detect that the row changed after the question.
+                    "fingerprint": _row_fingerprint(fields),
+                    "event_slug": fields.get("event_slug"),
                 },
             }
         return {
             **base,
             "fields": {"tournament_games_registered": list(games), "payment_expected": new_expected},
         }
+
+    def _games_question(name, change):
+        pending = change.get("pending") or change
+        return (
+            f"{name}: spel {', '.join(change['old_games']) or '–'} → "
+            f"{', '.join(pending['games'])}. Nytt förväntat belopp "
+            f"{change['new_expected']} kr, betalat {change['old_amount']} kr."
+        )
 
     def _log_games_change(auth_state, slug, record_id, name, change, decision):
         try:
@@ -5333,24 +5421,76 @@ def register_callbacks(app):
             logger.warning(f"Failed to write audit log for games update: {e}")
 
     def _resolve_games_payment(choice, pending):
-        """Apply the admin's answer to "Har hen betalat mellanskillnaden?"."""
+        """Apply the admin's answer to "Har hen betalat mellanskillnaden?".
+
+        The pending data comes from a browser store, so nothing in it is trusted: the row and
+        settings are read again, the games re-checked against the event whitelist, the amount
+        recomputed from the current price, and a row that changed since the question gets the
+        question again instead of being overwritten (T-029 review).
+        """
         hidden = {"display": "none"}
+        shown = {"display": "block", "marginTop": "0.75rem"}
         if not pending or not pending.get("record_id"):
-            return no_update, None, hidden
+            return no_update, None, hidden, no_update
         name = pending.get("name") or "player"
         if choice == "cancel":
             return (
                 html.Span(f"↩️ {name}: games unchanged.", style={"color": "#9ca3af"}),
                 None,
                 hidden,
+                no_update,
             )
-        fields = {
-            "tournament_games_registered": pending["games"],
-            "payment_expected": pending["new_expected"],
-        }
+
+        def refuse(message):
+            return html.Span(message, style={"color": "#f59e0b"}), None, hidden, no_update
+
+        settings = get_active_settings() or {}
+        slug = pending.get("slug")
+        if not slug or settings.get("active_event_slug") != slug:
+            return refuse(f"⚠️ {name}: the active event changed – nothing saved.")
+        games = pending.get("games")
+        allowed = [g for g in (settings.get("default_game") or []) if isinstance(g, str)]
+        if (
+            not isinstance(games, list)
+            or not games
+            or not all(isinstance(g, str) and g in allowed for g in games)
+        ):
+            return refuse(f"⚠️ {name}: those games aren't valid for this event – nothing saved.")
+        games = list(dict.fromkeys(games))
+
+        fresh = _plan_games_change(pending["record_id"], games, settings)
+        if fresh.get("error"):
+            return refuse(f"⚠️ {name}: {fresh['error']}")
+        current = fresh.get("pending") or {}
+        unchanged = (
+            fresh.get("needs_prompt")
+            and current.get("fingerprint") == pending.get("fingerprint")
+            and current.get("event_slug") == slug
+            # A price change means a different amount than the admin saw: ask again.
+            and current.get("new_expected") == pending.get("new_expected")
+        )
+        if not unchanged:
+            if fresh.get("needs_prompt") and current.get("event_slug") == slug:
+                # Ask again with the row's current numbers.
+                return (
+                    html.Span(
+                        f"⚠️ {name} changed since the question – please answer again.",
+                        style={"color": "#f59e0b"},
+                    ),
+                    {**current, "name": name, "slug": slug},
+                    shown,
+                    _games_question(name, fresh),
+                )
+            return refuse(
+                f"⚠️ {name} changed since the question – nothing saved. Run the manual check-in "
+                "again."
+            )
+
+        new_expected = current["new_expected"]  # recomputed from the current price
+        fields = {"tournament_games_registered": games, "payment_expected": new_expected}
         if choice == "yes":
-            fields["payment_amount"] = pending["new_expected"]  # stays paid
-            done = f"✅ {name}: games updated, paid amount set to {pending['new_expected']} kr."
+            fields["payment_amount"] = new_expected  # stays paid
+            done = f"✅ {name}: games updated, paid amount set to {new_expected} kr."
         else:
             fields["payment_valid"] = False
             done = f"✅ {name}: games updated and marked as unpaid."
@@ -5358,55 +5498,59 @@ def register_callbacks(app):
             return (
                 html.Span(f"❌ Could not update {name}.", style={"color": "#ef4444"}),
                 pending,
-                {"display": "block", "marginTop": "0.75rem"},
+                shown,
+                no_update,
             )
         _log_games_change(
             current_user() or {},
-            pending.get("slug"),
+            slug,
             pending["record_id"],
             name,
-            pending,
+            {**current, "games": games},
             "paid_difference" if choice == "yes" else "marked_unpaid",
         )
-        return html.Span(done, style={"color": "#10b981"}), None, hidden
+        return html.Span(done, style={"color": "#10b981"}), None, hidden, no_update
 
     @app.callback(
         Output("manual-checkin-feedback", "children", allow_duplicate=True),
         Output("pending-games-payment", "data", allow_duplicate=True),
         Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
         Input("btn-games-paid-yes", "n_clicks"),
         State("pending-games-payment", "data"),
         prevent_initial_call=True,
     )
     def games_paid_difference_yes(n_clicks, pending):
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         return _resolve_games_payment("yes", pending)
 
     @app.callback(
         Output("manual-checkin-feedback", "children", allow_duplicate=True),
         Output("pending-games-payment", "data", allow_duplicate=True),
         Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
         Input("btn-games-paid-no", "n_clicks"),
         State("pending-games-payment", "data"),
         prevent_initial_call=True,
     )
     def games_paid_difference_no(n_clicks, pending):
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         return _resolve_games_payment("no", pending)
 
     @app.callback(
         Output("manual-checkin-feedback", "children", allow_duplicate=True),
         Output("pending-games-payment", "data", allow_duplicate=True),
         Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
         Input("btn-games-paid-cancel", "n_clicks"),
         State("pending-games-payment", "data"),
         prevent_initial_call=True,
     )
     def games_paid_difference_cancel(n_clicks, pending):
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         return _resolve_games_payment("cancel", pending)
 
     # -------------------------------------------------------------------------
@@ -6637,7 +6781,12 @@ def register_callbacks(app):
         clear_active = "clear" in (clear_flags or [])
         settings = get_active_settings() or {}
         message = _archive_confirmation_text(selected_slug, clear_active, settings, options)
-        return True, message, {"slug": selected_slug, "clear_active": clear_active}, no_update
+        target = {
+            "slug": selected_slug,
+            "clear_active": clear_active,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
 
     @app.callback(
         Output("archive-feedback", "children", allow_duplicate=True),
@@ -6657,6 +6806,9 @@ def register_callbacks(app):
         auth_state = current_user() or {}
         if not submit_n_clicks or not archive_target:
             return no_update, no_update, no_update
+        changed = _active_changed_feedback(archive_target)
+        if changed is not None:
+            return changed, no_update, no_update
         # Act on exactly what the dialog showed, not on the dropdown's current value.
         selected_slug = archive_target.get("slug")
         clear_flags = ["clear"] if archive_target.get("clear_active") else []
@@ -6835,7 +6987,12 @@ def register_callbacks(app):
         restore_active = "restore" in (restore_flags or [])
         settings = get_active_settings() or {}
         message = _reopen_confirmation_text(selected_slug, restore_active, settings, reopen_options)
-        return True, message, {"slug": selected_slug, "restore_active": restore_active}, no_update
+        target = {
+            "slug": selected_slug,
+            "restore_active": restore_active,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
 
     @app.callback(
         Output("reopen-feedback", "children"),
@@ -6851,6 +7008,9 @@ def register_callbacks(app):
         auth_state = current_user() or {}
         if not submit_n_clicks or not reopen_target:
             return no_update, no_update, no_update, no_update
+        changed = _active_changed_feedback(reopen_target)
+        if changed is not None:
+            return changed, no_update, no_update, no_update
         selected_slug = reopen_target.get("slug")
         restore_flags = ["restore"] if reopen_target.get("restore_active") else []
 

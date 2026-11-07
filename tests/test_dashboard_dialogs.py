@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -39,6 +40,31 @@ def storage(dashboard):  # noqa: F811
     return store
 
 
+@pytest.fixture
+def startgg(dashboard, monkeypatch):  # noqa: F811
+    """A configured API key and a read-only Start.gg name lookup for the fetch dialog."""
+    show = dashboard.callbacks["show_fetch_confirmation"]
+    monkeypatch.setitem(show.__globals__, "STARTGG_API_KEY", "synthetic-key")
+    dashboard.post.return_value = SimpleNamespace(
+        status_code=200,
+        raise_for_status=lambda: None,
+        json=lambda: {"data": {"tournament": {"name": "Fightbox 6"}}},
+    )
+    return dashboard.post
+
+
+def settings_sequence(storage, *slugs):
+    """get_active_settings returns these active events in order (the last one repeats)."""
+    calls = {"n": 0}
+
+    def next_settings():
+        index = min(calls["n"], len(slugs) - 1)
+        calls["n"] += 1
+        return {"active_event_slug": slugs[index], "event_display_name": slugs[index].title()}
+
+    storage.get_active_settings.side_effect = next_settings
+
+
 # --- (a) archive / reopen / fetch need a confirmation naming both events ----------------------
 
 
@@ -70,7 +96,7 @@ def test_archive_dialog_names_both_events_and_does_not_archive(dashboard, storag
     assert "Current active event: Fightbox 4 (fightbox-4)" in message
     assert "NOT the current active event" in message
     assert "CLEARED" in message
-    assert target == {"slug": "fightbox-5", "clear_active": True}
+    assert target == {"slug": "fightbox-5", "clear_active": True, "active_slug": "fightbox-4"}
     storage.archive_event.assert_not_called()
 
 
@@ -86,10 +112,11 @@ def test_archive_runs_only_on_confirmation_and_on_the_confirmed_target(
     dashboard, storage
 ):  # noqa: F811
     archive = dashboard.callbacks["archive_current_event"]
-    assert archive(None, {"slug": "fightbox-5", "clear_active": False}, {}) == (no_update,) * 3
+    target = {"slug": "fightbox-5", "clear_active": False, "active_slug": "fightbox-4"}
+    assert archive(None, target, {}) == (no_update,) * 3
     storage.archive_event.assert_not_called()
 
-    archive(1, {"slug": "fightbox-5", "clear_active": False}, {})
+    archive(1, target, {})
     kwargs = storage.archive_event.call_args.kwargs
     assert kwargs["event_slug"] == "fightbox-5"
     assert kwargs["clear_active"] is False
@@ -114,16 +141,20 @@ def test_reopen_dialog_and_confirmed_reopen(dashboard, storage):  # noqa: F811
     assert kwargs["event_slug"] == "fn19" and kwargs["restore_active"] is True
 
 
-def test_fetch_dialog_names_new_and_current_event(dashboard, storage):  # noqa: F811
+def test_fetch_dialog_names_new_and_current_event(dashboard, storage, startgg):  # noqa: F811
     show = dashboard.callbacks["show_fetch_confirmation"]
     shown, message, target, _ = show(1, " https://www.start.gg/tournament/fightbox-6/details ")
     assert shown is True
-    assert "New event: fightbox-6" in message
+    assert "New event: Fightbox 6 (fightbox-6)" in message  # name read before confirming
+    assert startgg.call_args.kwargs["json"]["variables"] == {"slug": "fightbox-6"}
+    storage.update_settings.assert_not_called()
     assert "Current active event: Fightbox 4 (fightbox-4)" in message
     assert "REPLACES the active event" in message
     assert target == {
         "link": "https://www.start.gg/tournament/fightbox-6/details",
         "slug": "fightbox-6",
+        "name": "Fightbox 6",
+        "active_slug": "fightbox-4",
     }
 
     same = show(1, "https://www.start.gg/tournament/fightbox-4")[1]
@@ -137,7 +168,11 @@ def test_fetch_runs_only_after_confirmation_with_the_confirmed_link(
     dashboard, storage
 ):  # noqa: F811
     fetch = dashboard.callbacks["fetch_event_data"]
-    target = {"link": "https://www.start.gg/tournament/fightbox-6", "slug": "fightbox-6"}
+    target = {
+        "link": "https://www.start.gg/tournament/fightbox-6",
+        "slug": "fightbox-6",
+        "active_slug": "fightbox-4",
+    }
     assert fetch(None, None, target, None, None, {}) == (no_update,) * 3
 
     trigger("confirm-fetch-event-dialog.submit_n_clicks")
@@ -163,6 +198,7 @@ def games(storage):
         return_value={
             "record_id": "rec-1",
             "fields": {
+                "event_slug": "fightbox-4",
                 "tournament_games_registered": ["Street Fighter 6"],
                 "payment_valid": True,
                 "payment_amount": 25,
@@ -185,12 +221,15 @@ def test_paid_player_with_more_games_gets_the_prompt_and_nothing_is_written(
     feedback, _, _, _, pending, style, question = result
     assert "already paid" in feedback.children
     assert style["display"] == "block"
+    fingerprint = pending.pop("fingerprint")
+    assert len(fingerprint) == 64
     assert pending == {
         "record_id": "rec-1",
         "games": ["Street Fighter 6", "Tekken 8"],
         "old_games": ["Street Fighter 6"],
         "new_expected": 50,
         "old_amount": 25,
+        "event_slug": "fightbox-4",
         "name": "Player One",
         "slug": "fightbox-4",
     }
@@ -200,7 +239,7 @@ def test_paid_player_with_more_games_gets_the_prompt_and_nothing_is_written(
 
 def test_yes_updates_the_amount_and_keeps_paid(dashboard, games):  # noqa: F811
     pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
-    feedback, cleared, style = dashboard.callbacks["games_paid_difference_yes"](1, pending)
+    feedback, cleared, style, _ = dashboard.callbacks["games_paid_difference_yes"](1, pending)
     games.update_checkin.assert_called_once_with(
         "rec-1",
         {
@@ -228,7 +267,7 @@ def test_no_marks_the_player_unpaid(dashboard, games):  # noqa: F811
 
 def test_cancel_changes_nothing(dashboard, games):  # noqa: F811
     pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
-    _, cleared, style = dashboard.callbacks["games_paid_difference_cancel"](1, pending)
+    _, cleared, style, _ = dashboard.callbacks["games_paid_difference_cancel"](1, pending)
     games.update_checkin.assert_not_called()
     assert cleared is None and style == {"display": "none"}
 
@@ -236,8 +275,13 @@ def test_cancel_changes_nothing(dashboard, games):  # noqa: F811
 @pytest.mark.parametrize(
     "fields",
     [
-        {"tournament_games_registered": ["Street Fighter 6"], "payment_valid": False},
         {
+            "event_slug": "fightbox-4",
+            "tournament_games_registered": ["Street Fighter 6"],
+            "payment_valid": False,
+        },
+        {
+            "event_slug": "fightbox-4",
             "tournament_games_registered": ["Street Fighter 6"],
             "payment_valid": True,
             "payment_amount": 50,
@@ -272,6 +316,164 @@ def test_unchanged_games_and_new_players_do_not_touch_games(dashboard, games):  
     add(dashboard, ["Street Fighter 6", "Tekken 8"])
     games.get_checkin_by_record_id.assert_not_called()
     games.update_checkin.assert_not_called()
+
+
+# --- T-029 review: nothing from the browser store is trusted at confirmation ----------------
+
+
+@pytest.mark.parametrize("answer", ["yes", "no"])
+def test_tampered_pending_games_are_rejected(dashboard, games, answer):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    tampered = {**pending, "games": ["Street Fighter 6", "Not A Real Game"]}
+    feedback, cleared, style, _ = dashboard.callbacks[f"games_paid_difference_{answer}"](
+        1, tampered
+    )
+    assert "aren't valid" in feedback.children
+    assert cleared is None and style == {"display": "none"}
+    games.update_checkin.assert_not_called()
+
+
+def test_tampered_amount_is_ignored_and_recomputed_server_side(dashboard, games):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    tampered = {**pending, "new_expected": 1}
+    feedback, _, style, text = dashboard.callbacks["games_paid_difference_yes"](1, tampered)
+    # The stored amount no longer matches the server's: ask again instead of writing 1 kr.
+    games.update_checkin.assert_not_called()
+    assert style["display"] == "block" and "50 kr" in text
+
+
+@pytest.mark.parametrize("answer", ["yes", "no"])
+def test_price_change_after_the_question_asks_again(dashboard, games, answer):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    games.get_active_settings.return_value = {
+        **games.get_active_settings.return_value,
+        "swish_expected_per_game": 50,
+    }
+    feedback, again, style, text = dashboard.callbacks[f"games_paid_difference_{answer}"](
+        1, pending
+    )
+    games.update_checkin.assert_not_called()
+    assert "please answer again" in feedback.children
+    assert again["new_expected"] == 100 and style["display"] == "block" and "100 kr" in text
+
+
+def test_row_changed_after_the_question_asks_again_with_fresh_numbers(
+    dashboard, games
+):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    games.get_checkin_by_record_id.return_value["fields"]["payment_amount"] = 40
+    feedback, again, style, text = dashboard.callbacks["games_paid_difference_no"](1, pending)
+    games.update_checkin.assert_not_called()
+    assert again["old_amount"] == 40 and again["fingerprint"] != pending["fingerprint"]
+    assert "40 kr" in text and style["display"] == "block"
+
+
+def test_row_no_longer_paid_after_the_question_is_refused(dashboard, games):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    games.get_checkin_by_record_id.return_value["fields"]["payment_valid"] = False
+    feedback, cleared, style, _ = dashboard.callbacks["games_paid_difference_yes"](1, pending)
+    games.update_checkin.assert_not_called()
+    assert "nothing saved" in feedback.children and cleared is None
+
+
+def test_active_event_changed_after_the_question_is_refused(dashboard, games):  # noqa: F811
+    pending = add(dashboard, ["Street Fighter 6", "Tekken 8"])[4]
+    games.get_active_settings.return_value = {
+        **games.get_active_settings.return_value,
+        "active_event_slug": "fightbox-5",
+    }
+    feedback, _, _, _ = dashboard.callbacks["games_paid_difference_yes"](1, pending)
+    games.update_checkin.assert_not_called()
+    assert "active event changed" in feedback.children
+
+
+@pytest.mark.parametrize("action", ["archive", "reopen"])
+def test_confirmation_is_void_if_the_active_event_changed(dashboard, storage, action):  # noqa: F811
+    target = {
+        "slug": "fn19",
+        "clear_active": False,
+        "restore_active": True,
+        "active_slug": "fightbox-4",
+    }
+    settings_sequence(storage, "fightbox-5")  # someone switched the active event meanwhile
+    name = "archive_current_event" if action == "archive" else "reopen_archived_event"
+    feedback = dashboard.callbacks[name](1, target, {})[0]
+    assert "active event changed to 'fightbox-5'" in feedback.children
+    storage.archive_event.assert_not_called()
+    storage.reopen_event.assert_not_called()
+
+
+def test_fetch_is_void_if_the_active_event_changed_before_it_started(
+    dashboard, storage
+):  # noqa: F811
+    trigger("confirm-fetch-event-dialog.submit_n_clicks")
+    settings_sequence(storage, "fightbox-5")
+    target = {
+        "link": "https://www.start.gg/tournament/fightbox-6",
+        "slug": "fightbox-6",
+        "active_slug": "fightbox-4",
+    }
+    feedback = dashboard.callbacks["fetch_event_data"](1, None, target, None, None, {})[0]
+    assert "active event changed" in feedback.children
+    dashboard.post.assert_not_called()
+    storage.update_settings.assert_not_called()
+
+
+def test_fetch_rechecks_the_active_event_after_reading_start_gg(
+    dashboard, storage, startgg
+):  # noqa: F811
+    trigger("confirm-fetch-event-dialog.submit_n_clicks")
+    dashboard.post.return_value = SimpleNamespace(
+        status_code=200,
+        raise_for_status=lambda: None,
+        json=lambda: {
+            "data": {
+                "tournament": {
+                    "id": 1,
+                    "name": "Fightbox 6",
+                    "startAt": None,
+                    "timezone": None,
+                    "events": [],
+                }
+            }
+        },
+    )
+    settings_sequence(storage, "fightbox-4", "fightbox-5")  # changes during the provider read
+    target = {
+        "link": "https://www.start.gg/tournament/fightbox-6",
+        "slug": "fightbox-6",
+        "name": "Fightbox 6",
+        "active_slug": "fightbox-4",
+    }
+    feedback = dashboard.callbacks["fetch_event_data"](1, None, target, None, None, {})[0]
+    assert dashboard.post.called  # the read-only provider work ran ...
+    assert "active event changed" in feedback.children  # ... but nothing is committed
+    storage.update_settings.assert_not_called()
+    storage.get_active_settings_with_id.assert_not_called()
+
+
+def test_fetch_only_commits_the_confirmed_target(dashboard, storage, startgg):  # noqa: F811
+    trigger("confirm-fetch-event-dialog.submit_n_clicks")
+    target = {
+        "link": "https://www.start.gg/tournament/other-event",
+        "slug": "fightbox-6",
+        "active_slug": "fightbox-4",
+    }
+    feedback = dashboard.callbacks["fetch_event_data"](1, None, target, None, None, {})[0]
+    assert feedback == "❌ The link no longer matches the confirmed event."
+    storage.update_settings.assert_not_called()
+
+
+def test_fetch_dialog_refuses_when_start_gg_has_no_such_event(
+    dashboard, storage, startgg
+):  # noqa: F811
+    startgg.return_value = SimpleNamespace(
+        status_code=200, raise_for_status=lambda: None, json=lambda: {"data": {"tournament": None}}
+    )
+    shown, _, target, feedback = dashboard.callbacks["show_fetch_confirmation"](
+        1, "https://www.start.gg/tournament/nope"
+    )
+    assert shown is False and target is None and "not found" in feedback
 
 
 # --- (3) SSE stopped banner (browser, opt-in) --------------------------------------------------
