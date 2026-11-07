@@ -366,16 +366,34 @@ async def require_dashboard_auth(request: Request, call_next):
 # =============================================
 
 @app.get("/auth/login")
-async def auth_login():
+async def auth_login(request: Request):
     """Redirect user to Start.gg OAuth authorization page."""
+    import secrets
+
+    from shared.auth import OAUTH_STATE_COOKIE_NAME, OAUTH_STATE_MAX_AGE, seal_oauth_state
+
+    cookie_path = "/auth" if IS_PROD else "/"
+    secure_cookie = IS_PROD or request.url.scheme == "https"
     if not OAUTH_REDIRECT_URI:
         return JSONResponse(
             {"error": "STARTGG_REDIRECT_URI not configured"},
             status_code=500,
         )
     try:
-        url = build_authorize_url(OAUTH_REDIRECT_URI)
-        return RedirectResponse(url=url)
+        state = secrets.token_urlsafe(32)
+        signed_state = seal_oauth_state(state)
+        url = build_authorize_url(OAUTH_REDIRECT_URI, state=state)
+        response = RedirectResponse(url=url)
+        response.set_cookie(
+            key=OAUTH_STATE_COOKIE_NAME,
+            value=signed_state,
+            max_age=OAUTH_STATE_MAX_AGE,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="lax",
+            path=cookie_path,
+        )
+        return response
     except ValueError as e:
         error_id = uuid.uuid4().hex[:8]
         # Preserve traceback frames without provider exception strings that can contain secrets.
@@ -385,25 +403,67 @@ async def auth_login():
             error_id,
             exc_info=(RuntimeError, safe_error, e.__traceback__),
         )
-        return JSONResponse(
+        response = JSONResponse(
             {"error": "Unable to start authentication.", "log_id": error_id}, status_code=500
         )
+        response.delete_cookie(
+            OAUTH_STATE_COOKIE_NAME,
+            path=cookie_path,
+            secure=secure_cookie,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
 
 
 @app.get("/auth/callback")
-async def auth_callback(code: str = ""):
+async def auth_callback(request: Request, code: str = "", state: str = ""):
     """Validate the OAuth code and redirect without placing it in HTML or JavaScript."""
+    from shared.auth import OAUTH_STATE_COOKIE_NAME, verify_oauth_state
+
+    def invalid(reason, message):
+        logger.warning("OAuth callback rejected reason=%s", reason)
+        response = JSONResponse({"error": message}, status_code=400)
+        response.delete_cookie(
+            OAUTH_STATE_COOKIE_NAME,
+            path="/auth" if IS_PROD else "/",
+            secure=IS_PROD or request.url.scheme == "https",
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
     if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
-        return JSONResponse({"error": "Invalid authorization code"}, status_code=400)
+        return invalid("invalid_code", "Invalid authorization code")
+    if not verify_oauth_state(request.cookies.get(OAUTH_STATE_COOKIE_NAME), state):
+        return invalid("invalid_state", "Invalid authentication state")
     finalize_path = "/auth/callback/finalize" if IS_PROD else "/admin/auth/callback/finalize"
-    return RedirectResponse(url=f"{finalize_path}?{urlencode({'code': code})}", status_code=302)
+    return RedirectResponse(
+        url=f"{finalize_path}?{urlencode({'code': code, 'state': state})}", status_code=302
+    )
 
 
 @app.get("/auth/callback/finalize")
-async def auth_callback_finalize(code: str = ""):
+async def auth_callback_finalize(request: Request, code: str = "", state: str = ""):
     """Finalize OAuth callback from Start.gg."""
-    if not code:
-        return JSONResponse({"error": "Missing authorization code"}, status_code=400)
+    from shared.auth import OAUTH_STATE_COOKIE_NAME, verify_oauth_state
+
+    def finish(response):
+        response.delete_cookie(
+            OAUTH_STATE_COOKIE_NAME,
+            path="/auth" if IS_PROD else "/",
+            secure=IS_PROD or request.url.scheme == "https",
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
+    if not verify_oauth_state(request.cookies.get(OAUTH_STATE_COOKIE_NAME), state):
+        logger.warning("OAuth finalize rejected reason=invalid_state")
+        return finish(JSONResponse({"error": "Invalid authentication state"}, status_code=400))
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
+        logger.warning("OAuth finalize rejected reason=invalid_code")
+        return finish(JSONResponse({"error": "Invalid authorization code"}, status_code=400))
 
     try:
         # Step 1: Exchange code for access token
@@ -411,15 +471,16 @@ async def auth_callback_finalize(code: str = ""):
         access_token = token_data.get("access_token")
         if not access_token:
             logger.error(
-                "Token exchange returned no access_token; response keys=%s", sorted(token_data.keys())
+                "Token exchange returned no access_token; response keys=%s",
+                sorted(token_data.keys()),
             )
-            return JSONResponse({"error": "Token exchange failed"}, status_code=500)
+            return finish(JSONResponse({"error": "Token exchange failed"}, status_code=500))
 
         # Step 2: Get user info from Start.gg
         user_info = await run_in_threadpool(get_startgg_user, access_token)
         if not user_info.get("id"):
             logger.error("Could not retrieve user info from Start.gg")
-            return JSONResponse({"error": "Could not retrieve user info"}, status_code=500)
+            return finish(JSONResponse({"error": "Could not retrieve user info"}, status_code=500))
 
         # Step 2.5: Authorize — if an active event exists, verify TO access.
         # If no active event (e.g. after archive + clear), let the user
@@ -454,20 +515,22 @@ async def auth_callback_finalize(code: str = ""):
                     active_slug,
                 )
                 logout_path = "/auth/logout" if IS_PROD else "/admin/auth/logout"
-                return HTMLResponse(
-                    f"""
+                return finish(
+                    HTMLResponse(
+                        f"""
                     <h2>Not Authorized</h2>
                     <p>You are not TO/Admin for the active event: <strong>{html_mod.escape(active_slug)}</strong></p>
                     <p>Please contact Head TO to grant permissions.</p>
                     <p><a href='{logout_path}'>Back to login</a></p>
                     """,
-                    status_code=403,
+                        status_code=403,
+                    )
                 )
 
         # Step 3: Create session
         session_id = await run_in_threadpool(create_session, user_info, access_token)
         if not session_id:
-            return JSONResponse({"error": "Session creation failed"}, status_code=500)
+            return finish(JSONResponse({"error": "Session creation failed"}, status_code=500))
 
         await run_in_threadpool(
             _audit_safe,
@@ -517,7 +580,7 @@ async def auth_callback_finalize(code: str = ""):
                 str(user_info.get("id", "")),
             ),
         )
-        return response
+        return finish(response)
 
     except Exception as e:
         error_id = uuid.uuid4().hex[:8]
@@ -528,9 +591,11 @@ async def auth_callback_finalize(code: str = ""):
             error_id,
             exc_info=(RuntimeError, safe_error, e.__traceback__),
         )
-        return JSONResponse(
-            {"error": "Authentication failed.", "log_id": error_id},
-            status_code=500,
+        return finish(
+            JSONResponse(
+                {"error": "Authentication failed.", "log_id": error_id},
+                status_code=500,
+            )
         )
 
 

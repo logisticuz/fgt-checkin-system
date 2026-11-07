@@ -7,10 +7,14 @@ the backend and dashboard containers via shared/.
 Uses httpx for Start.gg API calls (sync Client for simplicity).
 """
 
-import os
+import hashlib
+import hmac
 import logging
-from urllib.parse import quote, urlencode
+import os
+import re
+import time
 from typing import Optional, Tuple
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -19,6 +23,13 @@ logger = logging.getLogger(__name__)
 # --- Config (from environment) ---
 STARTGG_CLIENT_ID = os.getenv("STARTGG_CLIENT_ID", "")
 STARTGG_CLIENT_SECRET = os.getenv("STARTGG_CLIENT_SECRET", "")
+
+OAUTH_STATE_COOKIE_NAME = "fgc_oauth_state"
+OAUTH_STATE_MAX_AGE = 10 * 60
+_STATE_FORMAT = re.compile(r"[A-Za-z0-9_-]{43}")
+_STATE_KEY_CONTEXT = b"fgt-oauth-state-v1"
+if not STARTGG_CLIENT_SECRET.strip():
+    logger.error("oauth_state_config_missing: STARTGG_CLIENT_SECRET must be configured for login")
 
 # Start.gg OAuth endpoints
 STARTGG_AUTH_URL = "https://www.start.gg/oauth/authorize"
@@ -31,7 +42,52 @@ OAUTH_SCOPES = "user.identity user.email tournament.manager"
 DEFAULT_TIMEOUT = 10.0
 
 
-def build_authorize_url(redirect_uri: str) -> str:
+def _state_signature(state: str, issued_at: str) -> str:
+    if not STARTGG_CLIENT_SECRET.strip():
+        raise ValueError("OAuth state signing secret is not configured")
+    key = hmac.new(
+        STARTGG_CLIENT_SECRET.encode("utf-8"), _STATE_KEY_CONTEXT, hashlib.sha256
+    ).digest()
+    return hmac.new(key, f"{state}|{issued_at}".encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def seal_oauth_state(state: str) -> str:
+    """Bind a browser challenge to a signed issue time, shared across dashboard workers."""
+    if not isinstance(state, str) or _STATE_FORMAT.fullmatch(state) is None:
+        raise ValueError("Invalid OAuth state")
+    issued_at = str(int(time.time()))
+    return f"{state}.{issued_at}.{_state_signature(state, issued_at)}"
+
+
+def verify_oauth_state(cookie: str | None, state: str | None) -> bool:
+    """Verify browser binding and ten-minute expiry without per-worker state."""
+    if not isinstance(cookie, str) or len(cookie) > 256 or not isinstance(state, str):
+        return False
+    if _STATE_FORMAT.fullmatch(state) is None:
+        return False
+    parts = cookie.split(".")
+    if len(parts) != 3:
+        return False
+    signed_state, issued_at, signature = parts
+    if (
+        _STATE_FORMAT.fullmatch(signed_state) is None
+        or re.fullmatch(r"[0-9]{1,12}", issued_at) is None
+        or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+    ):
+        return False
+    try:
+        expected = _state_signature(signed_state, issued_at)
+    except ValueError:
+        return False
+    if not hmac.compare_digest(signature, expected):
+        return False
+    if not hmac.compare_digest(state, signed_state):
+        return False
+    age = int(time.time()) - int(issued_at)
+    return 0 <= age < OAUTH_STATE_MAX_AGE
+
+
+def build_authorize_url(redirect_uri: str, *, state: str) -> str:
     """
     Build the Start.gg OAuth authorization URL.
 
@@ -40,6 +96,7 @@ def build_authorize_url(redirect_uri: str) -> str:
 
     Args:
         redirect_uri: Callback URL (must match registered redirect URI exactly)
+        state: Browser-bound login challenge returned by Start.gg
 
     Returns:
         Full authorization URL string
@@ -55,6 +112,7 @@ def build_authorize_url(redirect_uri: str) -> str:
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": OAUTH_SCOPES,
+        "state": state,
     }
     return f"{STARTGG_AUTH_URL}?{urlencode(params, quote_via=quote)}"
 
@@ -80,7 +138,7 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
     if not STARTGG_CLIENT_ID or not STARTGG_CLIENT_SECRET:
         raise ValueError("Start.gg OAuth credentials not configured")
 
-    # Start.gg expects form-encoded POST (not JSON)
+    # Preserve the production hotfix: exchange as JSON and include the configured scopes.
     payload = {
         "client_id": STARTGG_CLIENT_ID,
         "client_secret": STARTGG_CLIENT_SECRET,
