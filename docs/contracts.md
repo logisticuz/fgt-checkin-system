@@ -282,3 +282,31 @@ the writer (missing PNR, unverified ownership, disabled integrations) keep the p
 as do response-only deadline expiries until the native worker finishes. Same-event
 re-check-ins also keep `member`. Errors/skipped results never change membership, confirmed
 negatives preserve protected TO/v2 truth, and lookup results never close in-flight v2 attempts.
+
+## eBas check webhook used by member-card (T-048)
+
+`POST /webhook/ebas/check` retains its existing webhook path, method and authentication.
+The existing 10/12-digit personal-ID normalization and execution-payload privacy settings
+are unchanged. The provider call has an explicit 8-second timeout, below member-card's
+15-second HTTP timeout; provider transport/HTTP/JSON errors use a separate error output.
+
+Only a successful provider response containing an explicit boolean `response.member_found`
+can return HTTP 200 JSON. Both positive and negative results keep the existing payload:
+`{ok:true,state:"verified_true"|"verified_false",isMember:true|false,attempt_id:...,message:...}`.
+The messages remain `Medlem i Sverok` and `Ej medlem i Sverok`, respectively.
+Any `error` or `errors` field (including nested or empty-valued fields), non-2xx status,
+timeout or missing/malformed membership result instead returns HTTP **503**, header
+`Content-Type: text/plain`, with the literal **non-JSON** body `ebas_unavailable`.
+Missing/invalid input and processing-node errors also use this fixed response. No personal
+ID, provider payload or membership boolean is included in it.
+
+The non-JSON error body is deliberate compatibility behavior: member-card's
+`backend/main.py:78-97` posts with a 15-second timeout and calls `resp.json()` inside its
+`try`, without checking HTTP status. A JSON error object would fall through to
+`result.get("isMember", False)` and incorrectly produce its not-member 404. Plain text
+makes JSON decoding fail, reaching its existing 502 retry message
+`Kunde inte verifiera medlemskap just nu. Försök igen.`. Verified false still produces
+`Inget aktivt medlemskap hittades. Kontakta styrelsen.`; verified true continues to the
+unchanged player/card processing. Member-card and meetup code/data are not modified.
+Callers may additionally use `raise_for_status()` before JSON decoding as hardening;
+this is compatible with the same 503 contract and is not required for this change.
