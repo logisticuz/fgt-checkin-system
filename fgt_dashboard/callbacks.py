@@ -4326,6 +4326,20 @@ def register_callbacks(app):
             if not merge_fn:
                 return "Merge not available.", no_update, no_update, no_update
 
+            dismissed_fn = getattr(storage_api, "is_duplicate_pair_dismissed", None)
+            if dismissed_fn and dismissed_fn(keep_uuid, remove_uuid):
+                candidates_list, _, candidates_title = _build_candidates_list()
+                return (
+                    html.Div(
+                        "Not merged: this pair is marked as different players. "
+                        'Undo that under "Dismissed pairs" first.',
+                        style={"color": COLORS["accent_yellow"], "fontSize": "0.8rem"},
+                    ),
+                    no_update,
+                    candidates_list,
+                    candidates_title,
+                )
+
             result = merge_fn(
                 keep_uuid,
                 remove_uuid,
@@ -4514,7 +4528,8 @@ def register_callbacks(app):
                     html.Div(
                         "No potential duplicates found.",
                         style={"color": COLORS["accent_green"], "padding": "1rem 0"},
-                    )
+                    ),
+                    _dismissed_container(),
                 ],
                 "",
                 "Potential duplicates (0)",
@@ -4536,6 +4551,7 @@ def register_callbacks(app):
             reason_text = ", ".join(r.replace("_", " ") for r in reasons)
 
             card = html.Div(
+                id={"type": "dup-card", "a": a["uuid"], "b": b["uuid"]},
                 style={
                     "backgroundColor": COLORS["bg_card"],
                     "border": f"1px solid {COLORS['border']}",
@@ -4699,47 +4715,236 @@ def register_callbacks(app):
             )
             cards.append(card)
 
+        cards.append(_dismissed_container())
         return cards, "", f"Potential duplicates ({len(candidates)})"
+
+    def _dismissed_container():
+        return html.Div(id="duplicates-dismissed", children=_build_dismissed_section())
+
+    def _build_dismissed_section():
+        """Small "Dismissed pairs (N)" list with Undo per pair; empty when there are none."""
+        try:
+            list_fn = getattr(storage_api, "get_duplicate_dismissals", None)
+            pairs = (list_fn(limit=100) or []) if list_fn else []
+        except Exception:
+            logger.exception("Loading duplicate dismissals failed")
+            return [
+                html.Span(
+                    "Dismissed pairs: failed to load.",
+                    style={"color": COLORS["text_secondary"], "fontSize": "0.75rem"},
+                )
+            ]
+        if not pairs:
+            return []
+
+        def label(player):
+            tag = player.get("tag") or "?"
+            name = player.get("name") or ""
+            return f"{tag} ({name})" if name else tag
+
+        rows = []
+        for pair in pairs:
+            when = (pair.get("dismissed_at") or "")[:16].replace("T", " ")
+            by = pair.get("dismissed_by") or ""
+            meta = f"\u00b7 {when}" + (f" \u00b7 by {by}" if by else "")
+            rows.append(
+                html.Div(
+                    [
+                        html.Span(
+                            f"{label(pair['player_a'])}  \u2260  {label(pair['player_b'])}",
+                            style={"color": COLORS["text_primary"], "fontSize": "0.75rem"},
+                        ),
+                        html.Span(
+                            meta,
+                            style={"color": COLORS["text_secondary"], "fontSize": "0.7rem"},
+                        ),
+                        html.Button(
+                            "Undo",
+                            id={
+                                "type": "btn-undo-dismiss",
+                                "a": pair["uuid_a"],
+                                "b": pair["uuid_b"],
+                            },
+                            title="Show this pair in the duplicate list again",
+                            style={
+                                "backgroundColor": "transparent",
+                                "color": COLORS["accent_yellow"],
+                                "border": f"1px solid {COLORS['accent_yellow']}",
+                                "padding": "0.15rem 0.5rem",
+                                "borderRadius": "4px",
+                                "cursor": "pointer",
+                                "fontSize": "0.68rem",
+                                "marginLeft": "auto",
+                            },
+                        ),
+                    ],
+                    className="dup-dismissed-row",
+                    style={
+                        "padding": "0.3rem 0",
+                        "borderBottom": f"1px solid {COLORS['border']}",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "gap": "0.4rem",
+                    },
+                )
+            )
+        return [
+            html.Details(
+                [
+                    html.Summary(
+                        f"Dismissed pairs ({len(pairs)})",
+                        style={
+                            "color": COLORS["text_secondary"],
+                            "fontSize": "0.78rem",
+                            "cursor": "pointer",
+                        },
+                    ),
+                    html.Div(rows, style={"marginTop": "0.4rem"}),
+                ],
+                id="duplicates-dismissed-details",
+                style={"marginTop": "0.8rem"},
+            )
+        ]
+
+    def _dashboard_actor():
+        """The trusted dashboard user (T-021), as audit-log fields plus a display name."""
+        user = current_user() or {}
+        name = (user.get("user_name") or "").strip()
+        if not name or "@" in name:  # never store an email address as the display name
+            name = f"user-{user['user_id']}" if user.get("user_id") else "unknown"
+        audit = {
+            "user_id": user.get("user_id", ""),
+            "user_name": name,
+            "user_email": user.get("email", ""),
+        }
+        return audit, name
+
+    def _triggered_click():
+        """The clicked button's id, or None for renders that merely added new buttons."""
+        if not ctx.triggered or not ctx.triggered[0].get("value"):
+            return None
+        return ctx.triggered_id
+
+    @app.callback(
+        Output("duplicates-feedback", "children", allow_duplicate=True),
+        Output({"type": "dup-card", "a": ALL, "b": ALL}, "style"),
+        Output("duplicates-title", "children", allow_duplicate=True),
+        Output("duplicates-dismissed", "children"),
+        Input({"type": "btn-not-same", "a": ALL, "b": ALL}, "n_clicks"),
+        State({"type": "dup-card", "a": ALL, "b": ALL}, "style"),
+        prevent_initial_call=True,
+    )
+    def dismiss_not_same(n_clicks_list, card_styles):
+        triggered = _triggered_click()
+        if not triggered:
+            return no_update, no_update, no_update, no_update
+
+        a_uuid = triggered.get("a", "")
+        b_uuid = triggered.get("b", "")
+        audit_user, actor_name = _dashboard_actor()
+
+        try:
+            dismiss_fn = getattr(storage_api, "dismiss_duplicate_pair", None)
+            if not dismiss_fn:
+                raise RuntimeError("dismissals are not available on this storage backend")
+            players_exist = dismiss_fn(a_uuid, b_uuid, dismissed_by=actor_name)
+        except Exception:
+            logger.exception("Saving duplicate dismissal failed")
+            feedback = html.Div(
+                'Couldn\'t save "Not same" \u2013 nothing changed. Try again.',
+                style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
+            )
+            return feedback, no_update, no_update, no_update
+
+        if players_exist:
+            try:
+                log_fn = getattr(storage_api, "log_action", None)
+                if log_fn:
+                    log_fn(
+                        audit_user,
+                        "duplicate_dismissed",
+                        "players",
+                        target_player=a_uuid,
+                        details=json.dumps({"pair": [a_uuid, b_uuid]}),
+                        reason="TO marked as not same player",
+                    )
+            except Exception:
+                pass  # non-critical: the dismissal itself is saved
+            feedback = html.Div(
+                "Marked as different players.",
+                style={"color": COLORS["accent_green"], "fontSize": "0.8rem"},
+            )
+        else:
+            feedback = html.Div(
+                "One of these players no longer exists (merged?). Scan again.",
+                style={"color": COLORS["accent_yellow"], "fontSize": "0.8rem"},
+            )
+
+        # Hide just this card; the other cards keep their place (no re-scan).
+        styles = []
+        visible = 0
+        for output, style in zip(ctx.outputs_list[1], card_styles):
+            style = dict(style or {})
+            card = output["id"]
+            if card.get("a") == a_uuid and card.get("b") == b_uuid:
+                style["display"] = "none"
+            if style.get("display") != "none":
+                visible += 1
+            styles.append(style)
+
+        return (
+            feedback,
+            styles,
+            f"Potential duplicates ({visible})",
+            _build_dismissed_section(),
+        )
 
     @app.callback(
         Output("duplicates-feedback", "children", allow_duplicate=True),
         Output("duplicates-list", "children", allow_duplicate=True),
         Output("duplicates-title", "children", allow_duplicate=True),
-        Input({"type": "btn-not-same", "a": ALL, "b": ALL}, "n_clicks"),
+        Input({"type": "btn-undo-dismiss", "a": ALL, "b": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
-    def dismiss_not_same(n_clicks_list):
-        if not n_clicks_list or not any(n_clicks_list):
-            return no_update, no_update, no_update
-
-        triggered = ctx.triggered_id
+    def undo_not_same(n_clicks_list):
+        triggered = _triggered_click()
         if not triggered:
             return no_update, no_update, no_update
 
         a_uuid = triggered.get("a", "")
         b_uuid = triggered.get("b", "")
-
-        # Log the dismissal to audit_log for traceability
         try:
-            log_fn = getattr(storage_api, "log_action", None)
-            if log_fn:
-                log_fn(
-                    {"user_id": "", "user_name": "TO", "user_email": ""},
-                    "duplicate_dismissed",
-                    "players",
-                    target_player=a_uuid,
-                    details=json.dumps({"pair": [a_uuid, b_uuid]}),
-                    reason="TO marked as not same player",
-                )
+            undo_fn = getattr(storage_api, "undo_duplicate_dismissal", None)
+            if not undo_fn:
+                raise RuntimeError("dismissals are not available on this storage backend")
+            removed = undo_fn(a_uuid, b_uuid)
         except Exception:
-            pass  # non-critical
+            logger.exception("Undoing duplicate dismissal failed")
+            feedback = html.Div(
+                "Couldn't undo \u2013 nothing changed. Try again.",
+                style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
+            )
+            return feedback, no_update, no_update
 
+        if removed:
+            try:
+                log_fn = getattr(storage_api, "log_action", None)
+                if log_fn:
+                    log_fn(
+                        _dashboard_actor()[0],
+                        "duplicate_dismissal_undone",
+                        "players",
+                        target_player=a_uuid,
+                        details=json.dumps({"pair": [a_uuid, b_uuid]}),
+                        reason="TO undid 'not same player'",
+                    )
+            except Exception:
+                pass
         feedback = html.Div(
-            "Dismissed pair. They will reappear on next scan (dismiss state is not persisted yet).",
-            style={"color": COLORS["text_secondary"], "fontSize": "0.8rem", "fontStyle": "italic"},
+            "Undone: the pair can show up as a possible duplicate again.",
+            style={"color": COLORS["text_secondary"], "fontSize": "0.8rem"},
         )
-
-        # Re-scan (pair still shows since we don't persist dismissals yet)
+        # Undo needs the pair back in its ranked place, so this one re-scans.
         candidates_list, _, candidates_title = _build_candidates_list()
         return feedback, candidates_list, candidates_title
 
