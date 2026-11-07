@@ -3777,7 +3777,19 @@ def _confirmed_row_survivor(cur, checkin: Dict[str, Any]) -> Optional[str]:
             "ORDER BY dismissed_at DESC, id DESC LIMIT 1",
             (record_id, record_id, current),
         )
-        decisions += cur.fetchall()
+        for decided_at, chosen in cur.fetchall():
+            # Defence in depth: a proof pointing at a profile the row only reached through
+            # a merge that is now undone does not count.
+            if chosen and _has_confirmed_rows(cur, "merge_log"):
+                cur.execute(
+                    "SELECT undone FROM merge_log WHERE keep_uuid = %s AND confirmed_rows ? %s "
+                    "ORDER BY id DESC LIMIT 1",
+                    (chosen, record_id),
+                )
+                via = cur.fetchone()
+                if via and via[0]:
+                    continue
+            decisions.append((decided_at, chosen))
     decisions = [d for d in decisions if d[1]]
     if not decisions:
         return None  # no decision, or the row was edited since: match it as it is now
@@ -6069,6 +6081,7 @@ def undo_merge(
             cur.execute(
                 "UPDATE merge_log SET undone = true, undone_at = now() WHERE id = %s", (merge_id,)
             )
+            _invalidate_proofs_after_undo(cur, entry, undo_user)
 
     log_action(
         undo_user,
@@ -6097,6 +6110,45 @@ def undo_merge(
         "archive_reverted": archive_reverted,
         "active_reverted": active_reverted,
     }
+
+
+def _invalidate_proofs_after_undo(cur, entry: Dict[str, Any], user: Dict[str, Any]) -> None:
+    """T-068: once a merge is undone, later decision proofs for the check-ins it covered
+    that point at its survivor no longer hold (e.g. a "Not same" made while the row was on
+    the kept profile). Remove them in the undo's transaction and audit what was removed;
+    archive then matches those rows normally again (which finds the restored profile)."""
+    covered = sorted((entry.get("confirmed_rows") or {}).keys())
+    if not covered:
+        return
+    merge_id, survivor = entry["id"], entry["keep_uuid"]
+    merged_at = entry.get("merged_at")
+    removed: Dict[str, List[Any]] = {"dismissals": [], "merges": []}
+    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+        for record_id in covered:
+            cur.execute(
+                "UPDATE player_duplicate_dismissals SET confirmed_rows = confirmed_rows - %s "
+                "WHERE confirmed_rows -> %s ->> 'player' = %s "
+                "AND (%s::timestamptz IS NULL OR dismissed_at >= %s::timestamptz) RETURNING id",
+                (record_id, record_id, survivor, merged_at, merged_at),
+            )
+            removed["dismissals"] += [[row[0], record_id] for row in cur.fetchall()]
+    for record_id in covered:
+        cur.execute(
+            "UPDATE merge_log SET confirmed_rows = confirmed_rows - %s "
+            "WHERE id > %s AND keep_uuid = %s AND confirmed_rows ? %s RETURNING id",
+            (record_id, merge_id, survivor, record_id),
+        )
+        removed["merges"] += [[row[0], record_id] for row in cur.fetchall()]
+    if removed["dismissals"] or removed["merges"]:
+        _insert_audit(
+            cur,
+            user,
+            "decision_proofs_invalidated",
+            "players",
+            target_player=survivor,
+            reason="Merge undone: later decisions for its check-ins no longer apply",
+            details=json.dumps({"merge_id": merge_id, **removed}),
+        )
 
 
 def get_merge_history(limit: int = 50) -> List[Dict[str, Any]]:

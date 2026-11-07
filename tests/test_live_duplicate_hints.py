@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from shared import postgres_api as postgres
 from tests.test_safe_archiving import (  # noqa: F401  (pytest fixtures)
@@ -481,6 +482,56 @@ def test_a_confirmed_row_never_overwrites_the_chosen_profile(archive_db, event):
     kept = player(archive_db, alice["uuid"])
     assert (kept["name"], kept["telephone"], kept["tag"]) == ("Synthetic Alice", "0700000201", None)
     assert archived(archive_db, event)[0]["name"] == "Synthetic Alicf"  # today's on the row
+
+
+def test_undoing_a_merge_drops_a_later_not_same_proof_for_its_rows(
+    archive_db, event  # noqa: F811
+):
+    """Round 4 P2 (exact repro): tagged row A -> Keep B -> Not same vs C -> Undo -> archive A."""
+    alpha = seed_player(archive_db, "pw-alpha", name="Synthetic Alpha", telephone="0700000302")
+    other = seed_player(archive_db, "pw-alpah", name="Synthetic Alpha", telephone="0700000303")
+    record = check_in(event, "pw-alfa", name="Synthetic Alpha", phone="0700000399")
+    merged = decide(record, alpha["uuid"], "keep_candidate")  # stub A merged into B
+    stub = merged["remove_uuid"]
+    decide(record, other["uuid"], "not_same")  # proof: record -> B
+    postgres.undo_merge(int(merged["merge_id"]))
+    assert row_of(archive_db, record)["player_uuid"] == stub
+
+    dismissals = table_rows(archive_db, "player_duplicate_dismissals")
+    proofs = [r["confirmed_rows"] or {} for r in dismissals]
+    assert all(record not in proof for proof in proofs)  # removed with the Undo
+    audit = [
+        r for r in table_rows(archive_db, "audit_log") if r["action"] == "decision_proofs_invalidated"
+    ]
+    assert len(audit) == 1
+    assert json.loads(audit[0]["details"])["merge_id"] == merged["merge_id"]
+
+    archive(event)
+    assert [r["player_uuid"] for r in archived(archive_db, event)] == [stub]
+    assert player(archive_db, alpha["uuid"])["total_events"] == alpha["total_events"]
+
+
+def test_archive_ignores_a_proof_reached_through_an_undone_merge(archive_db, event):  # noqa: F811
+    """Defence in depth: even if such a proof were left behind, archive does not use it."""
+    alpha = seed_player(archive_db, "pw-alpha", name="Synthetic Alpha", telephone="0700000302")
+    other = seed_player(archive_db, "pw-alpah", name="Synthetic Alpha", telephone="0700000303")
+    record = check_in(event, "pw-alfa", name="Synthetic Alpha", phone="0700000399")
+    merged = decide(record, alpha["uuid"], "keep_candidate")
+    decide(record, other["uuid"], "not_same")
+    with archive_db.pool.connection() as connection:
+        saved = connection.execute(
+            "SELECT id, confirmed_rows FROM player_duplicate_dismissals"
+        ).fetchall()
+    postgres.undo_merge(int(merged["merge_id"]))
+    with archive_db.pool.connection() as connection:  # put the stale proof back by hand
+        for dismissal_id, proof in saved:
+            connection.execute(
+                "UPDATE player_duplicate_dismissals SET confirmed_rows = %s WHERE id = %s",
+                (Jsonb(proof), dismissal_id),
+            )
+        with connection.cursor() as cursor:
+            row = row_of(archive_db, record)
+            assert postgres._confirmed_row_survivor(cursor, row) is None
 
 
 def test_the_decision_records_the_rows_it_covers(archive_db, event, kenji):  # noqa: F811
