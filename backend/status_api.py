@@ -125,33 +125,43 @@ def _not_found() -> dict:
     return {"found": False, "ready": False}
 
 
+def lookup_checkin_status(checkin_id: str, *, include_display: bool = False) -> dict:
+    """Load active-event status for a capability-verified caller; expose only safe fields."""
+    settings = postgres_api.get_active_settings() or {}
+    active_slug = settings.get("active_event_slug")
+    if not active_slug:
+        return _not_found()
+    record = postgres_api.get_checkin_by_record_id(checkin_id)
+    fields = (record or {}).get("fields", {})
+    if not record or fields.get("event_slug") != active_slug:
+        return _not_found()
+    computed = postgres_api.compute_checkin_status(fields, settings)
+    games = fields.get("tournament_games_registered")
+    result = {
+        "found": True,
+        "ready": computed["ready"],
+        "missing": computed["missing"],
+        "member": bool(fields.get("member")),
+        "startgg": bool(fields.get("startgg")),
+        "payment_ok": "Payment" not in computed["missing"],
+        "games": (
+            [game for game in games if isinstance(game, str)]
+            if isinstance(games, list)
+            else []
+        ),
+        "status": computed["status"],
+    }
+    if include_display:
+        result["tag"] = fields.get("tag") or ""
+    return result
+
+
 @router.get("/{checkin_id}/status")
 def checkin_status(checkin_id: str, t: str | None = None):
     if not verify_capability(checkin_id, t):
         return JSONResponse(_not_found(), status_code=403)
     try:
-        settings = postgres_api.get_active_settings() or {}
-        active_slug = settings.get("active_event_slug")
-        if not active_slug:
-            return _not_found()
-        record = postgres_api.get_checkin_by_record_id(checkin_id)
-        fields = (record or {}).get("fields", {})
-        if not record or fields.get("event_slug") != active_slug:
-            return _not_found()
-        computed = postgres_api.compute_checkin_status(fields, settings)
-        games = fields.get("tournament_games_registered")
-        return {
-            "found": True,
-            "ready": computed["ready"],
-            "missing": computed["missing"],
-            "member": bool(fields.get("member")),
-            "startgg": bool(fields.get("startgg")),
-            "payment_ok": "Payment" not in computed["missing"],
-            "games": (
-                [game for game in games if isinstance(game, str)] if isinstance(games, list) else []
-            ),
-            "status": computed["status"],
-        }
+        return lookup_checkin_status(checkin_id)
     except Exception:
         logger.warning("Capability status lookup is temporarily unavailable")
         return JSONResponse(_not_found(), status_code=503)
