@@ -263,7 +263,6 @@ def test_status_batch_waits_for_shared_event_lock_before_reading_requirements(
 
 
 @pytest.mark.db
-@pytest.mark.xfail(strict=False, reason="needs T-026 shared lock")
 def test_requirement_batch_includes_checkin_paused_after_old_status_calculation(
     pg_db, monkeypatch
 ):
@@ -278,9 +277,14 @@ def test_requirement_batch_includes_checkin_paused_after_old_status_calculation(
     calculated, allow_insert = Event(), Event()
     original = postgres.compute_checkin_status
 
+    paused_once = []
+
     def pause_new_checkin(fields, requirements):
         result = original(fields, requirements)
-        if fields.get("tag") == "Concurrent synthetic player":
+        # Pause only begin_checkin's own first calculation; the batch later recomputes the
+        # same row with the new requirements (Pending), which is the behaviour under test.
+        if fields.get("tag") == "Concurrent synthetic player" and not paused_once:
+            paused_once.append(True)
             assert result["status"] == "Ready"
             calculated.set()
             assert allow_insert.wait(10), "Test did not release the paused check-in"
