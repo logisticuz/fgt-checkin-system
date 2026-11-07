@@ -89,6 +89,7 @@ def test_happy_path_continues_check_in(kiosk):
         "bylaws_version": "2026-11-06",
         "privacy_version": "2026-11-06-ebas+app-v1",
         "checkin_id": None,
+        "status_token": None,  # T-034: sent with the attempt (T-035 requires it)
     }
     assert text(page, "#mv2-destination") == "We sent a code by text message to +46******12."
     assert page.evaluate("document.activeElement.id") == "mv2-code"

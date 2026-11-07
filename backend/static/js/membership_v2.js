@@ -326,6 +326,7 @@
       bylaws_version: legalVersion("bylaws"),
       privacy_version: legalVersion("privacy"),
       checkin_id: CHECKIN_ID,
+      status_token: params.get("t") || null, // binds the attempt to this check-in (T-035)
     };
 
     const gen = S.gen;

@@ -432,7 +432,7 @@
     </div>
     <p class="status-text" id="statusText">Checking status...</p>
     <p class="status-help" id="statusHelp"></p>
-    <div class="live-pill" id="live-pill"><span class="live-dot"></span><span id="live-label">Connecting live updates...</span></div>
+    <div class="live-pill" id="live-pill"><span class="live-dot"></span><span id="live-label">Checking for updates</span></div>
 
     <!-- Status table -->
     <div class="status-wrapper">
@@ -535,7 +535,6 @@
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
-    const SSE_TOKEN = {{ sse_token | default("") | tojson }};
     if (KIOSK_MODE) {
       document.getElementById("kiosk-back").classList.remove("hidden");
 
@@ -625,29 +624,17 @@
     const POLL_INTERVAL_MS = 10000;
 
     let intervalId = null;
-    let sseConnected = false;
+    // Public status pages poll only (contract: no SSE on public status pages, no stream token).
 
     function updateLiveIndicator() {
-      const pill = document.getElementById("live-pill");
       const label = document.getElementById("live-label");
-      if (!pill || !label) return;
-      if (sseConnected) {
-        pill.classList.add("connected");
-        label.textContent = "Live updates active";
-      } else {
-        pill.classList.remove("connected");
-        label.textContent = "Connecting live updates...";
-      }
+      if (label) label.textContent = "Checking for updates every 10 seconds";
     }
 
     function startPolling() {
       if (intervalId) clearInterval(intervalId);
       intervalId = setInterval(() => {
-        // Prefer SSE push updates when available.
-        // Polling stays as fallback if SSE is unavailable.
-        if (!sseConnected) {
-          updateStatus();
-        }
+        updateStatus();
       }, POLL_INTERVAL_MS);
     }
 
@@ -771,8 +758,8 @@
       if (inFlight) return;
       if (stopPolling && !force) return;
 
-      // Check polling timeout only when we're in polling fallback mode.
-      if (!sseConnected) {
+      // Stop after MAX_POLLS automatic checks; the refresh button resets the counter.
+      {
         pollCount++;
         if (pollCount > MAX_POLLS) {
           setText("statusText", "Timeout - please refresh manually");
@@ -836,7 +823,7 @@
         setText("playerName", data?.name ?? name ?? "Unknown");
 
         // Check if backend explicitly says this entry is already checked in.
-        // Keep polling otherwise so participant page updates even if SSE fails.
+        // Keep polling otherwise so the participant page keeps updating.
         if (data?.already_checked_in) {
           if (missingStartgg) {
             setText("statusText", "A TO is adding you manually in Start.gg");
@@ -902,54 +889,11 @@
       updateStatus(true);
     }
 
-    // Start with one immediate check, then keep fallback polling if SSE is unavailable.
+    // Start with one immediate check, then keep polling.
     updateStatus();
     startPolling();
     updateLiveIndicator();
 
-    // === SSE for real-time updates from TO ===
-    let eventSource = null;
-
-    function connectSSE() {
-      const sseUrl = SSE_TOKEN ? `/api/events/stream?token=${encodeURIComponent(SSE_TOKEN)}` : '/api/events/stream';
-      console.log('Connecting to SSE for real-time updates...');
-
-      try {
-        eventSource = new EventSource(sseUrl);
-
-        eventSource.onopen = function() {
-          console.log('SSE connected - will auto-refresh on TO updates');
-          sseConnected = true;
-          updateLiveIndicator();
-        };
-
-        eventSource.addEventListener('update', function(e) {
-          console.log('SSE update received:', e.data);
-          // TO made a change - refresh immediately
-          updateStatus(true);
-        });
-
-        eventSource.addEventListener('checkin', function(e) {
-          console.log('SSE checkin event:', e.data);
-          // Something changed - refresh immediately
-          updateStatus(true);
-        });
-
-        eventSource.onerror = function(e) {
-          console.log('SSE error, will retry...');
-          sseConnected = false;
-          updateLiveIndicator();
-          if (eventSource.readyState === EventSource.CLOSED) {
-            setTimeout(connectSSE, 5000);
-          }
-        };
-      } catch (err) {
-        console.error('SSE not available:', err);
-      }
-    }
-
-    // Connect to SSE after initial status check
-    setTimeout(connectSSE, 2000);
   </script>
 </body>
 </html>

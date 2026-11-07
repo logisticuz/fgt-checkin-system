@@ -437,10 +437,6 @@
       validateEbasForm();
     }
 
-    // Config
-    const WEBHOOK_TOKEN = "{{ n8n_token | default('') }}";
-    const tokenParam = WEBHOOK_TOKEN ? `?token=${encodeURIComponent(WEBHOOK_TOKEN)}` : "";
-
     // Kiosk mode - check sessionStorage (set by /kiosk page)
     const KIOSK_MODE = sessionStorage.getItem("kioskMode") === "true";
 
@@ -471,9 +467,13 @@
     }
     // membership_only=true means user came from Ready page to voluntarily become member
     const membershipOnly = params.get("membership_only") === "true";
+    // T-034: eBas couldn't be checked (outage or engine off). Membership is UNKNOWN: neither done
+    // nor needed. Don't offer "become a member" and don't mark it as done; a TO will help.
+    const membershipUnknown =
+      !membershipOnly && REQUIRE_MEMBERSHIP && params.get("membership") === "unknown";
     const state = {
       // Show eBas section if: membership_only mode OR (membership required AND player needs it)
-      needsEbas: membershipOnly || (REQUIRE_MEMBERSHIP && params.get("ebas") === "true"),
+      needsEbas: membershipOnly || (REQUIRE_MEMBERSHIP && !membershipUnknown && params.get("ebas") === "true"),
       // Only show payment section if payment is REQUIRED AND player needs it (not in membership_only mode)
       needsPayment: !membershipOnly && REQUIRE_PAYMENT && params.get("payment") === "true",
       // Only show Start.gg section if Start.gg is REQUIRED AND player is not registered (not in membership_only mode)
@@ -488,14 +488,33 @@
       eventSlug: params.get("event") || localStorage.getItem("eventSlug") || ""
     };
 
-    // UI helpers
+    // UI helpers (text only: messages can contain server text and game names)
     function showMessage(text, type = "info") {
-      const container = document.getElementById("messages");
-      container.innerHTML = `<div class="message ${type}">${text}</div>`;
+      const message = document.createElement("div");
+      message.className = `message ${type}`;
+      message.textContent = text;
+      document.getElementById("messages").replaceChildren(message);
     }
 
     function clearMessages() {
-      document.getElementById("messages").innerHTML = "";
+      document.getElementById("messages").replaceChildren();
+    }
+
+    // FastAPI error bodies: {"detail": "..."} or {"detail": {"error": "...", ...}}.
+    function serverErrorText(body, fallback) {
+      const detail = body && body.detail;
+      if (typeof detail === "string" && detail.trim()) return detail;
+      if (detail && typeof detail.error === "string" && detail.error.trim()) return detail.error;
+      return fallback;
+    }
+
+    function setStatusUnknown(id) {
+      const icon = document.getElementById(id).querySelector(".status-icon");
+      icon.textContent = "?";
+      icon.title = "Unknown – verification unavailable";
+      icon.setAttribute("aria-label", "unknown");
+      icon.classList.add("status-missing");
+      icon.classList.remove("status-ok");
     }
 
     function setStatus(id, ok) {
@@ -516,7 +535,9 @@
       if (loading) {
         btn.disabled = true;
         btn.dataset.originalText = btn.textContent;
-        btn.innerHTML = `<span class="spinner"></span>${loadingText}`;
+        const spinner = document.createElement("span");
+        spinner.className = "spinner";
+        btn.replaceChildren(spinner, document.createTextNode(loadingText));
       } else {
         btn.disabled = false;
         btn.textContent = btn.dataset.originalText || btn.textContent;
@@ -538,7 +559,10 @@
           setStatus("status-startgg", data.startgg === true);
         }
         if (REQUIRE_MEMBERSHIP) {
-          setStatus("status-member", data.member === true);
+          // While membership is unknown, only a confirmed membership may change the icon.
+          if (!membershipUnknown || data.member === true) {
+            setStatus("status-member", data.member === true);
+          }
         }
         if (REQUIRE_PAYMENT) {
           setStatus("status-payment", data.payment === true);
@@ -584,7 +608,14 @@
 
       // Set initial status icons (only for required items) - from URL params
       if (REQUIRE_STARTGG) setStatus("status-startgg", !state.needsStartgg);
-      if (REQUIRE_MEMBERSHIP) setStatus("status-member", !state.needsEbas);
+      if (REQUIRE_MEMBERSHIP) {
+        if (membershipUnknown) {
+          setStatusUnknown("status-member");
+          showMessage("Verification temporarily unavailable – a TO will help you", "info");
+        } else {
+          setStatus("status-member", !state.needsEbas);
+        }
+      }
       if (REQUIRE_PAYMENT) setStatus("status-payment", !state.needsPayment);
 
       // Show relevant sections
@@ -801,35 +832,34 @@
       setButtonLoading(btn, true);
       clearMessages();
 
-      // Get slug from settings or localStorage
-      const slug = state.eventSlug || localStorage.getItem("eventSlug") || "";
-      const tag = state.tag || localStorage.getItem("tag") || "";
+      // T-034: PATCH /api/player/games (T-022) identifies the player by checkin_id (T-020).
+      const checkinId = params.get("checkin_id") || "";
+      const statusToken = params.get("t") || "";
+      const slug = state.eventSlug || "";
+      const tag = state.tag || "";
 
-      if (!slug || !tag) {
-        showMessage("Missing event or player info. Please go back and check in again.", "error");
+      if (!checkinId) {
+        showMessage("We couldn't link this to your check-in. Please go back and check in again, or ask a TO.", "error");
         setButtonLoading(btn, false);
         return;
       }
 
       try {
-        // POST selected games to backend
+        // PATCH selected games to backend
+        const body = { checkin_id: checkinId, games: selectedNames, tag: tag, slug: slug };
+        if (statusToken) body.status_token = statusToken;
         const response = await fetch("/api/player/games", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tag: tag,
-            slug: slug,
-            games: selectedNames
-          })
+          body: JSON.stringify(body)
         });
 
         if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.detail || "Failed to save games");
+          let err = null;
+          try { err = await response.json(); } catch (parseError) { err = null; }
+          throw new Error(serverErrorText(err, "Failed to save games"));
         }
 
-        // Store selection locally too
-        localStorage.setItem("selectedGames", JSON.stringify(selectedNames));
         state.gamesCount = selectedNames.length;
         state.needsStartgg = false;
 
