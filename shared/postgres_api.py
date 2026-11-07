@@ -3525,7 +3525,21 @@ def _match_or_create_player(
         events_list, game_counts, first_seen, last_seen, last_event
     """
 
-    if tag:
+    # T-068: a check-in already linked to a player (begin_checkin match, a merge or a TO's
+    # live-duplicate decision) keeps that player. Without a uuid: exactly the old path.
+    explicit_uuid = checkin.get("player_uuid")
+    if explicit_uuid:
+        cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (explicit_uuid,))
+        player_row = cur.fetchone()
+        if player_row and tag:
+            # Linked to a profile with ANOTHER tag (a merge / the TO's choice): that profile
+            # keeps its tag; today's tag stays on the archived check-in row only.
+            cur.execute("SELECT tag FROM players WHERE uuid = %s", (explicit_uuid,))
+            profile_tag = (cur.fetchone() or [None])[0]
+            if profile_tag and profile_tag.strip().lower() != str(tag).strip().lower():
+                tag = None
+
+    if not player_row and tag:
         cur.execute(
             f"SELECT {select_cols} FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
             (tag,),
@@ -3897,7 +3911,8 @@ def archive_event(
                            member, member_source, member_lookup_state, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
-                           external_id, startgg_event_id, is_guest, added_via, acquisition_source
+                           external_id, startgg_event_id, is_guest, added_via, acquisition_source,
+                           player_uuid
                     FROM active_event_data
                     WHERE event_slug = %s
                     ORDER BY record_id
@@ -4689,37 +4704,7 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
             if pair_key in seen_pairs or pair_key in dismissed:
                 continue
 
-            reasons = []
-            confidence = "low"
-
-            # 1. Phone match (strongest signal)
-            if a["telephone"] and b["telephone"] and a["telephone"] == b["telephone"]:
-                reasons.append("same_phone")
-                confidence = "high"
-
-            # 2. Tag similarity (case-insensitive)
-            if a["tag"] and b["tag"]:
-                tag_a = a["tag"].lower()
-                tag_b = b["tag"].lower()
-                if tag_a == tag_b:
-                    # Exact case-insensitive match — should have been caught by _match_or_create
-                    reasons.append("exact_tag")
-                    confidence = "high"
-                elif _levenshtein(tag_a, tag_b) <= 2:
-                    reasons.append("similar_tag")
-                    if confidence != "high":
-                        confidence = "medium"
-
-            # 3. Name similarity (case-insensitive)
-            if a["name"] and b["name"]:
-                name_a = a["name"].lower()
-                name_b = b["name"].lower()
-                if name_a == name_b:
-                    reasons.append("exact_name")
-                    if confidence != "high":
-                        confidence = "medium"
-                elif _levenshtein(name_a, name_b) <= 2:
-                    reasons.append("similar_name")
+            reasons, confidence = _duplicate_signals(a, b)
 
             if reasons:
                 seen_pairs.add(pair_key)
@@ -4909,6 +4894,364 @@ def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str
         }
         for row in rows
     ]
+
+
+def _duplicate_signals(a: Dict[str, Any], b: Dict[str, Any]) -> tuple:
+    """The duplicate tool's pair scoring: (reasons, confidence). Shared by the Insights scan
+    and the live check-in hints (T-068), so both always agree on what a duplicate is."""
+    reasons: List[str] = []
+    confidence = "low"
+
+    # 1. Phone match (strongest signal)
+    if a["telephone"] and b["telephone"] and a["telephone"] == b["telephone"]:
+        reasons.append("same_phone")
+        confidence = "high"
+
+    # 2. Tag similarity (case-insensitive)
+    if a["tag"] and b["tag"]:
+        tag_a = a["tag"].lower()
+        tag_b = b["tag"].lower()
+        if tag_a == tag_b:
+            # Exact case-insensitive match — should have been caught by _match_or_create
+            reasons.append("exact_tag")
+            confidence = "high"
+        elif _levenshtein(tag_a, tag_b) <= 2:
+            reasons.append("similar_tag")
+            if confidence != "high":
+                confidence = "medium"
+
+    # 3. Name similarity (case-insensitive)
+    if a["name"] and b["name"]:
+        name_a = a["name"].lower()
+        name_b = b["name"].lower()
+        if name_a == name_b:
+            reasons.append("exact_name")
+            if confidence != "high":
+                confidence = "medium"
+        elif _levenshtein(name_a, name_b) <= 2:
+            reasons.append("similar_name")
+
+    return reasons, confidence
+
+
+# ---------------------------------------------------------------------------
+# Live duplicate hints (T-068): the duplicate tool, applied to the active event
+# ---------------------------------------------------------------------------
+LIVE_HINTS_TABLE = "live_duplicate_hints"
+LIVE_HINTS_PER_CHECKIN = 3
+_CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _identity(name: Any, tag: Any, telephone: Any) -> Dict[str, str]:
+    return {
+        "name": str(name or "").strip(),
+        "tag": str(tag or "").strip(),
+        "telephone": str(telephone or "").strip(),
+    }
+
+
+def _live_fingerprint(row: Dict[str, Any]) -> str:
+    phone = re.sub(r"\D+", "", str(row.get("telephone") or ""))
+    return "|".join(
+        [
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("tag") or "").strip().lower(),
+            phone,
+            str(row.get("player_uuid") or ""),
+        ]
+    )
+
+
+def _live_hints_table_exists(cur) -> bool:
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL", (LIVE_HINTS_TABLE,))
+    return bool(cur.fetchone()[0])
+
+
+def refresh_live_duplicate_hints(event_slug: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Possible duplicates of existing players for the event's check-ins, by record_id.
+
+    A check-in is (re)checked only when its identity fingerprint changed, using the same
+    scoring as the Insights scan, so a refresh with no changes is a few indexed reads.
+    Pairs dismissed with "Not same" (T-056), candidates that no longer exist and the
+    check-in's own player are filtered out on every read. Best effort for the caller:
+    an exception here must never affect check-in.
+    """
+    if not event_slug:
+        return {}
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                if not _live_hints_table_exists(cur):
+                    return {}
+                # One refresher per event at a time (several TO dashboards may refresh).
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('fgt-live-dup:' || %s))", (event_slug,)
+                )
+                cur.execute(
+                    "SELECT record_id, name, tag, telephone, player_uuid "
+                    "FROM active_event_data WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                rows = [
+                    {
+                        "record_id": r[0],
+                        "name": r[1],
+                        "tag": r[2],
+                        "telephone": r[3],
+                        "player_uuid": r[4],
+                    }
+                    for r in cur.fetchall()
+                ]
+                live_ids = [r["record_id"] for r in rows]
+                cur.execute(
+                    "DELETE FROM live_duplicate_hints WHERE event_slug = %s "
+                    "AND NOT (record_id = ANY(%s))",
+                    (event_slug, live_ids),
+                )
+                cur.execute(
+                    "SELECT DISTINCT record_id, fingerprint FROM live_duplicate_hints "
+                    "WHERE event_slug = %s",
+                    (event_slug,),
+                )
+                stored = {}
+                for record_id, fingerprint in cur.fetchall():
+                    stored.setdefault(record_id, set()).add(fingerprint)
+                changed = [
+                    r for r in rows if stored.get(r["record_id"]) != {_live_fingerprint(r)}
+                ]
+                if changed:
+                    cur.execute("SELECT uuid, name, tag, telephone, total_events FROM players")
+                    players = [
+                        {**_identity(p[1], p[2], p[3]), "uuid": p[0], "total_events": p[4] or 0}
+                        for p in cur.fetchall()
+                    ]
+                    dismissed = _dismissed_pair_keys(cur)
+                    for row in changed:
+                        own = row.get("player_uuid") or ""
+                        me = _identity(row["name"], row["tag"], row["telephone"])
+                        found = []
+                        for player in players:
+                            if player["uuid"] == own:
+                                continue
+                            if own and tuple(sorted((own, player["uuid"]))) in dismissed:
+                                continue
+                            reasons, confidence = _duplicate_signals(me, player)
+                            if reasons:
+                                found.append((player["uuid"], reasons, confidence))
+                        found.sort(
+                            key=lambda f: (_CONFIDENCE_ORDER.get(f[2], 3), -len(f[1]), f[0])
+                        )
+                        fingerprint = _live_fingerprint(row)
+                        cur.execute(
+                            "DELETE FROM live_duplicate_hints WHERE record_id = %s",
+                            (row["record_id"],),
+                        )
+                        for candidate, reasons, confidence in found[
+                            :LIVE_HINTS_PER_CHECKIN
+                        ] or [("", [], "low")]:
+                            cur.execute(
+                                """
+                                INSERT INTO live_duplicate_hints
+                                    (event_slug, record_id, fingerprint, candidate_uuid,
+                                     reasons, confidence)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (record_id, candidate_uuid) DO NOTHING
+                                """,
+                                (
+                                    event_slug,
+                                    row["record_id"],
+                                    fingerprint,
+                                    candidate,
+                                    reasons,
+                                    confidence,
+                                ),
+                            )
+                cur.execute(
+                    """
+                    SELECT h.record_id, h.candidate_uuid, h.reasons, h.confidence,
+                           p.tag, p.name, a.player_uuid
+                    FROM live_duplicate_hints h
+                    JOIN active_event_data a ON a.record_id = h.record_id
+                    JOIN players p ON p.uuid = h.candidate_uuid
+                    WHERE h.event_slug = %s AND h.candidate_uuid <> ''
+                      AND h.candidate_uuid IS DISTINCT FROM a.player_uuid
+                    """,
+                    (event_slug,),
+                )
+                hits = cur.fetchall()
+                dismissed = _dismissed_pair_keys(cur)
+    hints: Dict[str, List[Dict[str, Any]]] = {}
+    for record_id, candidate, reasons, confidence, tag, name, own in hits:
+        if own and tuple(sorted((own, candidate))) in dismissed:
+            continue
+        hints.setdefault(record_id, []).append(
+            {
+                "candidate_uuid": candidate,
+                "candidate_tag": (tag or "").strip(),
+                "candidate_name": (name or "").strip(),
+                "reasons": list(reasons or []),
+                "confidence": confidence,
+            }
+        )
+    for items in hints.values():
+        items.sort(key=lambda h: (_CONFIDENCE_ORDER.get(h["confidence"], 3), -len(h["reasons"])))
+    return hints
+
+
+def get_live_duplicate_pair(record_id: str, candidate_uuid: str) -> Optional[Dict[str, Any]]:
+    """Both sides of one live hint, freshly read, for the TO's confirmation dialog."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT record_id, event_slug, name, tag, telephone, player_uuid "
+                "FROM active_event_data WHERE record_id = %s",
+                (record_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            checkin = dict(
+                zip(["record_id", "event_slug", "name", "tag", "telephone", "player_uuid"], row)
+            )
+            cur.execute(
+                "SELECT uuid, name, tag, telephone, total_events FROM players WHERE uuid = ANY(%s)",
+                ([candidate_uuid, checkin["player_uuid"] or candidate_uuid],),
+            )
+            profiles = {r[0]: dict(zip(["uuid", "name", "tag", "telephone", "total_events"], r))
+                        for r in cur.fetchall()}
+            candidate = profiles.get(candidate_uuid)
+            if not candidate:
+                return None
+            cur.execute(
+                "SELECT 1 FROM active_event_data WHERE event_slug = %s AND player_uuid = %s "
+                "LIMIT 1",
+                (checkin["event_slug"], candidate_uuid),
+            )
+            candidate_today = cur.fetchone() is not None
+    own = profiles.get(checkin["player_uuid"]) if checkin["player_uuid"] else None
+    reasons, confidence = _duplicate_signals(
+        _identity(checkin["name"], checkin["tag"], checkin["telephone"]),
+        _identity(candidate["name"], candidate["tag"], candidate["telephone"]),
+    )
+    return {
+        "record_id": record_id,
+        "checkin": {
+            "name": (checkin["name"] or "").strip(),
+            "tag": (checkin["tag"] or "").strip(),
+            "telephone": (checkin["telephone"] or "").strip(),
+            "player_uuid": checkin["player_uuid"],
+            "total_events": (own or {}).get("total_events") or 0,
+            "has_profile": own is not None,
+            "today": True,
+        },
+        "candidate": {
+            "uuid": candidate_uuid,
+            "name": (candidate["name"] or "").strip(),
+            "tag": (candidate["tag"] or "").strip(),
+            "telephone": (candidate["telephone"] or "").strip(),
+            "total_events": candidate["total_events"] or 0,
+            "today": candidate_today,
+        },
+        "reasons": reasons,
+        "confidence": confidence,
+    }
+
+
+def _ensure_checkin_player(record_id: str, user: Optional[Dict[str, Any]] = None) -> str:
+    """The check-in's player uuid; creates a stub profile from the row ONLY when it has none.
+
+    Called only from an explicit TO action on a live duplicate hint (never per check-in).
+    Lock order per docs/locking.md: event (shared), player merges (shared), then the row.
+    """
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT event_slug FROM active_event_data WHERE record_id = %s", (record_id,)
+                )
+                found = cur.fetchone()
+                if not found:
+                    raise ValueError("This check-in no longer exists")
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))",
+                    (found[0],),
+                )
+                cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+                cur.execute(
+                    "SELECT name, tag, email, telephone, player_uuid, event_slug "
+                    "FROM active_event_data WHERE record_id = %s FOR UPDATE",
+                    (record_id,),
+                )
+                row = cur.fetchone()
+                if not row or row[5] != found[0]:
+                    raise ValueError("This check-in changed; refresh and try again")
+                name, tag, email, telephone, player_uuid, event_slug = row
+                if player_uuid:
+                    cur.execute("SELECT 1 FROM players WHERE uuid = %s", (player_uuid,))
+                    if cur.fetchone():
+                        return player_uuid
+                cur.execute(
+                    "INSERT INTO players (name, tag, email, telephone) VALUES (%s, %s, %s, %s) "
+                    "RETURNING uuid",
+                    (name, tag, email, telephone),
+                )
+                stub = cur.fetchone()[0]
+                cur.execute(
+                    "UPDATE active_event_data SET player_uuid = %s WHERE record_id = %s",
+                    (stub, record_id),
+                )
+    actor = user or {}
+    log_action(
+        actor,
+        "player_stub_created",
+        "players",
+        target_event=event_slug,
+        target_record=record_id,
+        target_player=stub,
+        reason="live_duplicate",
+        details=json.dumps({"created_by": "TO action", "source": "live_duplicate"}),
+    )
+    return stub
+
+
+def resolve_live_duplicate(
+    record_id: str,
+    candidate_uuid: str,
+    action: str,
+    user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Apply the TO's choice for a live hint with the EXISTING duplicate tools.
+
+    action "keep_checkin" / "keep_candidate": merge_players (merge history + undo), keeping
+    the clicked profile. "not_same": the T-056 dismissal. Today's tag on the check-in row is
+    never changed. Raises ValueError when the hint is stale (the dialog shows the reason).
+    """
+    if action not in ("keep_checkin", "keep_candidate", "not_same"):
+        raise ValueError("Unknown action")
+    pair = get_live_duplicate_pair(record_id, candidate_uuid)
+    if pair is None:
+        raise ValueError("This possible duplicate is no longer current")
+    own = _ensure_checkin_player(record_id, user)
+    if own == candidate_uuid:
+        raise ValueError("Already the same player")
+    actor = user or {}
+    if action == "not_same":
+        if not dismiss_duplicate_pair(own, candidate_uuid, dismissed_by=actor.get("user_name", "")):
+            raise ValueError("One of the players no longer exists")
+        log_action(
+            actor,
+            "duplicate_dismissed",
+            "players",
+            target_record=record_id,
+            target_player=own,
+            details=json.dumps({"pair": [own, candidate_uuid], "source": "live_duplicate"}),
+            reason="TO marked as not same player (live)",
+        )
+        return {"action": action, "player_uuid": own}
+    keep, remove = (own, candidate_uuid) if action == "keep_checkin" else (candidate_uuid, own)
+    result = merge_players(keep, remove, reason="Live duplicate: same player", user=actor)
+    # TODO(T-067): trigger its recompute here once merged.
+    return {"action": action, **result}
 
 
 def _levenshtein(s1: str, s2: str) -> int:

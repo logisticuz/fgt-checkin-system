@@ -24,6 +24,7 @@ import os
 import logging
 import json
 import re
+import time
 import unicodedata
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
@@ -377,6 +378,7 @@ def register_callbacks(app):
         Output("duplicate-warning", "style"),
         Output("duplicate-warning-text", "children"),
         Output("duplicate-warning-list", "children"),
+        Output("live-dup-store", "data"),
         Input("event-dropdown", "value"),
         Input("interval-refresh", "n_intervals"),
         Input("btn-refresh", "n_clicks"),
@@ -417,6 +419,7 @@ def register_callbacks(app):
                 {"display": "none"},
                 "",
                 [],
+                {},
             )
 
         # Default columns if none specified
@@ -462,6 +465,7 @@ def register_callbacks(app):
                     {"display": "none"},
                     "",
                     [],
+                    {},
                 )
 
             df = pd.DataFrame(data)
@@ -779,6 +783,20 @@ def register_callbacks(app):
             for row in table_rows:
                 row["id"] = row.get("record_id")
 
+            # T-068: possible duplicates of existing players (active event only; best effort,
+            # never affects the table or any check-in if it fails).
+            live_hints = _live_duplicate_hints(selected_slug, is_all_events)
+            if live_hints:
+                for row in table_rows:
+                    hints = live_hints.get(row.get("record_id")) or []
+                    if hints:
+                        others = ", ".join(h["candidate_tag"] or "?" for h in hints)
+                        row["dup_hint"] = f"⚠️ {others}"
+                if any(row.get("dup_hint") for row in table_rows):
+                    cols.append(
+                        {"name": "Duplicate?", "id": "dup_hint", "editable": False}
+                    )
+
             return (
                 table_rows,
                 cols,
@@ -789,6 +807,7 @@ def register_callbacks(app):
                 duplicate_warning_style,
                 duplicate_warning_text,
                 duplicate_warning_list,
+                live_hints,
             )
 
         except Exception as e:
@@ -803,7 +822,22 @@ def register_callbacks(app):
                 {"display": "none"},
                 "",
                 [],
+                {},
             )
+
+    def _live_duplicate_hints(selected_slug, is_all_events):
+        """Live duplicate hints for the ACTIVE event only; {} on any problem (T-068)."""
+        if is_all_events or not selected_slug:
+            return {}
+        try:
+            active_slug = ((get_active_settings() or {}).get("active_event_slug") or "").strip()
+            refresh_fn = getattr(storage_api, "refresh_live_duplicate_hints", None)
+            if not refresh_fn or selected_slug != active_slug:
+                return {}
+            return refresh_fn(selected_slug) or {}
+        except Exception:
+            logger.exception("Live duplicate hints failed (ignored; check-ins unaffected)")
+            return {}
 
     @app.callback(
         Output("duplicate-warning", "style", allow_duplicate=True),
@@ -1699,8 +1733,9 @@ def register_callbacks(app):
         Output("needs-attention-count", "children"),
         Input("checkins-table", "data"),
         Input("requirements-store", "data"),  # Task 2.2: Respect requirements
+        Input("live-dup-store", "data"),  # T-068: possible duplicates (a soft hint)
     )
-    def update_needs_attention(table_data, requirements):
+    def update_needs_attention(table_data, requirements, live_hints=None):
         """
         Build a list of players who are missing ACTIVE requirements only.
         Shows what each player is missing with icons to help TOs prioritize assistance.
@@ -1720,6 +1755,8 @@ def register_callbacks(app):
         # Helper to check if value indicates "OK" (includes icon ✓ or boolean true)
         def is_ok(val):
             return val == "✓" or val is True or str(val).lower() == "true"
+
+        duplicate_items = _live_duplicate_items(table_data, live_hints or {})
 
         needs_help = []
         for row in table_data:
@@ -1756,6 +1793,8 @@ def register_callbacks(app):
                 )
 
         if not needs_help:
+            if duplicate_items:
+                return duplicate_items, str(len(duplicate_items))
             return (
                 html.P(
                     "✅ All players are ready!", style={"color": "#10b981", "fontWeight": "600"}
@@ -1849,7 +1888,242 @@ def register_callbacks(app):
                 )
             )
 
-        return items, str(len(needs_help))
+        return items + duplicate_items, str(len(needs_help) + len(duplicate_items))
+
+    _REASON_LABELS = {
+        "same_phone": "same phone",
+        "exact_tag": "same tag",
+        "similar_tag": "similar tag",
+        "exact_name": "same name",
+        "similar_name": "similar name",
+    }
+
+    def _reason_text(reasons):
+        return ", ".join(_REASON_LABELS.get(r, r.replace("_", " ")) for r in reasons or [])
+
+    def _live_duplicate_items(table_data, live_hints):
+        """One Needs-attention item per possible duplicate (T-068). Clicking opens the dialog."""
+        items = []
+        for row in table_data or []:
+            record_id = row.get("record_id") or ""
+            for hint in live_hints.get(record_id) or []:
+                today = row.get("tag") or row.get("name") or "?"
+                items.append(
+                    html.Button(
+                        [
+                            html.Div(
+                                [
+                                    html.Span("⚠️ ", style={"marginRight": "0.25rem"}),
+                                    html.Span(
+                                        f"Possible duplicate: {today} ↔ "
+                                        f"{hint.get('candidate_tag') or '?'}",
+                                        style={"color": "#fff", "fontWeight": "500"},
+                                    ),
+                                ],
+                                style={"display": "flex", "alignItems": "center"},
+                            ),
+                            html.Div(
+                                f"{_reason_text(hint.get('reasons'))} · click to review",
+                                style={
+                                    "color": "#fbbf24",
+                                    "fontSize": "0.75rem",
+                                    "marginLeft": "1.5rem",
+                                    "marginTop": "0.2rem",
+                                },
+                            ),
+                        ],
+                        id={
+                            "type": "live-dup-open",
+                            "record": record_id,
+                            "cand": hint.get("candidate_uuid") or "",
+                        },
+                        n_clicks=0,
+                        className="live-dup-item",
+                        title="Review this possible duplicate",
+                        style={
+                            "display": "block",
+                            "width": "100%",
+                            "textAlign": "left",
+                            "cursor": "pointer",
+                            "font": "inherit",
+                            "padding": "0.75rem",
+                            "marginBottom": "0.5rem",
+                            "backgroundColor": "rgba(245, 158, 11, 0.06)",
+                            "border": "none",
+                            "borderRadius": "8px",
+                            "borderLeft": "3px solid #f59e0b",
+                        },
+                    )
+                )
+        return items
+
+    def _mask_phone(phone):
+        digits = re.sub(r"\D+", "", str(phone or ""))
+        if len(digits) <= 4:
+            return "•" * len(digits) if digits else "–"
+        return digits[:2] + "•" * (len(digits) - 4) + digits[-2:]
+
+    def _live_profile_column(title, profile, accent):
+        line = {"color": COLORS["text_secondary"], "fontSize": "0.8rem", "margin": "0.15rem 0"}
+        return html.Div(
+            [
+                html.Div(
+                    title,
+                    style={
+                        "color": accent,
+                        "fontSize": "0.7rem",
+                        "fontWeight": "700",
+                        "letterSpacing": "0.05em",
+                        "textTransform": "uppercase",
+                    },
+                ),
+                html.Div(
+                    profile.get("tag") or "?",
+                    className="live-dup-tag",
+                    style={"color": COLORS["text_primary"], "fontWeight": "700", "fontSize": "1rem"},
+                ),
+                html.Div(profile.get("name") or "–", style=line),
+                html.Div(f"Events: {profile.get('total_events') or 0}", style=line),
+                html.Div(
+                    "Checked in today: " + ("yes" if profile.get("today") else "no"), style=line
+                ),
+                html.Div(f"Phone: {_mask_phone(profile.get('telephone'))}", style=line),
+            ],
+            style={
+                "flex": "1",
+                "backgroundColor": COLORS["bg_card"],
+                "border": f"1px solid {COLORS['border']}",
+                "borderRadius": "8px",
+                "padding": "0.75rem",
+            },
+        )
+
+    @app.callback(
+        Output("live-dup-modal", "style"),
+        Output("live-dup-body", "children"),
+        Output("btn-live-dup-keep-a", "children"),
+        Output("btn-live-dup-keep-b", "children"),
+        Output("live-dup-target", "data"),
+        Output("live-dup-feedback", "children", allow_duplicate=True),
+        Input({"type": "live-dup-open", "record": ALL, "cand": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_live_duplicate(n_clicks_list):
+        """T-068: show both profiles side by side; nothing changes until a dialog button."""
+        triggered = _triggered_click()
+        if not triggered:
+            raise PreventUpdate
+        record_id = triggered.get("record", "")
+        candidate = triggered.get("cand", "")
+        try:
+            pair_fn = getattr(storage_api, "get_live_duplicate_pair", None)
+            pair = pair_fn(record_id, candidate) if pair_fn else None
+        except Exception:
+            logger.exception("Loading live duplicate pair failed")
+            pair = None
+        if not pair:
+            return (
+                {"display": "none"},
+                no_update,
+                no_update,
+                no_update,
+                None,
+                html.Span(
+                    "This possible duplicate is no longer current.",
+                    style={"color": COLORS["accent_yellow"], "fontSize": "0.85rem"},
+                ),
+            )
+        today, other = pair["checkin"], pair["candidate"]
+        body = [
+            html.Div(
+                [
+                    _live_profile_column("A · today's check-in", today, COLORS["accent_yellow"]),
+                    html.Div(
+                        "↔",
+                        style={
+                            "alignSelf": "center",
+                            "color": COLORS["text_secondary"],
+                            "fontSize": "1.4rem",
+                        },
+                    ),
+                    _live_profile_column("B · existing profile", other, COLORS["accent_blue"]),
+                ],
+                style={"display": "flex", "gap": "0.75rem", "alignItems": "stretch"},
+            ),
+            html.Div(
+                f"Why: {_reason_text(pair.get('reasons'))} ({pair.get('confidence', 'low')})",
+                id="live-dup-reasons",
+                style={"color": "#fbbf24", "fontSize": "0.8rem", "marginTop": "0.6rem"},
+            ),
+        ]
+        target = {"record_id": record_id, "candidate_uuid": candidate}
+        return (
+            {"display": "block"},
+            body,
+            f"Keep {today.get('tag') or 'A'}",
+            f"Keep {other.get('tag') or 'B'}",
+            target,
+            "",
+        )
+
+    @app.callback(
+        Output("live-dup-modal", "style", allow_duplicate=True),
+        Output("live-dup-target", "data", allow_duplicate=True),
+        Output("live-dup-feedback", "children", allow_duplicate=True),
+        Output("sse-trigger", "data", allow_duplicate=True),
+        Input("btn-live-dup-keep-a", "n_clicks"),
+        Input("btn-live-dup-keep-b", "n_clicks"),
+        Input("btn-live-dup-not-same", "n_clicks"),
+        Input("btn-live-dup-cancel", "n_clicks"),
+        State("live-dup-target", "data"),
+        prevent_initial_call=True,
+    )
+    def resolve_live_duplicate_choice(_a, _b, _not_same, _cancel, target):
+        """T-068: apply the TO's choice with the existing merge / dismissal (server re-checks)."""
+        clicked = _triggered_click()
+        if not clicked:
+            raise PreventUpdate
+        hidden = {"display": "none"}
+        if clicked == "btn-live-dup-cancel" or not target:
+            return hidden, None, "", no_update
+        action = {
+            "btn-live-dup-keep-a": "keep_checkin",
+            "btn-live-dup-keep-b": "keep_candidate",
+            "btn-live-dup-not-same": "not_same",
+        }[clicked]
+        audit_user, _ = _dashboard_actor()
+        try:
+            resolve_fn = getattr(storage_api, "resolve_live_duplicate", None)
+            if not resolve_fn:
+                raise RuntimeError("live duplicate actions are not available")
+            result = resolve_fn(
+                target.get("record_id", ""),
+                target.get("candidate_uuid", ""),
+                action,
+                user=audit_user,
+            )
+        except ValueError as error:
+            message = html.Span(
+                f"Nothing changed: {error}",
+                style={"color": COLORS["accent_yellow"], "fontSize": "0.85rem"},
+            )
+            return hidden, None, message, time.time()
+        except Exception:
+            logger.exception("Live duplicate action failed")
+            message = html.Span(
+                "Couldn't save the decision – nothing changed. Try again.",
+                style={"color": COLORS["accent_red"], "fontSize": "0.85rem"},
+            )
+            return hidden, None, message, no_update
+        if action == "not_same":
+            text = "Marked as different players."
+        else:
+            text = (
+                f"Merged: kept {result.get('keep_player_tag') or 'the chosen profile'}. "
+                "Undo in Insights → Duplicates → Merge history."
+            )
+        message = html.Span(text, style={"color": COLORS["accent_green"], "fontSize": "0.85rem"})
+        return hidden, None, message, time.time()
 
     # -------------------------------------------------------------------------
     # Toggle "Needs Attention" collapse state
@@ -5304,8 +5578,9 @@ def register_callbacks(app):
         Output("needs-attention-section", "style"),
         Input("checkins-table", "data"),
         Input("requirements-store", "data"),  # Task 2.2: Respect requirements
+        Input("live-dup-store", "data"),  # T-068: a soft hint, never a Ready requirement
     )
-    def update_stats(table_data, requirements):
+    def update_stats(table_data, requirements, live_hints=None):
         """
         Update stats cards reactively when check-ins table data changes.
         Also shows/hides the needs-attention section.
@@ -5345,8 +5620,14 @@ def register_callbacks(app):
             if missing_something:
                 needs_attention += 1
 
-        # Show needs-attention section if there are players needing help
-        if needs_attention > 0:
+        # Show needs-attention section if there are players needing help (or, T-068, a
+        # possible duplicate to review; that never counts towards needs_attention/Ready).
+        visible_records = {row.get("record_id") for row in table_data}
+        has_duplicate_hint = any(
+            hints and record_id in visible_records
+            for record_id, hints in (live_hints or {}).items()
+        )
+        if needs_attention > 0 or has_duplicate_hint:
             visible_style = {
                 "backgroundColor": "#12121a",
                 "borderRadius": "12px",

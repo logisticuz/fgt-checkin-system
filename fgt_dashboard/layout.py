@@ -366,6 +366,9 @@ def create_layout():
                 id="active-filter", data="all"
             ),  # Current filter: all, pending, ready, no-payment
             dcc.Store(id="sse-trigger", data=0),  # Incremented by SSE events to trigger refresh
+            # T-068: live "possible duplicate" hints by record_id, and the pair being reviewed
+            dcc.Store(id="live-dup-store", data={}),
+            dcc.Store(id="live-dup-target", data=None),
             dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
             # T-029: destructive event actions need a confirmation that names both the current
             # and the target event. The target is captured when the dialog opens, so the action
@@ -889,6 +892,85 @@ def create_layout():
                                                 style={"marginTop": "1rem"},
                                             ),
                                         ],
+                                    ),
+                                    # T-068: result of a live duplicate decision
+                                    html.Div(
+                                        id="live-dup-feedback",
+                                        role="status",
+                                        **{"aria-live": "polite"},
+                                        style={"marginTop": "0.5rem"},
+                                    ),
+                                    # T-068: "same player?" confirmation (T-029 style)
+                                    html.Div(
+                                        id="live-dup-modal",
+                                        role="alertdialog",
+                                        **{"aria-labelledby": "live-dup-title"},
+                                        style={"display": "none"},
+                                        children=html.Div(
+                                            style={
+                                                **STYLES["card"],
+                                                "maxWidth": "640px",
+                                                "margin": "1rem auto 0",
+                                                "border": f"2px solid {COLORS['accent_yellow']}",
+                                            },
+                                            children=[
+                                                html.H3(
+                                                    "⚠️ Possible duplicate – same player?",
+                                                    id="live-dup-title",
+                                                    style=STYLES["section_title"],
+                                                ),
+                                                html.Div(id="live-dup-body"),
+                                                html.P(
+                                                    "Keep = merge into that profile "
+                                                    "(undo in Insights → Duplicates → "
+                                                    "Merge history). Not same = never "
+                                                    "suggest this pair again. Nothing "
+                                                    "here affects Ready status.",
+                                                    style={
+                                                        "color": COLORS["text_muted"],
+                                                        "fontSize": "0.8rem",
+                                                        "marginTop": "0.75rem",
+                                                    },
+                                                ),
+                                                html.Div(
+                                                    style={
+                                                        "display": "flex",
+                                                        "gap": "0.6rem",
+                                                        "flexWrap": "wrap",
+                                                        "marginTop": "1rem",
+                                                    },
+                                                    children=[
+                                                        html.Button(
+                                                            "Keep A",
+                                                            id="btn-live-dup-keep-a",
+                                                            n_clicks=0,
+                                                            style=STYLES["button_primary"],
+                                                        ),
+                                                        html.Button(
+                                                            "Keep B",
+                                                            id="btn-live-dup-keep-b",
+                                                            n_clicks=0,
+                                                            style=STYLES["button_primary"],
+                                                        ),
+                                                        html.Button(
+                                                            "Not same",
+                                                            id="btn-live-dup-not-same",
+                                                            n_clicks=0,
+                                                            style=STYLES["button_secondary"],
+                                                        ),
+                                                        html.Button(
+                                                            "Cancel",
+                                                            id="btn-live-dup-cancel",
+                                                            n_clicks=0,
+                                                            style={
+                                                                **STYLES["button_secondary"],
+                                                                "opacity": 0.8,
+                                                            },
+                                                        ),
+                                                    ],
+                                                ),
+                                            ],
+                                        ),
                                     ),
                                     # Main checkins table
                                     html.Div(
