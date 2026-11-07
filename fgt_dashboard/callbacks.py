@@ -17,6 +17,7 @@ from shared.storage import (
     get_audit_log,
 )
 import shared.storage as storage_api
+from shared.event_games import fetch_tournament_games, games_from_settings
 import pandas as pd
 import requests
 import os
@@ -256,6 +257,64 @@ def _fetch_confirmation_text(target_slug, target_name, settings):
     else:
         lines.append("This refreshes the current event's data.")
     return "\n".join(lines)
+
+
+def _manual_game_choices(selected_slug):
+    """Resolve labels and raw allowed values from the same selected-event sources."""
+    if (
+        not isinstance(selected_slug, str)
+        or not selected_slug.strip()
+        or selected_slug == "__ALL__"
+    ):
+        return [], "Select a specific event to load its games."
+    warnings, sources = [], []
+    try:
+        settings = get_active_settings() or {}
+    except Exception:
+        settings = {}
+    names = games_from_settings(settings, selected_slug)
+    if names is not None:
+        sources.append(f"from start.gg event {selected_slug} (saved event data)")
+    else:
+        names, unavailable = fetch_tournament_games(selected_slug, STARTGG_API_KEY)
+        if unavailable:
+            warnings.append(f"Start.gg games unavailable: {unavailable}.")
+        else:
+            sources.append(f"from start.gg event {selected_slug}")
+    try:
+        reader = getattr(storage_api, "get_recorded_event_games", None)
+        if not callable(reader):
+            raise RuntimeError("Recorded game reader unavailable")
+        recorded = reader(selected_slug)
+        if not isinstance(recorded, list):
+            raise RuntimeError("Recorded games unavailable")
+        recorded = [name for name in recorded if isinstance(name, str) and name.strip()]
+        if recorded:
+            sources.append("from recorded check-ins")
+    except Exception:
+        recorded = []
+        warnings.append("Recorded check-in games are unavailable.")
+    try:
+        reader = getattr(storage_api, "get_game_aliases", None)
+        aliases = reader() if callable(reader) else {}
+        aliases = {
+            key.strip().lower(): value
+            for key, value in (aliases.items() if isinstance(aliases, dict) else [])
+            if isinstance(key, str) and isinstance(value, str) and value.strip()
+        }
+    except Exception:
+        aliases = {}
+    raw_names = set(names + recorded)
+    options = [
+        {"label": aliases.get(name.strip().lower(), name), "value": name} for name in raw_names
+    ]
+    options.sort(key=lambda option: (str(option["label"]).casefold(), option["value"]))
+    help_text = f"Games for {selected_slug}: " + (
+        "; ".join(sources) if sources else "no source available"
+    )
+    if not options:
+        warnings.append("No games are available for this event.")
+    return options, help_text + ". " + " ".join(warnings)
 
 
 def register_callbacks(app):
@@ -1538,7 +1597,6 @@ def register_callbacks(app):
         Output("game-dropdown", "value"),
         Output("game-help", "children"),
         Output("events-map-store", "data"),
-        Output("input-manual-games", "options"),
         Input("confirm-fetch-event-dialog", "submit_n_clicks"),
         Input("interval-refresh", "n_intervals"),
         Input("event-dropdown", "value"),
@@ -1551,7 +1609,7 @@ def register_callbacks(app):
         """
         fields = _get_active_settings_fields()
         if not fields:
-            return [], None, "⚠️ Could not read active settings.", [], []
+            return [], None, "⚠️ Could not read active settings.", []
 
         # 1) Options from default_game (multi-select)
         names = fields.get("default_game") or []  # list[str]
@@ -1579,7 +1637,20 @@ def register_callbacks(app):
         # 4) Help text
         help_text = "Games populated from settings (default_game)."
 
-        return options, value, help_text, mapping, options
+        return options, value, help_text, mapping
+
+    @app.callback(
+        Output("input-manual-games", "options"),
+        Output("manual-games-help", "children"),
+        Input("event-dropdown", "value"),
+        Input("confirm-fetch-event-dialog", "submit_n_clicks"),
+        Input("manual-checkin-panel", "style"),
+        Input("manual-checkin-feedback", "children"),
+    )
+    def fill_manual_game_options(selected_slug, _confirmed, panel_style, _feedback):
+        if isinstance(panel_style, dict) and panel_style.get("display") == "none":
+            return no_update, no_update
+        return _manual_game_choices(selected_slug)
 
     # -------------------------------------------------------------------------
     # Populate "Needs Attention" section with players missing requirements
@@ -5602,9 +5673,9 @@ def register_callbacks(app):
         require_payment = settings.get("require_payment") is True
 
         selected_games = list(dict.fromkeys(input_games or []))
-        # Same whitelist source as the player's own games endpoint (T-022): the event's
-        # configured games. Unknown names are rejected instead of stored.
-        allowed_games = [g for g in (settings.get("default_game") or []) if isinstance(g, str)]
+        # Options and submission share the selected event's raw game values.
+        game_options, _game_help = _manual_game_choices(selected_slug)
+        allowed_games = [option["value"] for option in game_options]
         unknown = [g for g in selected_games if g not in allowed_games]
         if unknown:
             return warn(f"❌ Unknown game(s) for this event: {', '.join(unknown)}", "#ef4444")
