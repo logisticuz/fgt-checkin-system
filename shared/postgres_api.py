@@ -691,6 +691,31 @@ def update_checkin(
     if not record_id:
         return None
     with _get_pool().connection() as conn, conn.transaction():
+        with conn.cursor() as cur:
+            # Discover the event without a row lock, then follow the event -> row order.
+            cur.execute(
+                "SELECT event_slug FROM active_event_data WHERE record_id = %s", (record_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            event_slug = row[0]
+            slugs = {event_slug}
+            target_slug = (fields or {}).get("event_slug")
+            if isinstance(target_slug, str):
+                slugs.add(target_slug)
+            for slug in sorted(slugs):
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (slug,)
+                )
+            cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+            cur.execute(
+                "SELECT record_id FROM active_event_data "
+                "WHERE record_id = %s AND event_slug = %s FOR UPDATE",
+                (record_id, event_slug),
+            )
+            if not cur.fetchone():
+                return None
         return _update_checkin_with_status(conn, record_id, fields)
 
 
@@ -729,9 +754,22 @@ def delete_checkin(record_id: str) -> bool:
     if not record_id:
         return False
 
-    with _get_pool().connection() as conn:
+    with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM active_event_data WHERE record_id = %s", (record_id,))
+            cur.execute(
+                "SELECT event_slug FROM active_event_data WHERE record_id = %s", (record_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            event_slug = row[0]
+            cur.execute(
+                "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,)
+            )
+            cur.execute(
+                "DELETE FROM active_event_data WHERE record_id = %s AND event_slug = %s",
+                (record_id, event_slug),
+            )
             return cur.rowcount > 0
 
 
@@ -755,6 +793,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             cur.execute(
                 "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,)
             )
+            cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
             existing = None
             if tag or name:
                 column = "tag" if tag else "name"
@@ -3013,6 +3052,10 @@ def reopen_event(
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (event_slug,)
+                )
+                cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+                cur.execute(
                     """
                     SELECT event_date, event_display_name
                     FROM event_stats
@@ -3655,7 +3698,36 @@ def merge_players(
         with conn.transaction():
             with conn.cursor() as cur:
                 # 1. Load both players
-                cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+                cur.execute("SET LOCAL lock_timeout = '10s'")
+                for lock_attempt in range(3):
+                    # Retry only the lock phase if an incoming check-in adds a new event.
+                    cur.execute("SAVEPOINT player_event_locks")
+                    cur.execute(
+                        "SELECT DISTINCT event_slug FROM active_event_data "
+                        "WHERE player_uuid = ANY(%s)",
+                        ([keep_uuid, remove_uuid],),
+                    )
+                    locked_slugs = sorted(row[0] for row in cur.fetchall())
+                    for slug in locked_slugs:
+                        cur.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (slug,)
+                        )
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+                    cur.execute(
+                        "SELECT DISTINCT event_slug FROM active_event_data "
+                        "WHERE player_uuid = ANY(%s)",
+                        ([keep_uuid, remove_uuid],),
+                    )
+                    if any(row[0] not in locked_slugs for row in cur.fetchall()):
+                        cur.execute("ROLLBACK TO SAVEPOINT player_event_locks")
+                        cur.execute("RELEASE SAVEPOINT player_event_locks")
+                        continue
+                    cur.execute("RELEASE SAVEPOINT player_event_locks")
+                    break
+                else:
+                    raise ValueError(
+                        "Active check-ins changed during lock acquisition; retry the merge"
+                    )
                 cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (keep_uuid,))
                 keep_row = cur.fetchone()
                 if not keep_row:
@@ -3900,7 +3972,36 @@ def undo_merge(
 
     with _get_pool().connection() as conn, conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+            cur.execute("SET LOCAL lock_timeout = '10s'")
+            cur.execute("SELECT keep_uuid, remove_uuid FROM merge_log WHERE id = %s", (merge_id,))
+            players = cur.fetchone()
+            if not players:
+                raise ValueError("Merge log entry not found")
+            for lock_attempt in range(3):
+                cur.execute("SAVEPOINT player_event_locks")
+                cur.execute(
+                    "SELECT DISTINCT event_slug FROM active_event_data "
+                    "WHERE player_uuid = ANY(%s)",
+                    (list(players),),
+                )
+                locked_slugs = sorted(row[0] for row in cur.fetchall())
+                for slug in locked_slugs:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (slug,)
+                    )
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+                cur.execute(
+                    "SELECT DISTINCT event_slug FROM active_event_data WHERE player_uuid = ANY(%s)",
+                    (list(players),),
+                )
+                if any(row[0] not in locked_slugs for row in cur.fetchall()):
+                    cur.execute("ROLLBACK TO SAVEPOINT player_event_locks")
+                    cur.execute("RELEASE SAVEPOINT player_event_locks")
+                    continue
+                cur.execute("RELEASE SAVEPOINT player_event_locks")
+                break
+            else:
+                raise ValueError("Active check-ins changed during lock acquisition; retry the undo")
             cur.execute("SELECT * FROM merge_log WHERE id = %s FOR UPDATE", (merge_id,))
             row = cur.fetchone()
             if not row:

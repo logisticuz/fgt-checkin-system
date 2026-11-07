@@ -13,6 +13,7 @@ from datetime import date
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+from status_api import verify_capability
 
 from shared import (
     membership_crypto as crypto,
@@ -67,6 +68,7 @@ _FIELD_NAMES = {
 }
 _MESSAGES = {
     "not_found": "Membership attempt not found.",
+    "not_owner": "Please check in again or ask a TO to verify your check-in.",
     "invalid_request": "Please check the request and try again.",
     "consent_required": "Please accept both the bylaws and privacy information.",
     "stale_texts": "The membership information has changed. Please reload and accept it again.",
@@ -580,6 +582,10 @@ async def start(request: Request):
     if payload is None:
         return _reply(400, error_code="invalid_request")
     details = _validate_start(payload)
+    if not isinstance(details, JSONResponse) and not verify_capability(
+        details.checkin_id, payload.get("status_token")
+    ):
+        return _reply(403, error_code="not_owner")
     return (
         details if isinstance(details, JSONResponse) else await run_in_threadpool(_start, details)
     )

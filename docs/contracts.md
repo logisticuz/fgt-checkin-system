@@ -170,3 +170,29 @@ A previously verified `member:true` remains true. Clients must treat null as unk
 use `degraded`/`integrations` to offer a retry or TO assistance rather than membership signup.
 These response hints do not change canonical readiness, stored status, or stored flags;
 `ready:false` may therefore accompany an empty response `missing` array during an outage.
+
+## Membership start: check-in ownership
+
+`POST /api/membership/start` additionally requires `checkin_id` and `status_token` in the
+JSON body. The token is the T-024 status capability issued for that exact check-in ID;
+the UI carries it as `t` between pages and sends it as `status_token` on start.
+Missing, invalid, expired, tampered or different-ID capabilities return
+403 `{ok:false,error_code:"not_owner",user_message:...}` before attempt creation, provider
+validation, rate-limit lookup or code delivery. A valid capability still requires the
+check-in to exist in the active event; otherwise start returns 404 `not_found`.
+The token is checked at start and is not stored in membership attempts or returned in
+membership responses. Existing consent, validation and membership-mode checks still apply.
+
+## Active-event write serialization
+
+Active check-in writes lock `hashtext('fgt-event:' || event_slug)` before row locks.
+Single-row updates/deletes and check-in creation use shared event locks; archive, reopen,
+status recomputation and player merge/undo use exclusive event locks. A row update that
+moves events locks both source and destination in sorted order. ID-only writers discover
+the slug without row locks, then lock the event and recheck the original row before writing.
+Player merge/undo acquire affected event slugs in sorted order before the global player-merge
+lock. Check-in creation, updates and restore share that global lock after their event locks.
+The merge lock phase rechecks its event coverage and retries its lock-only savepoint if a
+new affected event appeared while waiting, up to three attempts before a visible error.
+Merge/undo use a 10-second transaction lock timeout; ordinary writers share the global lock.
+No active row is written under an uncovered event. See `docs/locking.md` for the lock table.
