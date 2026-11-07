@@ -3535,11 +3535,9 @@ def _match_or_create_player(
     if confirmed:
         cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (confirmed,))
         player_row = cur.fetchone()
-        cur.execute("SELECT tag FROM players WHERE uuid = %s", (confirmed,))
-        profile_tag = str((cur.fetchone() or [""])[0] or "").strip().lower()
-        # Another identity than the profile's own (e.g. today's typo tag, or no tag at all):
-        # the profile keeps its identity fields.
-        merged_into = profile_tag != str(tag or "").strip().lower()
+        # The profile the TO chose keeps its own identity fields, always (today's details
+        # stay on the archived row only).
+        merged_into = player_row is not None
 
     if not player_row and tag:
         cur.execute(
@@ -3717,12 +3715,18 @@ def _row_identity_hash(name: Any, tag: Any, email: Any, telephone: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _merge_log_has_confirmed_rows(cur) -> bool:
+def _has_confirmed_rows(cur, table: str) -> bool:
+    """Whether migration 012's confirmed_rows column exists on merge_log / dismissals."""
     cur.execute(
         "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
-        "AND table_name = 'merge_log' AND column_name = 'confirmed_rows'"
+        "AND table_name = %s AND column_name = 'confirmed_rows'",
+        (table,),
     )
     return cur.fetchone() is not None
+
+
+def _merge_log_has_confirmed_rows(cur) -> bool:
+    return _has_confirmed_rows(cur, "merge_log")
 
 
 def _current_survivor(cur, survivor: Optional[str]) -> Optional[str]:
@@ -3744,26 +3748,41 @@ def _current_survivor(cur, survivor: Optional[str]) -> Optional[str]:
 
 
 def _confirmed_row_survivor(cur, checkin: Dict[str, Any]) -> Optional[str]:
-    """The profile a merge decision put THIS check-in on (T-068), while its identity is
-    still what it was then. Covers name-only check-ins too. merge_log.confirmed_rows maps
-    record_id -> identity hash; an undone merge no longer counts."""
+    """The profile a TO decision put THIS check-in on (T-068), while its identity is still
+    what it was then. Covers name-only check-ins too. Two durable sources, newest wins:
+    merge_log.confirmed_rows (record_id -> identity hash; the kept profile) for a merge,
+    player_duplicate_dismissals.confirmed_rows (record_id -> {hash, player}) for "Not
+    same". An undone merge or a removed dismissal no longer counts."""
     record_id = checkin.get("record_id")
-    if not record_id or not _merge_log_has_confirmed_rows(cur):
-        return None
-    cur.execute(
-        "SELECT keep_uuid, confirmed_rows ->> %s FROM merge_log "
-        "WHERE undone IS NOT TRUE AND confirmed_rows ? %s ORDER BY id DESC LIMIT 1",
-        (record_id, record_id),
-    )
-    found = cur.fetchone()
-    if not found:
+    if not record_id:
         return None
     current = _row_identity_hash(
         checkin.get("name"), checkin.get("tag"), checkin.get("email"), checkin.get("telephone")
     )
-    if found[1] != current:
-        return None  # edited since the decision: match the identity as it is now
-    return _current_survivor(cur, found[0])
+    decisions = []  # (decided_at, player)
+    if _has_confirmed_rows(cur, "merge_log"):
+        cur.execute(
+            "SELECT merged_at, keep_uuid FROM merge_log "
+            "WHERE undone IS NOT TRUE "
+            "AND confirmed_rows @> jsonb_build_object(%s::text, %s::text) "
+            "ORDER BY id DESC LIMIT 1",
+            (record_id, current),
+        )
+        decisions += cur.fetchall()
+    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+        cur.execute(
+            "SELECT dismissed_at, confirmed_rows -> %s ->> 'player' "
+            "FROM player_duplicate_dismissals "
+            "WHERE confirmed_rows -> %s ->> 'hash' = %s "
+            "ORDER BY dismissed_at DESC, id DESC LIMIT 1",
+            (record_id, record_id, current),
+        )
+        decisions += cur.fetchall()
+    decisions = [d for d in decisions if d[1]]
+    if not decisions:
+        return None  # no decision, or the row was edited since: match it as it is now
+    newest = max(decisions, key=lambda d: d[0] or datetime.min.replace(tzinfo=timezone.utc))
+    return _current_survivor(cur, newest[1])
 
 
 def _merged_survivor(cur, kind: str, value: Any) -> Optional[str]:
@@ -5446,6 +5465,8 @@ def resolve_live_duplicate(
     "keep_checkin" / "keep_candidate" keep the clicked profile. The merge history is what
     makes the decision durable: archive resolves a merged-away tag/email through it.
     """
+    from psycopg.types.json import Json as _Json  # type: ignore
+
     if action not in ("keep_checkin", "keep_candidate", "not_same"):
         raise ValueError("Unknown action")
     if not version:
@@ -5497,6 +5518,19 @@ def resolve_live_duplicate(
                         """,
                         (a, b, str(actor.get("user_name") or "")[:120]),
                     )
+                    if _has_confirmed_rows(cur, "player_duplicate_dismissals"):
+                        cur.execute(
+                            "SELECT name, tag, email, telephone FROM active_event_data "
+                            "WHERE record_id = %s",
+                            (record_id,),
+                        )
+                        identity = _row_identity_hash(*cur.fetchone())
+                        cur.execute(
+                            "UPDATE player_duplicate_dismissals SET confirmed_rows = "
+                            "coalesce(confirmed_rows, '{}'::jsonb) || %s::jsonb "
+                            "WHERE uuid_a = %s AND uuid_b = %s",
+                            (_Json({record_id: {"hash": identity, "player": own}}), a, b),
+                        )
                     _insert_audit(
                         cur,
                         actor,

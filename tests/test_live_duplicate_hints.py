@@ -428,6 +428,61 @@ def test_a_name_only_decision_survives_archive_and_reopen(archive_db, event, ken
     assert names.count("Synthetic Kenji") == 1  # no second profile for the name-only row
 
 
+def test_a_name_only_not_same_survives_archive_and_reopen(archive_db, event, kenji):  # noqa: F811
+    """Round 3 P2#1: the row stays on the TO's distinct profile; the candidate stays gone."""
+    archive_db.seed_checkin(
+        event_slug=event, record_id="rec-not-same", name="Synthetic Kenji", tag=None, email=None,
+        telephone=None,
+    )
+    assert "rec-not-same" in postgres.refresh_live_duplicate_hints(event)
+    decide("rec-not-same", kenji["uuid"], "not_same")
+    stub = row_of(archive_db, "rec-not-same")["player_uuid"]
+    archive(event)
+    assert [r["player_uuid"] for r in archived(archive_db, event)] == [stub]
+    with archive_db.pool.connection() as connection:
+        connection.execute("DELETE FROM active_event_data WHERE event_slug = %s", (event,))
+    postgres.reopen_event(event, restore_active=True, user=TO)
+    assert row_of(archive_db, "rec-not-same")["player_uuid"] == stub
+    assert postgres.refresh_live_duplicate_hints(event) == {}  # not suggested again
+    archive(event)
+    assert {r["player_uuid"] for r in archived(archive_db, event)} == {stub}
+    assert player(archive_db, kenji["uuid"])["total_events"] == kenji["total_events"]
+
+
+def test_undoing_the_not_same_releases_the_row(archive_db, event, kenji):  # noqa: F811
+    archive_db.seed_checkin(
+        event_slug=event, record_id="rec-undo", name="Synthetic Kenji", tag=None, email=None,
+        telephone=None,
+    )
+    decide("rec-undo", kenji["uuid"], "not_same")
+    stub = row_of(archive_db, "rec-undo")["player_uuid"]
+    assert postgres.undo_duplicate_dismissal(stub, kenji["uuid"], user=TO)
+    with archive_db.pool.connection() as connection:
+        with connection.cursor() as cursor:
+            checkin = {"record_id": "rec-undo", "name": "Synthetic Kenji"}
+            assert postgres._confirmed_row_survivor(cursor, checkin) is None
+
+
+def test_a_confirmed_row_never_overwrites_the_chosen_profile(archive_db, event):  # noqa: F811
+    """Round 3 P2#2: both without a tag; the TO's survivor keeps its name and phone."""
+    alice = seed_player(archive_db, "pw-alice", name="Synthetic Alice", telephone="0700000201")
+    with archive_db.pool.connection() as connection:  # a profile without tag or email
+        connection.execute(
+            "UPDATE players SET tag = NULL, email = NULL WHERE uuid = %s", (alice["uuid"],)
+        )
+    archive_db.seed_checkin(
+        event_slug=event, record_id="rec-alicf", name="Synthetic Alicf", tag=None, email=None,
+        telephone="0700000202",
+    )
+    assert "rec-alicf" in postgres.refresh_live_duplicate_hints(event)
+    decide("rec-alicf", alice["uuid"], "keep_candidate")
+    archive(event)
+    assert [r["player_uuid"] for r in archived(archive_db, event)] == [alice["uuid"]]
+    kept = player(archive_db, alice["uuid"])
+    assert (kept["name"], kept["telephone"], kept["tag"]) == ("Synthetic Alice", "0700000201", None)
+    assert archived(archive_db, event)[0]["name"] == "Synthetic Alicf"  # today's on the row
+
+
 def test_the_decision_records_the_rows_it_covers(archive_db, event, kenji):  # noqa: F811
     record = check_in(event, "pw-kenjj")
     result = decide(record, kenji["uuid"], "keep_candidate")

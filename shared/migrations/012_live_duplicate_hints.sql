@@ -19,10 +19,13 @@ CREATE TABLE IF NOT EXISTS live_duplicate_hints (
 CREATE INDEX IF NOT EXISTS live_duplicate_hints_event_idx ON live_duplicate_hints (event_slug);
 
 -- The TO's decision lives only in the existing merge history. Archive resolves:
--- 1) a check-in the decision covered (record_id -> identity hash at decision time),
+-- 1) a check-in a merge or "Not same" decision covered (identity unchanged since),
 -- 2) a merged-away profile's tag/email to the profile that absorbed it.
 ALTER TABLE merge_log ADD COLUMN IF NOT EXISTS confirmed_rows JSONB;
 CREATE INDEX IF NOT EXISTS merge_log_confirmed_rows_idx ON merge_log USING gin (confirmed_rows);
+-- A "Not same" decision keeps its check-in on the TO's profile the same way
+-- (record_id -> {identity hash, player}); the row is removed with the dismissal's undo.
+ALTER TABLE player_duplicate_dismissals ADD COLUMN IF NOT EXISTS confirmed_rows JSONB;
 CREATE INDEX IF NOT EXISTS players_lower_email_idx ON players (lower(email));
 CREATE INDEX IF NOT EXISTS merge_log_removed_tag_idx
     ON merge_log (lower(removed_player_snapshot ->> 'tag'));
