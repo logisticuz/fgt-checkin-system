@@ -267,3 +267,18 @@ backend check requires the deliberately configured live transport.
 Before the client call, 10-digit PNRs use the workflow's fixed century cutoff: YY > 30
 means 19YY, otherwise 20YY. A `-` preserves that rule; `+` selects a century at least
 100 calendar years old. Explicit 12-digit centuries are preserved. PNR is never logged.
+
+## Membership lookup state records the last accepted eBas outcome
+
+`member_lookup_state` is read-only lookup metadata, separate from authoritative `member`:
+`confirmed_member` means a successful explicit true result; `confirmed_nonmember` means
+a successful explicit false result; `unknown` means a technical error or unusable result;
+`skipped` means an explicit skipped result accepted by the canonical integration writer.
+NULL on older/unrecorded rows reads as `unknown`, without a backfill. Status exposes only
+this enum string, never a provider reason or response body.
+
+Only a current accepted eBas result changes this metadata. Orchestration paths that skip
+the writer (missing PNR, unverified ownership, disabled integrations) keep the prior value,
+as do response-only deadline expiries until the native worker finishes. Same-event
+re-check-ins also keep `member`. Errors/skipped results never change membership, confirmed
+negatives preserve protected TO/v2 truth, and lookup results never close in-flight v2 attempts.

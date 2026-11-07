@@ -9,7 +9,7 @@ import status_api as status
 
 from tests.fixtures import make_checkin
 
-STATUS_FIELDS = {"found", "ready", "missing", "member", "startgg", "payment_ok", "games", "status"}
+STATUS_FIELDS = {"found", "ready", "missing", "member", "member_lookup_state", "startgg", "payment_ok", "games", "status"}
 NOW = 1_800_000_000
 
 

@@ -192,6 +192,7 @@ def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "payment_expected": row.get("payment_expected"),
         "payment_valid": row.get("payment_valid"),
         "member": row.get("member"),
+        "member_lookup_state": row.get("member_lookup_state") or "unknown",
         "startgg": row.get("startgg"),
         "is_guest": row.get("is_guest"),
         "status": row.get("status"),
@@ -400,7 +401,7 @@ def get_checkins(
                payment_amount, payment_expected, payment_valid,
                name, email, tag, telephone,
                tournament_games_registered, checkin_uuid, startgg_event_id, external_id,
-               added_via, acquisition_source
+               added_via, acquisition_source, member_lookup_state
         FROM active_event_data
         {where_sql}
         ORDER BY created DESC
@@ -434,6 +435,7 @@ def get_checkins(
             external_id,
             added_via,
             acquisition_source,
+            member_lookup_state,
         ) = row
 
         result.append(
@@ -443,6 +445,7 @@ def get_checkins(
                 "event_slug": event_slug,
                 "status": status,
                 "member": member,
+                "member_lookup_state": member_lookup_state or "unknown",
                 "startgg": startgg,
                 "is_guest": is_guest,
                 "payment_amount": payment_amount,
@@ -606,7 +609,8 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         SELECT record_id, name, tag, email, telephone, status, member, startgg,
                payment_valid, payment_amount, payment_expected,
                tournament_games_registered, checkin_uuid, event_slug,
-               startgg_event_id, external_id, is_guest, added_via, acquisition_source, created
+               startgg_event_id, external_id, is_guest, added_via, acquisition_source, created,
+               member_lookup_state
         FROM active_event_data
         WHERE record_id = %s
         LIMIT 1
@@ -641,6 +645,7 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
         "added_via",
         "acquisition_source",
         "created",
+        "member_lookup_state",
     ]
     row_dict = _row_to_dict(columns, row)
     return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
@@ -1240,8 +1245,19 @@ def apply_integration_result(
             if data.get("email"):
                 update_fields["email"] = data["email"]
     elif src == "ebas":
-        if ok and isinstance(data.get("member"), bool):
+        member_lookup_state = "unknown"
+        if state == "skipped":
+            member_lookup_state = "skipped"
+        elif (
+            ok
+            and isinstance(data.get("member"), bool)
+            and state in (None, "verified_true" if data["member"] else "verified_false")
+            and not error
+        ):
             update_fields["member"] = data["member"]
+            member_lookup_state = (
+                "confirmed_member" if data["member"] else "confirmed_nonmember"
+            )
     elif src in ("swish", "stripe"):
         if data.get("payment_amount") is not None:
             update_fields["payment_amount"] = data.get("payment_amount")
@@ -1288,7 +1304,8 @@ def apply_integration_result(
                 {"source": audit_source, "outcome": "stale_rejected"},
             )
             logger.info(
-                "Integration result rejected: source=%s outcome=stale_rejected", audit_source
+                "Integration result rejected: source=%s outcome=stale_rejected",
+                audit_source,
             )
             return {
                 "checkin_id": checkin_id,
@@ -1299,7 +1316,9 @@ def apply_integration_result(
             }
         if src == "ebas" and "member" in update_fields:
             provenance = _membership_provenance(conn, current)
-            if provenance == "to" or (provenance == "v2" and update_fields["member"] is False):
+            if provenance == "to" or (
+                provenance == "v2" and update_fields["member"] is False
+            ):
                 update_fields.pop("member")
             elif provenance != "v2":
                 update_fields["member_source"] = "ebas_check"
@@ -1322,10 +1341,16 @@ def apply_integration_result(
             raise RuntimeError("Failed to update checkin from integration result")
         if src in ("ebas", "startgg"):
             # src is a closed whitelist, never interpolated directly from arbitrary input.
+            lookup_assignment = ", member_lookup_state = %s" if src == "ebas" else ""
+            result_values = [result_time]
+            if src == "ebas":
+                result_values.append(member_lookup_state)
+            result_values.append(checkin_id)
             conn.execute(
-                f"UPDATE active_event_data SET last_{src}_result_at = COALESCE(%s, clock_timestamp()) "
+                f"UPDATE active_event_data SET last_{src}_result_at = COALESCE(%s, clock_timestamp())"
+                f"{lookup_assignment} "
                 "WHERE record_id = %s",
-                (result_time, checkin_id),
+                result_values,
             )
         _integration_audit(
             conn,
@@ -1333,7 +1358,11 @@ def apply_integration_result(
             "active_event_data",
             event_slug,
             checkin_id,
-            {"source": audit_source, "ok": bool(ok), "updated_fields": sorted(update_fields)},
+            {
+                "source": audit_source,
+                "ok": bool(ok),
+                "updated_fields": sorted(update_fields),
+            },
         )
 
     return {
@@ -3038,7 +3067,7 @@ def archive_event(
                 cur.execute(
                     """
                     SELECT record_id, name, tag, email, telephone, status,
-                           member, member_source, startgg, payment_valid,
+                           member, member_source, member_lookup_state, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
                            external_id, startgg_event_id, is_guest, added_via, acquisition_source
@@ -3081,7 +3110,7 @@ def archive_event(
                         swish_expected_per_game,
                         tournament_games_registered, checkin_uuid,
                         external_id, startgg_event_id, is_guest, added_via, acquisition_source,
-                        archived_at, player_uuid, member_source
+                        archived_at, player_uuid, member_source, member_lookup_state
                     ) VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
@@ -3090,7 +3119,7 @@ def archive_event(
                         %s,
                         %s, %s,
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s
+                        %s, %s, %s, %s
                     )
                     ON CONFLICT (event_slug, source_record_id)
                         WHERE source_record_id IS NOT NULL
@@ -3101,6 +3130,7 @@ def archive_event(
                         email = EXCLUDED.email, telephone = EXCLUDED.telephone,
                         status = EXCLUDED.status, member = EXCLUDED.member,
                         member_source = EXCLUDED.member_source,
+                        member_lookup_state = EXCLUDED.member_lookup_state,
                         startgg = EXCLUDED.startgg, payment_valid = EXCLUDED.payment_valid,
                         payment_amount = EXCLUDED.payment_amount,
                         payment_expected = EXCLUDED.payment_expected,
@@ -3139,6 +3169,7 @@ def archive_event(
                             now,
                             player_results[i][0],
                             c.get("member_source"),
+                            c.get("member_lookup_state"),
                         )
                         for i, c in enumerate(checkins)
                     ],
@@ -3474,7 +3505,7 @@ def reopen_event(
                                 payment_amount, payment_expected,
                                 tournament_games_registered, checkin_uuid,
                                 startgg_event_id, is_guest, added_via, acquisition_source, player_uuid,
-                                created, member_source
+                                created, member_source, member_lookup_state
                             )
                             SELECT
                                 COALESCE(source_record_id, gen_random_uuid()::text),
@@ -3497,7 +3528,7 @@ def reopen_event(
                                 COALESCE(NULLIF(added_via, ''), 'reopen_restore'),
                                 acquisition_source,
                                 player_uuid,
-                                %s, member_source
+                                %s, member_source, member_lookup_state
                             FROM event_archive
                             WHERE event_slug = %s
                             ON CONFLICT (record_id) DO NOTHING
