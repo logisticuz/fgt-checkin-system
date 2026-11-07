@@ -1789,6 +1789,104 @@ def get_event_history() -> List[Dict[str, Any]]:
     return result
 
 
+def get_game_aliases() -> Dict[str, str]:
+    """Read the exact, case-insensitive alias map without changing stored facts."""
+    with _get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('game_aliases')")
+        if cur.fetchone()[0] is None:
+            return {}
+        cur.execute("SELECT alias, canonical FROM game_aliases ORDER BY alias")
+        return {
+            str(alias).strip().lower(): str(canonical).strip()
+            for alias, canonical in cur.fetchall()
+        }
+
+
+def _canonical_game_name(name, aliases):
+    raw = str(name or "").strip()
+    return aliases.get(raw.lower(), raw) if raw else ""
+
+
+def _canonical_game_breakdown(breakdown, aliases):
+    result = {}
+    for game, count in breakdown.items() if isinstance(breakdown, dict) else []:
+        try:
+            count = int(count or 0)
+        except (TypeError, ValueError):
+            continue
+        canonical = _canonical_game_name(game, aliases)
+        if canonical and count > 0:
+            result[canonical] = result.get(canonical, 0) + count
+    return result
+
+
+def get_event_game_stats(
+    event_slugs: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    *,
+    aliases: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Aggregate distinct canonical games per archived check-in; never update rows."""
+    aliases = get_game_aliases() if aliases is None else aliases
+    conditions, params = [], []
+    if event_slugs:
+        conditions.append("event_slug = ANY(%s)")
+        params.append(event_slugs)
+    if start_date:
+        conditions.append("event_date >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("event_date <= %s")
+        params.append(end_date)
+    where_sql = "WHERE " + " AND ".join(conditions) if conditions else ""
+    with _get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_slug, tournament_games_registered FROM event_archive " + where_sql,
+            params,
+        )
+        rows = cur.fetchall()
+    result = {}
+    for slug, raw_games in rows:
+        stats = result.setdefault(
+            slug,
+            {
+                "games_breakdown": {},
+                "game_aliases": {},
+                "total_count": 0,
+                "multi_game_count": 0,
+                "total_game_slots": 0,
+                "metadata_complete": True,
+            },
+        )
+        stats["total_count"] += 1
+        if not isinstance(raw_games, (list, tuple)):
+            stats["metadata_complete"] = False
+            continue
+        games = set()
+        for raw in raw_games:
+            canonical = _canonical_game_name(raw, aliases)
+            if not canonical:
+                continue
+            games.add(canonical)
+            raw = str(raw).strip()
+            if raw.lower() != canonical.lower():
+                stats["game_aliases"].setdefault(canonical, set()).add(raw)
+        stats["total_game_slots"] += len(games)
+        stats["multi_game_count"] += len(games) >= 2
+        for game in games:
+            stats["games_breakdown"][game] = stats["games_breakdown"].get(game, 0) + 1
+    for stats in result.values():
+        stats["games_breakdown"] = dict(
+            sorted(stats["games_breakdown"].items(), key=lambda item: item[0].lower())
+        )
+        stats["game_aliases"] = {
+            canonical: sorted(labels, key=str.lower)
+            for canonical, labels in stats["game_aliases"].items()
+        }
+    return result
+
+
 def get_event_history_dashboard() -> List[Dict[str, Any]]:
     """Return event history for dashboard view."""
     with _get_pool().connection() as conn:
@@ -1809,6 +1907,8 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             )
             rows = cur.fetchall()
 
+    aliases = get_game_aliases()
+    game_stats = get_event_game_stats([row[0] for row in rows], aliases=aliases) if rows else {}
     result = []
     for row in rows:
         (
@@ -1835,6 +1935,27 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             no_show_rate,
         ) = row
 
+        canonical_breakdown = _canonical_game_breakdown(games_breakdown, aliases)
+        archived_games = game_stats.get(event_slug)
+        if archived_games and archived_games["metadata_complete"]:
+            canonical_breakdown = archived_games["games_breakdown"]
+        alias_labels = {
+            canonical: set(labels)
+            for canonical, labels in (archived_games or {}).get("game_aliases", {}).items()
+        }
+        for raw in games_breakdown if isinstance(games_breakdown, dict) else {}:
+            canonical = _canonical_game_name(raw, aliases)
+            if canonical and str(raw).strip().lower() != canonical.lower():
+                alias_labels.setdefault(canonical, set()).add(str(raw).strip())
+        canonical_top = (
+            min(canonical_breakdown, key=lambda game: (-canonical_breakdown[game], game.lower()))
+            if canonical_breakdown
+            else (
+                (_canonical_game_name(most_popular_game, aliases) or None)
+                if not archived_games or not archived_games["metadata_complete"]
+                else None
+            )
+        )
         result.append(
             {
                 "event_slug": event_slug,
@@ -1850,8 +1971,11 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                 "new_players": new_players,
                 "returning_players": returning_players,
                 "retention_rate": retention_rate,
-                "games_breakdown": games_breakdown,
-                "most_popular_game": most_popular_game,
+                "games_breakdown": canonical_breakdown,
+                "game_aliases": {
+                    key: sorted(value, key=str.lower) for key, value in alias_labels.items()
+                },
+                "most_popular_game": canonical_top,
                 "status_breakdown": status_breakdown,
                 "startgg_registered_count": startgg_registered_count or 0,
                 "checked_in_count": checked_in_count or 0,
@@ -1966,43 +2090,11 @@ def get_multi_game_count(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict[str, int]:
-    """Count rows with 2+ registered games in archived check-ins."""
-    conditions: List[str] = []
-    params: List[Any] = []
-
-    if event_slugs:
-        conditions.append("event_slug = ANY(%s)")
-        params.append(event_slugs)
-    if start_date:
-        conditions.append("event_date >= %s")
-        params.append(start_date)
-    if end_date:
-        conditions.append("event_date <= %s")
-        params.append(end_date)
-
-    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    query = f"""
-        SELECT
-            COUNT(*) FILTER (
-                WHERE cardinality(tournament_games_registered) >= 2
-            ) AS multi_game_count,
-            COUNT(*) AS total_count
-        FROM event_archive
-        {where_sql}
-    """
-
-    with _get_pool().connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            row = cur.fetchone()
-
-    if not row:
-        return {"multi_game_count": 0, "total_count": 0}
-
+    """Count check-ins with 2+ distinct canonical games in the selected scope."""
+    stats = get_event_game_stats(event_slugs, start_date, end_date)
     return {
-        "multi_game_count": int(row[0] or 0),
-        "total_count": int(row[1] or 0),
+        "multi_game_count": sum(row["multi_game_count"] for row in stats.values()),
+        "total_count": sum(row["total_count"] for row in stats.values()),
     }
 
 
@@ -2194,7 +2286,10 @@ def get_game_crossover_stats(
 ) -> List[Dict[str, Any]]:
     """Return game-pair crossover counts (distinct players per pair)."""
 
-    conditions: List[str] = ["ea.player_uuid IS NOT NULL"]
+    conditions: List[str] = [
+        "ea.player_uuid IS NOT NULL",
+        "NULLIF(BTRIM(game.value), '') IS NOT NULL",
+    ]
     params: List[Any] = []
 
     if event_slugs:
@@ -2209,11 +2304,12 @@ def get_game_crossover_stats(
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
 
+    aliases = get_game_aliases()
     query = f"""
         WITH player_games AS (
             SELECT DISTINCT
                 ea.player_uuid,
-                game.value AS game
+                COALESCE((%s::jsonb)->>LOWER(BTRIM(game.value)), BTRIM(game.value)) AS game
             FROM event_archive ea
             JOIN LATERAL unnest(
                 COALESCE(ea.tournament_games_registered, ARRAY[]::text[])
@@ -2235,7 +2331,7 @@ def get_game_crossover_stats(
 
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, params + [max(int(limit), 1)])
+            cur.execute(query, [json.dumps(aliases), *params, max(int(limit), 1)])
             rows = cur.fetchall()
 
     result: List[Dict[str, Any]] = []
@@ -2394,43 +2490,20 @@ def get_top_players_history(
 
     selected_game = str(game_filter or "").strip()
     if selected_game:
-        game_sql = """
+        aliases = get_game_aliases()
+        canonical = _canonical_game_name(selected_game, aliases)
+        keys = {key for key, value in aliases.items() if value.lower() == canonical.lower()}
+        keys.add(canonical.lower())
+        conditions.append(
+            """
             EXISTS (
                 SELECT 1
                 FROM unnest(COALESCE(tournament_games_registered, ARRAY[]::TEXT[])) AS g(game_name)
-                WHERE (
-                    (%s = 'SSBU Singles' AND (
-                        LOWER(g.game_name) LIKE '%%ssbu%%'
-                        OR LOWER(g.game_name) LIKE '%%super smash bros ultimate%%'
-                        OR LOWER(g.game_name) = 'smash singles'
-                        OR (LOWER(g.game_name) LIKE '%%smash%%' AND LOWER(g.game_name) LIKE '%%ultimate%%')
-                    ))
-                    OR (%s = 'STREET FIGHTER 6 TOURNAMENT' AND (
-                        LOWER(g.game_name) LIKE '%%street fighter 6%%'
-                        OR LOWER(g.game_name) LIKE '%%sf6%%'
-                        OR regexp_replace(LOWER(g.game_name), '[^a-z0-9]+', '', 'g') IN (
-                            'streetfighter6',
-                            'streetfighter6tournament',
-                            'sf6'
-                        )
-                    ))
-                    OR (%s = 'TEKKEN 8 TOURNAMENT' AND (
-                        LOWER(g.game_name) LIKE '%%tekken 8%%'
-                        OR LOWER(g.game_name) LIKE '%%t8%%'
-                        OR regexp_replace(LOWER(g.game_name), '[^a-z0-9]+', '', 'g') IN (
-                            'tekken8',
-                            'tekken8tournament',
-                            't8'
-                        )
-                    ))
-                    OR (%s NOT IN ('SSBU Singles', 'STREET FIGHTER 6 TOURNAMENT', 'TEKKEN 8 TOURNAMENT')
-                        AND LOWER(g.game_name) = LOWER(%s)
-                    )
-                )
+                WHERE LOWER(BTRIM(g.game_name)) = ANY(%s)
             )
         """
-        conditions.append(game_sql)
-        params.extend([selected_game, selected_game, selected_game, selected_game, selected_game])
+        )
+        params.append(sorted(keys))
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

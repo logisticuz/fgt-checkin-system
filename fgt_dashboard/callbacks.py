@@ -1785,6 +1785,22 @@ def register_callbacks(app):
         else:
             return visible, hidden, hidden
 
+    @app.callback(
+        Output("insights-games-table", "columns"),
+        Input("insights-games-table", "data"),
+        State("insights-games-table", "columns"),
+    )
+    def show_insights_game_aliases(_rows, columns):
+        """Render the canonical label plus an escaped alias note in the existing table."""
+        return [
+            (
+                {**column, "id": "game_label", "presentation": "markdown"}
+                if column.get("id") in {"game", "game_label"}
+                else column
+            )
+            for column in (columns or [])
+        ]
+
     # -------------------------------------------------------------------------
     # Insights - load archived event options + summary KPIs
     # -------------------------------------------------------------------------
@@ -1881,39 +1897,21 @@ def register_callbacks(app):
         if selected_tab != "tab-insights":
             return (no_update,) * 66
 
+        game_aliases = {}
+        try:
+            aliases_fn = getattr(storage_api, "get_game_aliases", None)
+            loaded_aliases = aliases_fn() if aliases_fn else {}
+            if isinstance(loaded_aliases, dict):
+                game_aliases = {
+                    str(key).strip().lower(): str(value).strip()
+                    for key, value in loaded_aliases.items()
+                }
+        except Exception:
+            logger.warning("Failed to load game aliases")
+
         def _normalize_game_name(name: Any) -> str:
             raw = str(name or "").strip()
-            if not raw:
-                return ""
-            key = raw.lower()
-            compact = re.sub(r"[^a-z0-9]+", "", key)
-
-            # SSBU canonicalization
-            if (
-                "ssbu" in key
-                or "super smash bros ultimate" in key
-                or key == "smash singles"
-                or ("smash" in key and "ultimate" in key)
-            ):
-                return "SSBU Singles"
-
-            # SF6 canonicalization
-            if (
-                compact in {"sf6", "streetfighter6", "streetfighter6tournament"}
-                or "street fighter 6" in key
-                or "sf6" == key
-            ):
-                return "STREET FIGHTER 6 TOURNAMENT"
-
-            # Tekken 8 canonicalization
-            if (
-                compact in {"t8", "tekken8", "tekken8tournament"}
-                or "tekken 8" in key
-                or "t8" == key
-            ):
-                return "TEKKEN 8 TOURNAMENT"
-
-            return raw
+            return game_aliases.get(raw.lower(), raw) if raw else ""
 
         def _empty_response(hint: str = "", summary: str = "Insights overview"):
             return (
@@ -2001,6 +1999,42 @@ def register_callbacks(app):
             return _empty_response(
                 "No archived events yet. Archive your first event to unlock insights."
             )
+
+        # Work on derived copies. Archived facts and stored snapshots stay untouched.
+        canonical_events = []
+        for original in events:
+            ev = dict(original)
+            breakdown = ev.get("games_breakdown")
+            normalized = {}
+            labels = {
+                _normalize_game_name(key): set(value)
+                for key, value in (ev.get("game_aliases") or {}).items()
+                if isinstance(value, (list, tuple, set))
+            }
+            if isinstance(breakdown, dict):
+                for raw, value in breakdown.items():
+                    try:
+                        count = int(value or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    canonical = _normalize_game_name(raw)
+                    if not canonical:
+                        continue
+                    if count > 0:
+                        normalized[canonical] = normalized.get(canonical, 0) + count
+                    if str(raw).strip().lower() != canonical.lower():
+                        labels.setdefault(canonical, set()).add(str(raw).strip())
+            ev["games_breakdown"] = normalized
+            ev["game_aliases"] = {
+                key: sorted(value, key=str.lower) for key, value in labels.items()
+            }
+            ev["most_popular_game"] = (
+                min(normalized, key=lambda game: (-normalized[game], game.lower()))
+                if normalized
+                else _normalize_game_name(ev.get("most_popular_game"))
+            )
+            canonical_events.append(ev)
+        events = canonical_events
 
         try:
             live_settings = get_active_settings() or {}
@@ -3025,9 +3059,12 @@ def register_callbacks(app):
 
         # Game distribution leaderboard for selected scope
         game_counts = {}
+        aliases_by_game = {}
         configured_games: Dict[str, Dict[str, int]] = {}
         total_entries = 0
         for ev in selected_events:
+            for canonical, labels in (ev.get("game_aliases") or {}).items():
+                aliases_by_game.setdefault(canonical, set()).update(labels)
             breakdown = ev.get("games_breakdown")
             if isinstance(breakdown, dict):
                 for game, count in breakdown.items():
@@ -3047,9 +3084,20 @@ def register_callbacks(app):
                     for snap_ev in snapshot_events:
                         if not isinstance(snap_ev, dict):
                             continue
-                        normalized_game = _normalize_game_name(snap_ev.get("name"))
+                        event_name = str(snap_ev.get("name") or "").strip()
+                        videogame = snap_ev.get("videogame")
+                        game_name = (
+                            str(videogame.get("name") or "").strip()
+                            if isinstance(videogame, dict)
+                            else ""
+                        )
+                        if game_name and re.search(r"\bdoubles\b", event_name, re.IGNORECASE):
+                            game_name += " Doubles"
+                        normalized_game = _normalize_game_name(game_name or event_name)
                         if not normalized_game:
                             continue
+                        if event_name and event_name.lower() != normalized_game.lower():
+                            aliases_by_game.setdefault(normalized_game, set()).add(event_name)
                         agg = configured_games.setdefault(
                             normalized_game,
                             {"registered": 0, "sets": 0, "games": 0, "configured": 0},
@@ -3068,6 +3116,10 @@ def register_callbacks(app):
                 str(g).lower(),
             ),
         )
+        def _markdown_game_text(value):
+            # Keep provider/user labels as text, never Markdown links, images or HTML.
+            return re.sub(r"([\\`*_{}\[\]()#+.!|<>~\-])", r"\\\1", str(value))
+
         games_rows = []
         for idx, game in enumerate(sorted_games[:20], start=1):
             cnt = _as_int(game_counts.get(game))
@@ -3094,6 +3146,18 @@ def register_callbacks(app):
                 {
                     "rank": idx,
                     "game": game,
+                    "game_label": (
+                        _markdown_game_text(game)
+                        + (
+                            "\n\n*includes aliases: "
+                            + _markdown_game_text(
+                                ", ".join(sorted(aliases_by_game.get(game) or [], key=str.lower))
+                            )
+                            + "*"
+                            if aliases_by_game.get(game)
+                            else ""
+                        )
+                    ),
                     "entries": cnt,
                     "registered": registered,
                     "sets_played": set_count,
