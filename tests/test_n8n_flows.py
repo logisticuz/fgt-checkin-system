@@ -81,7 +81,7 @@ BASE = {
             "Query Start.gg",
             "Webhook",
         },
-        "invariant": "29f4d2f27c1e2de73436ff82c7e3d0a3c37cfe56bdf863c4ac9fbaac45d57278",
+        "invariant": "0c90d9ea186dfe34dfa9e77ddf17a244c5e493703b13dc913d176ea6f23bbd03",  # T-065: videogame.name + Doubles suffix
         "callbacks": 0,
     },
 }
@@ -1543,3 +1543,88 @@ def test_t054_real_backend_acknowledgement_contract(
             "tournament_games_registered",
         ):
             assert stored[key] == row[key]
+
+
+# T-065: canonical videogame labels, with doubles as a separate format.
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t065_startgg_query_requests_canonical_videogame_metadata(published):
+    version = flow_version(STARTGG, published)
+    parsed = run_node(
+        version, "Parse Input", {"body": {"tag": "Test Player", "slug": "test-event"}}
+    )
+    query = json.loads(parsed["requestBody"])["query"]
+    assert re.search(r"events\s*\{\s*id\s+name\s+videogame\s*\{\s*id\s+name\s*\}", query)
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        (
+            [{"name": "SF6 TOURNAMENT", "videogame": {"id": 1, "name": "Street Fighter 6"}}],
+            ["Street Fighter 6"],
+        ),
+        (
+            [
+                {
+                    "name": "SSBU DOUBLES finals",
+                    "videogame": {"id": 2, "name": "Super Smash Bros. Ultimate"},
+                }
+            ],
+            ["Super Smash Bros. Ultimate Doubles"],
+        ),
+        (
+            [{"name": "Doubleside bracket", "videogame": {"name": "Super Smash Bros. Ultimate"}}],
+            ["Super Smash Bros. Ultimate"],
+        ),
+        ([{"name": "Custom bracket", "videogame": None}], ["Custom bracket"]),
+        ([{"name": "Custom bracket", "videogame": {"name": ""}}], ["Custom bracket"]),
+        (
+            [
+                {"name": "A", "videogame": {"name": "TEKKEN 8"}},
+                {"name": "B", "videogame": {"name": "TEKKEN 8"}},
+            ],
+            ["TEKKEN 8", "TEKKEN 8"],
+        ),
+    ],
+)
+def test_t065_startgg_reports_videogame_names_and_preserves_event_count(
+    published, events, expected
+):
+    result = run_node(
+        flow_version(STARTGG, published),
+        "Parse Response",
+        t054_http(
+            {
+                "data": {
+                    "tournament": {
+                        "participants": {"nodes": [{"gamerTag": " Test Player ", "events": events}]}
+                    }
+                }
+            }
+        ),
+        {"Parse Input": {"tag": "test player", "attempt_id": "synthetic-attempt"}},
+    )
+    assert (
+        result["ok"] is True
+        and result["state"] == "verified_true"
+        and result["isRegistered"] is True
+    )
+    assert result["events"] == expected and result["eventCount"] == len(events)
+    assert result["attempt_id"] == "synthetic-attempt"
+
+
+def test_t065_startgg_version_is_new_and_all_active_references_agree():
+
+    flow = flow_version(STARTGG)
+    version = flow["versionId"]
+    assert str(UUID(version)) == version
+    assert version != "96a81ac0-3b3b-4ff0-9418-500b20898e8d"
+    assert flow["activeVersionId"] == flow["activeVersion"]["versionId"] == version
+    assert all(
+        item["versionId"] == version
+        for item in flow["activeVersion"]["workflowPublishHistory"]
+        if item["event"] == "activated"
+    )
