@@ -293,6 +293,26 @@ def test_security_headers_and_tls_only_hsts(public):
             )
 
 
+@pytest.mark.parametrize(
+    ("filename", "hostname"),
+    [
+        ("nginx.conf", "www.checkin.fgctrollhattan.se"),
+        ("nginx.conf", "admin.fgctrollhattan.se"),
+        ("nginx.dev.conf", "localhost"),
+    ],
+)
+def test_favicon_is_an_exact_quiet_no_content_response(filename, hostname):
+    config = parse((ROOT / filename).read_text(encoding="utf-8"))
+    block = server(config, hostname)
+    selected = next(
+        children for words, children in block if words == ["location", "=", "/favicon.ico"]
+    )
+    assert directives(selected, "return") == [["204"]]
+    assert directives(selected, "access_log") == [["off"]]
+    assert not directives(selected, "proxy_pass")
+    assert not directives(selected, "auth_basic")
+
+
 def test_prod_auth_cookie_oauth_renewal_and_optional_siblings():
     text = (ROOT / "nginx.conf").read_text(encoding="utf-8")
     config = parse(text)

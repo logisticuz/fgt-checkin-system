@@ -961,8 +961,12 @@ async def auth_select_event_save(request: Request):
             result.get("restored_rows", 0),
         )
     except ValueError:
-        # No archived data — new event, just set the slug.
-        ok = await run_in_threadpool(update_settings, record_id, {"active_event_slug": event_slug})
+        # A non-archived selection has no trusted name; fall back to the selected slug.
+        ok = await run_in_threadpool(
+            update_settings,
+            record_id,
+            {"active_event_slug": event_slug, "event_display_name": "", "tournament_name": ""},
+        )
         if not ok:
             return HTMLResponse(_render_error_page("Failed to set active event."), status_code=500)
 

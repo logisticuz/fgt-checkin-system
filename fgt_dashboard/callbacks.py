@@ -2419,6 +2419,14 @@ def register_callbacks(app):
                 }
             )
 
+        table_rows.sort(
+            key=lambda row: (
+                _as_date(row.get("event_date")) or date.min,
+                str(row.get("event_slug") or ""),
+            ),
+            reverse=True,
+        )
+
         if not selected_events:
             empty = _empty_response("No events selected")
             return (series_options, selected_series, options, []) + empty[4:]
@@ -4120,7 +4128,12 @@ def register_callbacks(app):
                 "plot_bgcolor": "#0f172a",
                 "font": {"color": "#cbd5e1", "size": 11},
                 "margin": {"l": 44, "r": 16, "t": 8, "b": 48},
-                "xaxis": {"showgrid": False, "tickangle": -20, "automargin": True},
+                "xaxis": {
+                    "type": "category" if len(set(x_vals)) == 1 else "date",
+                    "showgrid": False,
+                    "tickangle": -20,
+                    "automargin": True,
+                },
                 "yaxis": {
                     "title": "No-show %",
                     "ticksuffix": "%",
