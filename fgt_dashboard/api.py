@@ -66,6 +66,7 @@ def _audit_safe(user: dict, action: str, target_table: str, **kwargs) -> None:
 IS_PROD = os.getenv("ENV", "dev") == "prod"
 OAUTH_REDIRECT_URI = os.getenv("STARTGG_REDIRECT_URI", "")
 SESSION_COOKIE_NAME = "fgc_session"
+_OAUTH_CODE_PATTERN = re.compile(r"[A-Za-z0-9._~-]{1,4096}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -436,7 +437,7 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
         )
         return response
 
-    if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
+    if not _OAUTH_CODE_PATTERN.fullmatch(code):
         return invalid("invalid_code", "Invalid authorization code")
     if not verify_oauth_state(request.cookies.get(cookie_name), state):
         return invalid("invalid_state", "Invalid authentication state")
@@ -467,7 +468,7 @@ async def auth_callback_finalize(request: Request, code: str = "", state: str = 
     if not verify_oauth_state(request.cookies.get(cookie_name), state):
         logger.warning("OAuth finalize rejected reason=invalid_state")
         return finish(JSONResponse({"error": "Invalid authentication state"}, status_code=400))
-    if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
+    if not _OAUTH_CODE_PATTERN.fullmatch(code):
         logger.warning("OAuth finalize rejected reason=invalid_code")
         return finish(JSONResponse({"error": "Invalid authorization code"}, status_code=400))
 

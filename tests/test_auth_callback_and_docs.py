@@ -20,6 +20,7 @@ from shared import auth as oauth
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE = "synthetic-code"
+STARTGG_CODE_832 = "def50200" + "a1" * 412
 TOKEN = "synthetic-private-token"
 STATE_SECRET = "synthetic-oauth-state-signing-secret"
 
@@ -108,7 +109,16 @@ def start_login(client):
 
 
 @pytest.mark.parametrize(
-    "code", ["<script>alert(1)</script>", 'x"};alert(1);//', "x\n", "x/y", "x y", "x" * 513, ""]
+    "code",
+    [
+        "<script>alert(1)</script>",
+        'x"};alert(1);//',
+        "x\n",
+        "x/y",
+        "x y",
+        pytest.param("x" * 4097, id="over-limit"),
+        "",
+    ],
 )
 def test_invalid_callback_code_is_rejected_without_reflection(load_application, code):
     module, auth = load_application("dashboard")
@@ -120,7 +130,15 @@ def test_invalid_callback_code_is_rejected_without_reflection(load_application, 
 
 
 @pytest.mark.parametrize("prod", [False, True])
-@pytest.mark.parametrize("code", ["AZaz09._~-", "x" * 512])
+@pytest.mark.parametrize(
+    "code",
+    [
+        "AZaz09._~-",
+        "x" * 512,
+        pytest.param(STARTGG_CODE_832, id="startgg-832"),
+        pytest.param("x" * 4096, id="max-4096"),
+    ],
+)
 def test_valid_code_gets_encoded_302_without_bridge_html(load_application, monkeypatch, prod, code):
     module, auth = load_application("dashboard")
     monkeypatch.setattr(module, "IS_PROD", prod)
@@ -243,15 +261,23 @@ def test_login_state_matches_authorize_url_and_cookie_flags(
 
 
 @pytest.mark.parametrize("prod", [False, True])
+@pytest.mark.parametrize(
+    "code",
+    [
+        CODE,
+        pytest.param(STARTGG_CODE_832, id="startgg-832"),
+        pytest.param("x" * 4096, id="max-4096"),
+    ],
+)
 def test_valid_state_survives_callback_redirect_and_is_consumed_on_finalize(
-    load_application, monkeypatch, prod
+    load_application, monkeypatch, prod, code
 ):
     module, auth = load_application("dashboard")
     monkeypatch.setattr(module, "IS_PROD", prod)
     cookie_name = "__Host-fgt_oauth_state"
     with TestClient(module.app, base_url="https://dashboard.example.invalid") as client:
         state = start_login(client)
-        params = {"code": CODE, "state": state}
+        params = {"code": code, "state": state}
         callback = client.get("/auth/callback", params=params, follow_redirects=False)
         assert callback.status_code == 302 and callback.content == b""
         assert client.cookies.get(cookie_name)
@@ -262,14 +288,14 @@ def test_valid_state_survives_callback_redirect_and_is_consumed_on_finalize(
         assert client.cookies.get(cookie_name) is None
         assert client.cookies.get(module.SESSION_COOKIE_NAME) == "synthetic-session"
         assert (
-            CODE not in response.text and state not in response.text and TOKEN not in response.text
+            code not in response.text and state not in response.text and TOKEN not in response.text
         )
         for path in ("/auth/callback", "/auth/callback/finalize"):
             replay = client.get(path, params=params, follow_redirects=False)
             assert replay.status_code == 400
             assert replay.json() == {"error": "Invalid authentication state"}
         module.create_session.assert_called_once()
-        auth.exchange_code_for_token.assert_called_once_with(CODE, module.OAUTH_REDIRECT_URI)
+        auth.exchange_code_for_token.assert_called_once_with(code, module.OAUTH_REDIRECT_URI)
 
 
 @pytest.mark.parametrize("prod", [False, True])
@@ -502,7 +528,9 @@ def test_finalize_failure_also_consumes_browser_state(load_application, monkeypa
     auth.exchange_code_for_token.assert_called_once()
 
 
-@pytest.mark.parametrize("code", ["", "<script>bad-code</script>"])
+@pytest.mark.parametrize(
+    "code", ["", "<script>bad-code</script>", "x/y", pytest.param("x" * 4097, id="over-limit")]
+)
 def test_finalize_rejects_invalid_code_without_reflection(load_application, code):
     module, auth = load_application("dashboard")
     with TestClient(module.app) as client:
