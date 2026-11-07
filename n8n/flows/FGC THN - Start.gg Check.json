@@ -54,7 +54,13 @@
         "specifyBody": "json",
         "jsonBody": "={{ $json.requestBody }}",
         "options": {
-          "timeout": 8000
+          "timeout": 8000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
         }
       },
       "name": "Query Start.gg",
@@ -69,7 +75,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst response = $json;\nconst tournament = response.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (response.error || (Array.isArray(response.errors) && response.errors.length > 0) ||\n    !tournament || !Array.isArray(participants)) {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'Start.gg kunde inte verifieras' } }];\n}\n\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    tournament: tournament.name, events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst events = (Array.isArray(player.events) ? player.events : [])\n  .map(event => event?.name).filter(name => typeof name === 'string');\nreturn [{ json: { ok: true, state: 'verified_true', isRegistered: true,\n  tournament: tournament.name, tag: player.gamerTag, name: player.user?.name || null,\n  events, eventCount: events.length, attempt_id } }];"
+        "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst unavailable = () => [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable',\n  attempt_id, message: 'Start.gg kunde inte verifieras' } }];\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nconst hasError = value => Object.hasOwn(value, 'error') || Object.hasOwn(value, 'errors') ||\n  (Object.hasOwn(value, 'request_result') && value.request_result !== 'success');\nconst response = $json;\nif (!object(response) || !Number.isInteger(response.statusCode) ||\n    response.statusCode < 200 || response.statusCode >= 300 || hasError(response)) return unavailable();\nconst body = response.body;\nif (!object(body) || hasError(body)) return unavailable();\nconst tournament = body.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (!object(tournament) || !Array.isArray(participants) ||\n    !participants.every(participant => object(participant) &&\n      typeof participant.gamerTag === 'string' && participant.gamerTag.trim())) return unavailable();\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    ...(typeof tournament.name === 'string' ? { tournament: tournament.name } : {}), events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst result = { ok: true, state: 'verified_true', isRegistered: true,\n  ...(typeof tournament.name === 'string' ? { tournament: tournament.name } : {}), tag: player.gamerTag,\n  name: typeof player.user?.name === 'string' ? player.user.name : null, attempt_id };\nif (Array.isArray(player.events) && player.events.every(event =>\n    object(event) && typeof event.name === 'string' && event.name.trim())) {\n  result.events = player.events.map(event => event.name);\n  result.eventCount = result.events.length;\n}\nreturn [{ json: result }];"
       },
       "name": "Parse Response",
       "type": "n8n-nodes-base.code",
@@ -212,9 +218,9 @@
     "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
   },
   "pinData": {},
-  "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
-  "activeVersionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
-  "versionCounter": 10,
+  "versionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
+  "activeVersionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
+  "versionCounter": 11,
   "triggerCount": 1,
   "shared": [
     {
@@ -277,7 +283,7 @@
   "activeVersion": {
     "updatedAt": "2026-01-31T00:12:39.000Z",
     "createdAt": "2026-01-30T15:37:31.080Z",
-    "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+    "versionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
     "workflowId": "Tt8amKeBzTjwBWmY",
     "nodes": [
       {
@@ -327,7 +333,13 @@
           "specifyBody": "json",
           "jsonBody": "={{ $json.requestBody }}",
           "options": {
-            "timeout": 8000
+            "timeout": 8000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "fullResponse": true
+              }
+            }
           }
         },
         "name": "Query Start.gg",
@@ -342,7 +354,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst response = $json;\nconst tournament = response.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (response.error || (Array.isArray(response.errors) && response.errors.length > 0) ||\n    !tournament || !Array.isArray(participants)) {\n  return [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable', attempt_id,\n    message: 'Start.gg kunde inte verifieras' } }];\n}\n\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    tournament: tournament.name, events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst events = (Array.isArray(player.events) ? player.events : [])\n  .map(event => event?.name).filter(name => typeof name === 'string');\nreturn [{ json: { ok: true, state: 'verified_true', isRegistered: true,\n  tournament: tournament.name, tag: player.gamerTag, name: player.user?.name || null,\n  events, eventCount: events.length, attempt_id } }];"
+          "jsCode": "const ctx = $('Parse Input').first().json;\nconst attempt_id = ctx.attempt_id;\nif (ctx.state === 'skipped') {\n  return [{ json: { ok: false, state: 'skipped', skipped: true, attempt_id, message: ctx.message } }];\n}\nconst unavailable = () => [{ json: { ok: false, state: 'unavailable', error: 'api_unavailable',\n  attempt_id, message: 'Start.gg kunde inte verifieras' } }];\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nconst hasError = value => Object.hasOwn(value, 'error') || Object.hasOwn(value, 'errors') ||\n  (Object.hasOwn(value, 'request_result') && value.request_result !== 'success');\nconst response = $json;\nif (!object(response) || !Number.isInteger(response.statusCode) ||\n    response.statusCode < 200 || response.statusCode >= 300 || hasError(response)) return unavailable();\nconst body = response.body;\nif (!object(body) || hasError(body)) return unavailable();\nconst tournament = body.data?.tournament;\nconst participants = tournament?.participants?.nodes;\nif (!object(tournament) || !Array.isArray(participants) ||\n    !participants.every(participant => object(participant) &&\n      typeof participant.gamerTag === 'string' && participant.gamerTag.trim())) return unavailable();\n// The API filter may return partial matches; require exact normalized equality locally.\nconst requestedTag = ctx.tag.trim().toLowerCase();\nconst player = participants.find(participant =>\n  typeof participant?.gamerTag === 'string' &&\n  participant.gamerTag.trim().toLowerCase() === requestedTag\n);\nif (!player) {\n  return [{ json: { ok: true, state: 'verified_false', isRegistered: false,\n    ...(typeof tournament.name === 'string' ? { tournament: tournament.name } : {}), events: [], eventCount: 0, attempt_id, message: 'Ej registrerad' } }];\n}\nconst result = { ok: true, state: 'verified_true', isRegistered: true,\n  ...(typeof tournament.name === 'string' ? { tournament: tournament.name } : {}), tag: player.gamerTag,\n  name: typeof player.user?.name === 'string' ? player.user.name : null, attempt_id };\nif (Array.isArray(player.events) && player.events.every(event =>\n    object(event) && typeof event.name === 'string' && event.name.trim())) {\n  result.events = player.events.map(event => event.name);\n  result.eventCount = result.events.length;\n}\nreturn [{ json: result }];"
         },
         "name": "Parse Response",
         "type": "n8n-nodes-base.code",

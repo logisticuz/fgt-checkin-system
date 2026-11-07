@@ -26,7 +26,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    attempt_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
+        "jsCode": "// eBas confirmation belongs to Python (T-043). Keep the retained branch dead and PNR-free.\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = String(body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst name = body.name || null;\nreturn [{ json: {\n  checkin_id, attempt_id, tag, slug, name,\n  personnummer: null, _runEbas: false, _runStartgg: !!tag && !!slug,\n} }];"
       },
       "id": "parse-input-v5",
       "name": "Parse Input",
@@ -47,7 +47,8 @@
         "options": {
           "response": {
             "response": {
-              "neverError": true
+              "neverError": true,
+              "fullResponse": true
             }
           },
           "timeout": 10000
@@ -61,7 +62,9 @@
         -224,
         64
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "disabled": true,
+      "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
     },
     {
       "parameters": {
@@ -73,7 +76,8 @@
         "options": {
           "response": {
             "response": {
-              "neverError": true
+              "neverError": true,
+              "fullResponse": true
             }
           },
           "timeout": 10000
@@ -98,11 +102,13 @@
       "position": [
         0,
         160
-      ]
+      ],
+      "disabled": true,
+      "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
     },
     {
       "parameters": {
-        "jsCode": "// Successful negative verification is distinct from a failed or skipped check.\nconst ctx = $('Parse Input').first().json;\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const result = $(nodeName).first().json;\n    if (result?.state === 'skipped' || result?.skipped === true) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (!result || result.error || result.ok === false || result.state === 'unavailable' ||\n        typeof result[booleanField] !== 'boolean') return unavailable;\n    return { ok: true, state: result[booleanField] ? 'verified_true' : 'verified_false',\n      value: result[booleanField], events: Array.isArray(result.events) ? result.events : [], error: null };\n  } catch (error) {\n    return unavailable;\n  }\n}\nconst ebas = readResult('eBas Check', ctx._runEbas, 'isMember');\nconst startgg = readResult('Start.gg Check', ctx._runStartgg, 'isRegistered');\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ebas.ok ? ebas.value : null,\n  startgg: startgg.ok ? startgg.value : null,\n  events: startgg.ok ? startgg.events : [],\n  _ebasOk: ebas.ok, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: ebas.ok ? { member: ebas.value } : {},\n  _startggData: startgg.ok ? { registered: startgg.value, events: startgg.events } : {},\n  _ebasError: ebas.error, _startggError: startgg.error,\n  fetched_at: new Date().toISOString(),\n} }];"
+        "jsCode": "// Require HTTP success and the typed S verdict; provider availability is separate from local sync.\nconst ctx = $('Parse Input').first().json;\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nconst hasError = value => Object.hasOwn(value, 'error') || Object.hasOwn(value, 'errors') ||\n  (Object.hasOwn(value, 'request_result') && value.request_result !== 'success');\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const response = $(nodeName).first().json;\n    if (!object(response) || !Number.isInteger(response.statusCode) ||\n        response.statusCode < 200 || response.statusCode >= 300 || hasError(response)) return unavailable;\n    const body = response.body;\n    if (!object(body) || hasError(body)) return unavailable;\n    if (body.state === 'skipped' && body.ok === false && !Object.hasOwn(body, booleanField)) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (body.ok !== true || typeof body[booleanField] !== 'boolean' ||\n        body.state !== (body[booleanField] ? 'verified_true' : 'verified_false')) return unavailable;\n    if (body[booleanField] === false && (!Array.isArray(body.events) || body.events.length !== 0)) return unavailable;\n    const result = { ok: true, state: body.state, value: body[booleanField], error: null };\n    // Missing or malformed event metadata is unknown, never an authoritative empty list.\n    if (Array.isArray(body.events) && body.events.every(name => typeof name === 'string' && name.trim())) {\n      result.events = body.events;\n    }\n    return result;\n  } catch (error) {\n    return unavailable;\n  }\n}\n// Dead by design: this workflow never has eBas authority or a PNR, even from a legacy caller.\nconst ebas = { ok: false, state: 'skipped', error: null };\nconst startgg = readResult('Start.gg Check', ctx._runStartgg === true, 'isRegistered');\nconst startggData = startgg.ok ? { registered: startgg.value } : {};\nif (Object.hasOwn(startgg, 'events')) startggData.events = startgg.events;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: null, startgg: startgg.ok ? startgg.value : null,\n  ...(Object.hasOwn(startgg, 'events') ? { events: startgg.events } : {}),\n  _ebasOk: false, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: {}, _startggData: startggData,\n  _ebasError: null, _startggError: startgg.error,\n  _startggEnabled: ctx._runStartgg === true,\n  fetched_at: new Date().toISOString(),\n} }];"
       },
       "id": "combine-v5",
       "name": "Combine Results",
@@ -123,7 +129,8 @@
         "options": {
           "response": {
             "response": {
-              "neverError": true
+              "neverError": true,
+              "fullResponse": true
             }
           },
           "timeout": 10000
@@ -158,7 +165,8 @@
         "options": {
           "response": {
             "response": {
-              "neverError": true
+              "neverError": true,
+              "fullResponse": true
             }
           },
           "timeout": 10000
@@ -181,7 +189,9 @@
         480,
         256
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "disabled": true,
+      "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
     },
     {
       "parameters": {},
@@ -192,11 +202,13 @@
       "position": [
         720,
         160
-      ]
+      ],
+      "disabled": true,
+      "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
     },
     {
       "parameters": {
-        "jsCode": "// Retain legacy summary fields and expose per-integration states and correlation.\nconst ctx = $('Combine Results').first().json;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ctx.member, startgg: ctx.startgg, events: ctx.events,\n  results: { ebas: ctx._ebasState, startgg: ctx._startggState, attempt_id: ctx.attempt_id },\n  integration_complete: true,\n} }];"
+        "jsCode": "// A successful provider response cannot stand in for a canonical local-write acknowledgement.\nconst ctx = $('Combine Results').first().json;\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nfunction acknowledge(nodeName, source, expectedOk, expectedState) {\n  try {\n    const response = $(nodeName).first().json;\n    if (!object(response) || !Number.isInteger(response.statusCode) ||\n        response.statusCode < 200 || response.statusCode >= 300 ||\n        Object.hasOwn(response, 'error') || Object.hasOwn(response, 'errors') ||\n        (Object.hasOwn(response, 'request_result') && response.request_result !== 'success')) return 'failed';\n    const body = response.body;\n    if (!object(body) || Object.hasOwn(body, 'error') || Object.hasOwn(body, 'errors') ||\n        (Object.hasOwn(body, 'request_result') && body.request_result !== 'success')) return 'failed';\n    if (body.state === 'stale_rejected') return 'stale';\n    if (body.checkin_id !== ctx.checkin_id || body.source !== source || body.ok !== expectedOk ||\n        typeof body.updated !== 'boolean' ||\n        body.state !== expectedState) return 'failed';\n    if (expectedOk) return body.success === true && body.updated === true ? 'ok' : 'failed';\n    return body.updated === false && ['unavailable', 'skipped'].includes(expectedState) ? 'ok' : 'failed';\n  } catch (error) {\n    return 'failed';\n  }\n}\nconst startggSync = acknowledge('Report Start.gg Result', 'startgg',\n  ctx._startggOk, ctx._startggState);\n// The retained eBas callback is disabled/disconnected; only the executed Start.gg callback has an acknowledgement.\nconst localSync = startggSync;\nconst startggState = ['failed', 'stale'].includes(startggSync) ? 'unavailable' : ctx._startggState;\nconst verified = startggSync === 'ok' && ctx._startggOk === true;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: null, startgg: verified ? ctx.startgg : null,\n  ...(verified && Object.hasOwn(ctx._startggData, 'events') ? { events: ctx._startggData.events } : {}),\n  results: { ebas: 'skipped', startgg: startggState, attempt_id: ctx.attempt_id },\n  local_sync: localSync, local_sync_sources: { ebas: 'skipped', startgg: startggSync },\n  integration_complete: verified,\n} }];"
       },
       "id": "return-v5",
       "name": "Return Results",
@@ -224,11 +236,6 @@
       "main": [
         [
           {
-            "node": "eBas Check",
-            "type": "main",
-            "index": 0
-          },
-          {
             "node": "Start.gg Check",
             "type": "main",
             "index": 0
@@ -236,29 +243,7 @@
         ]
       ]
     },
-    "eBas Check": {
-      "main": [
-        [
-          {
-            "node": "Wait for Both",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Start.gg Check": {
-      "main": [
-        [
-          {
-            "node": "Wait for Both",
-            "type": "main",
-            "index": 1
-          }
-        ]
-      ]
-    },
-    "Wait for Both": {
       "main": [
         [
           {
@@ -276,38 +261,11 @@
             "node": "Report Start.gg Result",
             "type": "main",
             "index": 0
-          },
-          {
-            "node": "Report eBas Result",
-            "type": "main",
-            "index": 0
           }
         ]
       ]
     },
     "Report Start.gg Result": {
-      "main": [
-        [
-          {
-            "node": "Wait for Reports",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Report eBas Result": {
-      "main": [
-        [
-          {
-            "node": "Wait for Reports",
-            "type": "main",
-            "index": 1
-          }
-        ]
-      ]
-    },
-    "Wait for Reports": {
       "main": [
         [
           {
@@ -332,9 +290,9 @@
   "staticData": null,
   "meta": null,
   "pinData": null,
-  "versionId": "b4d1c140-66ab-4b68-93f2-e3d74d89044a",
-  "activeVersionId": "b4d1c140-66ab-4b68-93f2-e3d74d89044a",
-  "versionCounter": 25,
+  "versionId": "9374a4f2-12f5-4f1a-942e-0811ecbfcb94",
+  "activeVersionId": "9374a4f2-12f5-4f1a-942e-0811ecbfcb94",
+  "versionCounter": 26,
   "triggerCount": 1,
   "shared": [
     {
@@ -410,7 +368,7 @@
   "activeVersion": {
     "updatedAt": "2026-03-11T07:44:45.895Z",
     "createdAt": "2026-03-11T07:44:45.895Z",
-    "versionId": "b4d1c140-66ab-4b68-93f2-e3d74d89044a",
+    "versionId": "9374a4f2-12f5-4f1a-942e-0811ecbfcb94",
     "workflowId": "t8zxaZ11zVDnuaTY",
     "nodes": [
       {
@@ -432,7 +390,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Parse input from backend orchestrate endpoint\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\n\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = (body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst pnr = body.personnummer || null;\nconst name = body.name || null;\n\nreturn [{\n  json: {\n    checkin_id,\n    attempt_id,\n    tag,\n    slug,\n    personnummer: pnr,\n    name,\n    _runEbas: !!pnr,\n    _runStartgg: !!tag && !!slug,\n  }\n}];"
+          "jsCode": "// eBas confirmation belongs to Python (T-043). Keep the retained branch dead and PNR-free.\nconst webhookRaw = $('Webhook').first().json;\nconst body = webhookRaw.body || webhookRaw;\nconst checkin_id = body.checkin_id || null;\nconst attempt_id = body.attempt_id || String($execution.id);\nconst tag = String(body.tag || '').trim().toLowerCase();\nconst slug = body.slug || null;\nconst name = body.name || null;\nreturn [{ json: {\n  checkin_id, attempt_id, tag, slug, name,\n  personnummer: null, _runEbas: false, _runStartgg: !!tag && !!slug,\n} }];"
         },
         "id": "parse-input-v5",
         "name": "Parse Input",
@@ -453,7 +411,8 @@
           "options": {
             "response": {
               "response": {
-                "neverError": true
+                "neverError": true,
+                "fullResponse": true
               }
             },
             "timeout": 10000
@@ -467,7 +426,9 @@
           -224,
           64
         ],
-        "onError": "continueRegularOutput"
+        "onError": "continueRegularOutput",
+        "disabled": true,
+        "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
       },
       {
         "parameters": {
@@ -479,7 +440,8 @@
           "options": {
             "response": {
               "response": {
-                "neverError": true
+                "neverError": true,
+                "fullResponse": true
               }
             },
             "timeout": 10000
@@ -504,11 +466,13 @@
         "position": [
           0,
           160
-        ]
+        ],
+        "disabled": true,
+        "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
       },
       {
         "parameters": {
-          "jsCode": "// Successful negative verification is distinct from a failed or skipped check.\nconst ctx = $('Parse Input').first().json;\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const result = $(nodeName).first().json;\n    if (result?.state === 'skipped' || result?.skipped === true) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (!result || result.error || result.ok === false || result.state === 'unavailable' ||\n        typeof result[booleanField] !== 'boolean') return unavailable;\n    return { ok: true, state: result[booleanField] ? 'verified_true' : 'verified_false',\n      value: result[booleanField], events: Array.isArray(result.events) ? result.events : [], error: null };\n  } catch (error) {\n    return unavailable;\n  }\n}\nconst ebas = readResult('eBas Check', ctx._runEbas, 'isMember');\nconst startgg = readResult('Start.gg Check', ctx._runStartgg, 'isRegistered');\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ebas.ok ? ebas.value : null,\n  startgg: startgg.ok ? startgg.value : null,\n  events: startgg.ok ? startgg.events : [],\n  _ebasOk: ebas.ok, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: ebas.ok ? { member: ebas.value } : {},\n  _startggData: startgg.ok ? { registered: startgg.value, events: startgg.events } : {},\n  _ebasError: ebas.error, _startggError: startgg.error,\n  fetched_at: new Date().toISOString(),\n} }];"
+          "jsCode": "// Require HTTP success and the typed S verdict; provider availability is separate from local sync.\nconst ctx = $('Parse Input').first().json;\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nconst hasError = value => Object.hasOwn(value, 'error') || Object.hasOwn(value, 'errors') ||\n  (Object.hasOwn(value, 'request_result') && value.request_result !== 'success');\nfunction readResult(nodeName, enabled, booleanField) {\n  if (!enabled) return { ok: false, state: 'skipped', error: null };\n  const unavailable = { ok: false, state: 'unavailable',\n    error: { code: 'api_unavailable', message: nodeName + ' unavailable' } };\n  try {\n    const response = $(nodeName).first().json;\n    if (!object(response) || !Number.isInteger(response.statusCode) ||\n        response.statusCode < 200 || response.statusCode >= 300 || hasError(response)) return unavailable;\n    const body = response.body;\n    if (!object(body) || hasError(body)) return unavailable;\n    if (body.state === 'skipped' && body.ok === false && !Object.hasOwn(body, booleanField)) {\n      return { ok: false, state: 'skipped', error: null };\n    }\n    if (body.ok !== true || typeof body[booleanField] !== 'boolean' ||\n        body.state !== (body[booleanField] ? 'verified_true' : 'verified_false')) return unavailable;\n    if (body[booleanField] === false && (!Array.isArray(body.events) || body.events.length !== 0)) return unavailable;\n    const result = { ok: true, state: body.state, value: body[booleanField], error: null };\n    // Missing or malformed event metadata is unknown, never an authoritative empty list.\n    if (Array.isArray(body.events) && body.events.every(name => typeof name === 'string' && name.trim())) {\n      result.events = body.events;\n    }\n    return result;\n  } catch (error) {\n    return unavailable;\n  }\n}\n// Dead by design: this workflow never has eBas authority or a PNR, even from a legacy caller.\nconst ebas = { ok: false, state: 'skipped', error: null };\nconst startgg = readResult('Start.gg Check', ctx._runStartgg === true, 'isRegistered');\nconst startggData = startgg.ok ? { registered: startgg.value } : {};\nif (Object.hasOwn(startgg, 'events')) startggData.events = startgg.events;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: null, startgg: startgg.ok ? startgg.value : null,\n  ...(Object.hasOwn(startgg, 'events') ? { events: startgg.events } : {}),\n  _ebasOk: false, _startggOk: startgg.ok,\n  _ebasState: ebas.state, _startggState: startgg.state,\n  _ebasData: {}, _startggData: startggData,\n  _ebasError: null, _startggError: startgg.error,\n  _startggEnabled: ctx._runStartgg === true,\n  fetched_at: new Date().toISOString(),\n} }];"
         },
         "id": "combine-v5",
         "name": "Combine Results",
@@ -529,7 +493,8 @@
           "options": {
             "response": {
               "response": {
-                "neverError": true
+                "neverError": true,
+                "fullResponse": true
               }
             },
             "timeout": 10000
@@ -564,7 +529,8 @@
           "options": {
             "response": {
               "response": {
-                "neverError": true
+                "neverError": true,
+                "fullResponse": true
               }
             },
             "timeout": 10000
@@ -587,7 +553,9 @@
           480,
           256
         ],
-        "onError": "continueRegularOutput"
+        "onError": "continueRegularOutput",
+        "disabled": true,
+        "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
       },
       {
         "parameters": {},
@@ -598,11 +566,13 @@
         "position": [
           720,
           160
-        ]
+        ],
+        "disabled": true,
+        "notes": "Retained legacy branch, disconnected and disabled. Python owns eBas confirmation; do not reactivate without a reviewed authority contract."
       },
       {
         "parameters": {
-          "jsCode": "// Retain legacy summary fields and expose per-integration states and correlation.\nconst ctx = $('Combine Results').first().json;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: ctx.member, startgg: ctx.startgg, events: ctx.events,\n  results: { ebas: ctx._ebasState, startgg: ctx._startggState, attempt_id: ctx.attempt_id },\n  integration_complete: true,\n} }];"
+          "jsCode": "// A successful provider response cannot stand in for a canonical local-write acknowledgement.\nconst ctx = $('Combine Results').first().json;\nconst object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\nfunction acknowledge(nodeName, source, expectedOk, expectedState) {\n  try {\n    const response = $(nodeName).first().json;\n    if (!object(response) || !Number.isInteger(response.statusCode) ||\n        response.statusCode < 200 || response.statusCode >= 300 ||\n        Object.hasOwn(response, 'error') || Object.hasOwn(response, 'errors') ||\n        (Object.hasOwn(response, 'request_result') && response.request_result !== 'success')) return 'failed';\n    const body = response.body;\n    if (!object(body) || Object.hasOwn(body, 'error') || Object.hasOwn(body, 'errors') ||\n        (Object.hasOwn(body, 'request_result') && body.request_result !== 'success')) return 'failed';\n    if (body.state === 'stale_rejected') return 'stale';\n    if (body.checkin_id !== ctx.checkin_id || body.source !== source || body.ok !== expectedOk ||\n        typeof body.updated !== 'boolean' ||\n        body.state !== expectedState) return 'failed';\n    if (expectedOk) return body.success === true && body.updated === true ? 'ok' : 'failed';\n    return body.updated === false && ['unavailable', 'skipped'].includes(expectedState) ? 'ok' : 'failed';\n  } catch (error) {\n    return 'failed';\n  }\n}\nconst startggSync = acknowledge('Report Start.gg Result', 'startgg',\n  ctx._startggOk, ctx._startggState);\n// The retained eBas callback is disabled/disconnected; only the executed Start.gg callback has an acknowledgement.\nconst localSync = startggSync;\nconst startggState = ['failed', 'stale'].includes(startggSync) ? 'unavailable' : ctx._startggState;\nconst verified = startggSync === 'ok' && ctx._startggOk === true;\nreturn [{ json: {\n  checkin_id: ctx.checkin_id, attempt_id: ctx.attempt_id,\n  member: null, startgg: verified ? ctx.startgg : null,\n  ...(verified && Object.hasOwn(ctx._startggData, 'events') ? { events: ctx._startggData.events } : {}),\n  results: { ebas: 'skipped', startgg: startggState, attempt_id: ctx.attempt_id },\n  local_sync: localSync, local_sync_sources: { ebas: 'skipped', startgg: startggSync },\n  integration_complete: verified,\n} }];"
         },
         "id": "return-v5",
         "name": "Return Results",
@@ -630,11 +600,6 @@
         "main": [
           [
             {
-              "node": "eBas Check",
-              "type": "main",
-              "index": 0
-            },
-            {
               "node": "Start.gg Check",
               "type": "main",
               "index": 0
@@ -642,29 +607,7 @@
           ]
         ]
       },
-      "eBas Check": {
-        "main": [
-          [
-            {
-              "node": "Wait for Both",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
       "Start.gg Check": {
-        "main": [
-          [
-            {
-              "node": "Wait for Both",
-              "type": "main",
-              "index": 1
-            }
-          ]
-        ]
-      },
-      "Wait for Both": {
         "main": [
           [
             {
@@ -682,38 +625,11 @@
               "node": "Report Start.gg Result",
               "type": "main",
               "index": 0
-            },
-            {
-              "node": "Report eBas Result",
-              "type": "main",
-              "index": 0
             }
           ]
         ]
       },
       "Report Start.gg Result": {
-        "main": [
-          [
-            {
-              "node": "Wait for Reports",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Report eBas Result": {
-        "main": [
-          [
-            {
-              "node": "Wait for Reports",
-              "type": "main",
-              "index": 1
-            }
-          ]
-        ]
-      },
-      "Wait for Reports": {
         "main": [
           [
             {

@@ -35,7 +35,7 @@ BASE = {
             "Webhook",
             "eBas Check",
         },
-        "invariant": "2fc1ab106f7b7f0bdbd435e0a32f83999ab57279499c8d7fb25a4f138595864c",
+        "invariant": "d4a2c076b74f0afaad69465cdf1d345e87ec5587a50ef4d2dd49df7ba9a69111",
         "callbacks": 4,
     },
     "FGC THN - eBas Membership Check.json": {
@@ -81,7 +81,7 @@ BASE = {
             "Query Start.gg",
             "Webhook",
         },
-        "invariant": "e8091a127222a360d37b526cae7c26663fc80f328b6cf0647cefd6b6d2a369bf",
+        "invariant": "29f4d2f27c1e2de73436ff82c7e3d0a3c37cfe56bdf863c4ac9fbaac45d57278",
         "callbacks": 0,
     },
 }
@@ -195,8 +195,7 @@ def semantic_digest(flow):
 def test_connections_executable_payloads_and_other_fields_match_reviewed_snapshot(
     workflow,
 ):
-    # T-028 intentionally revises three snapshots for matching, timeouts and degraded states.
-    # T-053 revises Register for typed outcomes and canonical callback acknowledgement.
+    # T-028/T-053/T-054 intentionally revise verification, registration and acknowledgement snapshots.
     name, flow = workflow
     assert semantic_digest(flow) == BASE[name]["invariant"]
 
@@ -342,19 +341,21 @@ def test_startgg_requires_exact_trimmed_case_insensitive_match(
     result = run_node(
         version,
         "Parse Response",
-        {
-            "data": {
-                "tournament": {
-                    "name": "Synthetic Event",
-                    "participants": {
-                        "nodes": [
-                            {"gamerTag": tag, "events": [{"name": tag + " game"}]}
-                            for tag in candidates
-                        ]
-                    },
+        t054_http(
+            {
+                "data": {
+                    "tournament": {
+                        "name": "Synthetic Event",
+                        "participants": {
+                            "nodes": [
+                                {"gamerTag": tag, "events": [{"name": tag + " game"}]}
+                                for tag in candidates
+                            ]
+                        },
+                    }
                 }
             }
-        },
+        ),
         {"Parse Input": {"tag": requested, "attempt_id": "synthetic-attempt"}},
     )
     assert result["isRegistered"] is expected
@@ -406,7 +407,7 @@ def test_startgg_errors_are_unavailable_without_registration_boolean(published, 
     result = run_node(
         flow_version(STARTGG, published),
         "Parse Response",
-        response,
+        t054_http(response),
         {"Parse Input": {"tag": "Ax", "attempt_id": "synthetic-attempt"}},
     )
     assert result["ok"] is False and result["state"] == "unavailable"
@@ -733,15 +734,16 @@ def test_v5_report_payloads_distinguish_verification_from_errors(published, kind
             payload = {
                 field: kind == "positive",
                 "ok": True,
-                "events": ["Synthetic game"],
+                "state": "verified_true" if kind == "positive" else "verified_false",
+                "events": ["Synthetic game"] if kind == "positive" else [],
             }
         elif kind == "timeout":
             payload = {"error": "Synthetic timeout " + "0" * 12, field: False}
         elif kind == "skipped":
-            payload = {"state": "skipped", "skipped": True}
+            payload = {"ok": False, "state": "skipped", "skipped": True}
         else:
             payload = {}
-        named[title + " Check"] = payload
+        named[title + " Check"] = t054_http(payload)
     combined = run_node(version, "Combine Results", named=named)
     expected_state = {
         "positive": "verified_true",
@@ -753,33 +755,45 @@ def test_v5_report_payloads_distinguish_verification_from_errors(published, kind
         ("eBas", "ebas", "member"),
         ("Start.gg", "startgg", "registered"),
     ]:
-        report = run_node(version, f"Report {title} Result", named={"Combine Results": combined})
-        assert report["source"] == source and report["ok"] is ok
-        assert report["state"] == expected_state
+        report = run_node(
+            version, f"Report {title} Result", named={"Combine Results": combined}
+        )
+        source_ok = ok and source == "startgg"
+        source_state = expected_state if source == "startgg" else "skipped"
+        assert report["source"] == source and report["ok"] is source_ok
+        assert report["state"] == source_state
         assert report["attempt_id"] == "synthetic-attempt"
         assert report["checkin_id"] == "synthetic-checkin"
-        if ok:
+        if source_ok:
             assert report["data"][field] is (kind == "positive")
             assert report["error"] is None
         else:
             assert report["data"] == {} and field not in report["data"]
-            assert (report["error"] is None) is (kind == "skipped")
+            assert (report["error"] is None) is (source_state == "skipped")
         assert "0" * 12 not in json.dumps(report)
         assert "email" not in json.dumps(report)
-    summary = run_node(version, "Return Results", named={"Combine Results": combined})
+    summary = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_ack(combined, ok=ok, updated=ok),
+        },
+    )
     assert summary["results"] == {
-        "ebas": expected_state,
+        "ebas": "skipped",
         "startgg": expected_state,
         "attempt_id": "synthetic-attempt",
     }
     expected_boolean = (kind == "positive") if ok else None
-    assert summary["member"] is expected_boolean
+    assert summary["member"] is None
     assert summary["startgg"] is expected_boolean
+    assert summary["integration_complete"] is ok
 
 
 @pytest.mark.parametrize("published", [False, True])
 @pytest.mark.parametrize("run_startgg", [True, False])
-def test_v5_keeps_integration_states_independent(published, run_startgg):
+def test_v5_keeps_startgg_independent_of_the_dead_ebas_branch(published, run_startgg):
     version = flow_version(ORCHESTRATOR, published)
     combined = run_node(
         version,
@@ -791,11 +805,13 @@ def test_v5_keeps_integration_states_independent(published, run_startgg):
                 "_runEbas": True,
                 "_runStartgg": run_startgg,
             },
-            "eBas Check": {"ok": True, "isMember": True},
-            "Start.gg Check": {"error": "Synthetic timeout"},
+            "eBas Check": t054_http(
+                {"ok": True, "state": "verified_true", "isMember": True}
+            ),
+            "Start.gg Check": t054_http({"error": "Synthetic timeout"}),
         },
     )
-    assert combined["_ebasState"] == "verified_true" and combined["_ebasData"] == {"member": True}
+    assert combined["_ebasState"] == "skipped" and combined["_ebasData"] == {}
     assert combined["_startggState"] == ("unavailable" if run_startgg else "skipped")
     assert combined["_startggData"] == {} and combined["startgg"] is None
 
@@ -1068,3 +1084,462 @@ def test_register_malformed_storage_flag_cannot_turn_a_failure_into_retryable_re
     )
     assert result["state"] == "outcome_unknown"
     assert result["retry_allowed"] is False
+
+
+# T-054: HTTP status, typed verdicts, optional games and canonical callback acknowledgements.
+# Keep this section independent of the eBas-flow tests owned by T-048.
+def t054_http(body, status=200):
+    return {"statusCode": status, "body": body}
+
+
+def t054_ack(combined, *, ok=True, updated=True):
+    return t054_http(
+        {
+            "checkin_id": combined["checkin_id"],
+            "source": "startgg",
+            "success": updated is True,
+            "ok": ok,
+            "updated": updated,
+            "state": combined["_startggState"],
+        }
+    )
+
+
+def t054_combine(published, response):
+    return run_node(
+        flow_version(ORCHESTRATOR, published),
+        "Combine Results",
+        named={
+            "Parse Input": {
+                "checkin_id": "synthetic-checkin",
+                "attempt_id": "synthetic-attempt",
+                "_runEbas": True,
+                "_runStartgg": True,
+            },
+            "Start.gg Check": response,
+            "eBas Check": t054_http(
+                {"ok": True, "state": "verified_true", "isMember": True}
+            ),
+        },
+    )
+
+
+def t054_verdict(found, **fields):
+    return {
+        "ok": True,
+        "state": "verified_true" if found else "verified_false",
+        "isRegistered": found,
+        **fields,
+    }
+
+
+def t054_startgg(published, nodes, status=200):
+    return run_node(
+        flow_version(STARTGG, published),
+        "Parse Response",
+        t054_http({"data": {"tournament": {"participants": {"nodes": nodes}}}}, status),
+        {"Parse Input": {"tag": "Ax", "attempt_id": "synthetic-attempt"}},
+    )
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t054_http_nodes_keep_status_without_retrying_provider_calls(published):
+    for flow in (ORCHESTRATOR, STARTGG):
+        version = flow_version(flow, published)
+        for node in version["nodes"]:
+            if node["type"] != "n8n-nodes-base.httpRequest":
+                continue
+            response = node["parameters"]["options"]["response"]["response"]
+            assert response["fullResponse"] is response["neverError"] is True
+            assert node.get("retryOnFail", False) is False
+    version = flow_version(ORCHESTRATOR, published)
+    assert version["connections"] == {
+        source: {"main": [[{"node": target, "type": "main", "index": 0}]]}
+        for source, target in (
+            ("Webhook", "Parse Input"),
+            ("Parse Input", "Start.gg Check"),
+            ("Start.gg Check", "Combine Results"),
+            ("Combine Results", "Report Start.gg Result"),
+            ("Report Start.gg Result", "Return Results"),
+        )
+    }
+    for name in (
+        "eBas Check",
+        "Report eBas Result",
+        "Wait for Both",
+        "Wait for Reports",
+    ):
+        assert node_named(version, name)["disabled"] is True
+    parsed = run_node(
+        version,
+        "Parse Input",
+        {
+            "body": {
+                "tag": "Ax",
+                "slug": "synthetic-event",
+                "personnummer": "0" * 12,
+            }
+        },
+        {
+            "Webhook": {
+                "body": {
+                    "tag": "Ax",
+                    "slug": "synthetic-event",
+                    "personnummer": "0" * 12,
+                }
+            }
+        },
+    )
+    assert parsed["_runEbas"] is False and parsed["personnummer"] is None
+    assert "0" * 12 not in json.dumps(parsed)
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+@pytest.mark.parametrize("found", [True, False])
+def test_t054_non_success_boolean_response_is_unavailable(published, status, found):
+    combined = t054_combine(
+        published, t054_http(t054_verdict(found, events=[]), status)
+    )
+    assert combined["_startggState"] == "unavailable"
+    assert combined["_startggOk"] is False and combined["_startggData"] == {}
+    assert combined["startgg"] is None and "events" not in combined
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("body", [
+    {"isRegistered": False},
+    {"ok": True, "isRegistered": False},
+    {"ok": True, "state": "verified_true", "isRegistered": False},
+    {"ok": True, "state": "processing", "isRegistered": False},
+    {"ok": True, "state": "verified_false", "isRegistered": False, "events": ["Contradictory game"]},
+    {"ok": True, "state": "verified_false", "isRegistered": False, "error": None},
+    {"ok": True, "state": "verified_false", "isRegistered": False, "errors": []},
+    {"ok": True, "state": "verified_false", "isRegistered": False, "errors": {"message": "0" * 12}},
+    {"ok": True, "state": "verified_false", "isRegistered": False, "request_result": "error"},
+    None, [], "false", "",
+])
+def test_t054_bare_or_error_envelopes_cannot_manufacture_a_verdict(published, body):
+    combined = t054_combine(published, t054_http(body))
+    assert combined["_startggState"] == "unavailable" and combined["_startggData"] == {}
+    assert combined["startgg"] is None and "0" * 12 not in json.dumps(combined)
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t054_a_typed_body_without_http_status_is_not_verified(published):
+    combined = t054_combine(published, t054_verdict(False))
+    assert combined["_startggState"] == "unavailable" and combined["_startggData"] == {}
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("failure", [
+    "stale", "not-updated", "http", "transport", "malformed", "error-envelope",
+    "error-result", "wrong-id", "wrong-source", "unexpected-state", "missing-state",
+    "null-state", "wrong-verified-state", "missing-success", "null-success", "false-success", "missing",
+])
+def test_t054_failed_local_ack_is_never_reported_as_completed_verification(
+    published, failure
+):
+    version = flow_version(ORCHESTRATOR, published)
+    combined = t054_combine(
+        published, t054_http(t054_verdict(True, events=["Synthetic game"]))
+    )
+    ack = t054_ack(combined)
+    if failure == "stale":
+        ack["body"].update(state="stale_rejected", updated=False, success=False)
+    elif failure == "not-updated":
+        ack["body"]["updated"] = False
+    elif failure == "http":
+        ack["statusCode"] = 500
+    elif failure == "transport":
+        ack = {"error": "Synthetic callback timeout"}
+    elif failure == "malformed":
+        ack["body"] = {"updated": True}
+    elif failure == "error-envelope":
+        ack["body"]["error"] = None
+    elif failure == "error-result":
+        ack["body"]["request_result"] = "error"
+    elif failure == "wrong-id":
+        ack["body"]["checkin_id"] = "different-synthetic-checkin"
+    elif failure == "wrong-source":
+        ack["body"]["source"] = "ebas"
+    elif failure == "unexpected-state":
+        ack["body"]["state"] = "processing"
+    elif failure == "missing-state":
+        ack["body"].pop("state")
+    elif failure == "null-state":
+        ack["body"]["state"] = None
+    elif failure == "wrong-verified-state":
+        ack["body"]["state"] = "verified_false"
+    elif failure == "missing-success":
+        ack["body"].pop("success")
+    elif failure == "null-success":
+        ack["body"]["success"] = None
+    elif failure == "false-success":
+        ack["body"]["success"] = False
+    named = {"Combine Results": combined}
+    if failure != "missing":
+        named["Report Start.gg Result"] = ack
+    result = run_node(version, "Return Results", named=named)
+    expected = "stale" if failure == "stale" else "failed"
+    assert result["local_sync"] == expected
+    assert result["local_sync_sources"] == {"ebas": "skipped", "startgg": expected}
+    assert result["integration_complete"] is False and result["startgg"] is None
+    assert result["results"]["startgg"] == "unavailable" and "events" not in result
+    assert result["member"] is None and result["results"]["ebas"] == "skipped"
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("found", [True, False])
+def test_t054_successful_ack_preserves_an_explicit_positive_or_negative(
+    published, found
+):
+    version = flow_version(ORCHESTRATOR, published)
+    games = ["Synthetic game"] if found else []
+    combined = t054_combine(published, t054_http(t054_verdict(found, events=games)))
+    result = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_ack(combined),
+            "Report eBas Result": t054_http(
+                {"state": "stale_rejected", "updated": False}
+            ),
+        },
+    )
+    assert result["local_sync"] == "ok" and result["integration_complete"] is True
+    assert result["startgg"] is found and result["events"] == games
+    assert result["results"]["startgg"] == (
+        "verified_true" if found else "verified_false"
+    )
+    assert result["member"] is None and result["results"]["ebas"] == "skipped"
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t054_neutral_accepted_callback_is_not_a_verified_verdict(published):
+    combined = t054_combine(published, t054_http({"ok": False, "state": "unavailable"}))
+    result = run_node(
+        flow_version(ORCHESTRATOR, published),
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_ack(combined, ok=False, updated=False),
+        },
+    )
+    assert result["local_sync"] == "ok" and result["integration_complete"] is False
+    assert result["results"]["startgg"] == "unavailable" and result["startgg"] is None
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("nodes", [[None], [{}], [[]], [{"gamerTag": 1}],
+                                   [{"gamerTag": ""}], [{"gamerTag": "  "}],
+                                   [{"gamerTag": "Axel"}, None]])
+def test_t054_malformed_participant_entries_are_unknown_not_negative(published, nodes):
+    result = t054_startgg(published, nodes)
+    assert result["ok"] is False and result["state"] == "unavailable"
+    assert "isRegistered" not in result and "events" not in result
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("events", ["missing", None, {}, "invalid", [None], [{}],
+                                    [{"name": ""}], [{"name": 1}],
+                                    [{"name": "Synthetic game"}, None]])
+def test_t054_matched_player_with_unknown_games_does_not_erase_stored_games(
+    published, events
+):
+    participant = {"gamerTag": " aX "}
+    if events != "missing":
+        participant["events"] = events
+    verdict = t054_startgg(published, [participant])
+    assert verdict["ok"] is True and verdict["state"] == "verified_true"
+    assert (
+        verdict["isRegistered"] is True
+        and "events" not in verdict
+        and "eventCount" not in verdict
+    )
+    combined = t054_combine(published, t054_http(verdict))
+    assert combined["_startggData"] == {"registered": True}
+    payload = run_node(
+        flow_version(ORCHESTRATOR, published),
+        "Report Start.gg Result",
+        named={"Combine Results": combined},
+    )
+    assert payload["data"] == {
+        "registered": True
+    }  # Canonical writer sees no authoritative games list.
+    result = run_node(
+        flow_version(ORCHESTRATOR, published),
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_ack(combined),
+        },
+    )
+    assert result["integration_complete"] is True and "events" not in result
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t054_valid_empty_participant_list_is_a_verified_negative(published):
+    result = t054_startgg(published, [])
+    assert result["ok"] is True and result["state"] == "verified_false"
+    assert result["isRegistered"] is False and result["events"] == []
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_t054_matched_player_with_valid_empty_events_retains_authoritative_empty(
+    published,
+):
+    result = t054_startgg(published, [{"gamerTag": "Ax", "events": []}])
+    assert result["state"] == "verified_true" and result["events"] == []
+    combined = t054_combine(published, t054_http(result))
+    assert combined["_startggData"] == {"registered": True, "events": []}
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("status", [429, 503])
+def test_t054_startgg_http_failure_with_valid_empty_data_is_unknown(published, status):
+    result = t054_startgg(published, [], status=status)
+    assert result["state"] == "unavailable" and "isRegistered" not in result
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("user,expected", [
+    ({"name": "Synthetic display name"}, "Synthetic display name"),
+    (None, None), ({"name": {"invalid": "shape"}}, None), ("invalid", None),
+])
+def test_t054_existing_display_name_metadata_keeps_its_typed_shape(
+    published, user, expected
+):
+    result = t054_startgg(published, [{"gamerTag": "Ax", "events": [], "user": user}])
+    assert result["state"] == "verified_true" and result["name"] == expected
+    assert result["events"] == []
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("acknowledgement,expected_sync", [
+    ("accepted", "ok"), ("stale", "stale"), ("http-error", "failed"),
+])
+def test_t054_skipped_provider_still_checks_every_executed_callback(
+    published, enabled, acknowledgement, expected_sync
+):
+    version = flow_version(ORCHESTRATOR, published)
+    parsed = run_node(
+        version,
+        "Parse Input",
+        named={
+            "Webhook": {
+                "body": {
+                    "checkin_id": "synthetic-checkin",
+                    "attempt_id": "synthetic-attempt",
+                    "tag": "Ax",
+                    **({"slug": "synthetic-event"} if enabled else {}),
+                }
+            }
+        },
+    )
+    assert parsed["_runStartgg"] is enabled
+    combined = run_node(
+        version,
+        "Combine Results",
+        named={
+            "Parse Input": parsed,
+            "Start.gg Check": t054_http(
+                {"ok": False, "state": "skipped", "skipped": True}
+            ),
+        },
+    )
+    assert combined["_startggState"] == "skipped" and combined["_startggData"] == {}
+    ack = t054_ack(combined, ok=False, updated=False)
+    if acknowledgement == "stale":
+        ack["body"]["state"] = "stale_rejected"
+    elif acknowledgement == "http-error":
+        ack["statusCode"] = 500
+    result = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": ack,
+        },
+    )
+    assert result["local_sync"] == expected_sync
+    assert result["local_sync_sources"]["startgg"] == expected_sync
+    assert result["integration_complete"] is False and result["startgg"] is None
+    assert result["results"]["startgg"] == (
+        "skipped" if expected_sync == "ok" else "unavailable"
+    )
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("state", ["verified_true", "verified_false", "unavailable", "skipped"])
+def test_t054_real_backend_acknowledgement_contract(
+    app_client, pg_db, published, state
+):
+    from shared import postgres_api as postgres
+
+    row = pg_db.seed_checkin(
+        member=True,
+        startgg=True,
+        is_guest=False,
+        status="Ready",
+        tournament_games_registered=["Existing synthetic game"],
+    )
+    attempt = postgres.start_integration_attempt(row["record_id"], sources=("startgg",))
+    is_verdict = state in ("verified_true", "verified_false")
+    found = state == "verified_true"
+    verdict = (
+        t054_verdict(found, events=["New synthetic game"] if found else [])
+        if is_verdict
+        else {
+            "ok": False,
+            "state": state,
+            "skipped": state == "skipped",
+        }
+    )
+    version = flow_version(ORCHESTRATOR, published)
+    combined = t054_combine(published, t054_http(verdict))
+    combined.update(checkin_id=row["record_id"], attempt_id=attempt)
+    with pg_db.pool.connection() as connection:
+        combined["fetched_at"] = (
+            connection.execute("SELECT clock_timestamp()").fetchone()[0].isoformat()
+        )
+    payload = run_node(
+        version, "Report Start.gg Result", named={"Combine Results": combined}
+    )
+    response = app_client.post("/api/integration/result", json=payload)
+    assert response.status_code == 200
+    acknowledgement = response.json()
+    assert acknowledgement["success"] is acknowledgement["updated"] is is_verdict
+    assert acknowledgement["ok"] is is_verdict and acknowledgement["state"] == state
+    result = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_http(acknowledgement, response.status_code),
+        },
+    )
+    assert result["local_sync"] == "ok"
+    assert (
+        result["integration_complete"] is is_verdict
+        and result["results"]["startgg"] == state
+    )
+    stored = pg_db.checkins()[0]
+    if is_verdict:
+        assert result["startgg"] is found and stored["startgg"] is found
+        assert stored["tournament_games_registered"] == (
+            ["New synthetic game"] if found else []
+        )
+    else:
+        assert result["startgg"] is None and "events" not in result
+        for key in (
+            "member",
+            "startgg",
+            "is_guest",
+            "status",
+            "tournament_games_registered",
+        ):
+            assert stored[key] == row[key]
