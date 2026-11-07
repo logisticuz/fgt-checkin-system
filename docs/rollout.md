@@ -32,3 +32,36 @@ rollout, with the private eBas configuration and `INTEGRATION_ENGINE=n8n`.
 `live` with `INTEGRATION_ENGINE=none` refuses startup. The explicit override
 `EBAS_ALLOW_LIVE_WITH_ENGINE_NONE=1` permits real provider access despite that engine
 setting and must only be used deliberately; it is not needed for DEV or stub operation.
+
+## Internal callback authentication gate
+
+`INTERNAL_AUTH_MODE` defaults to `soft`. The shared dependency covers POST
+`/api/checkin/begin`, `/api/integration/result`, `/api/checkin/{checkin_id}/member-status`,
+`/api/notify/checkin` and `/api/notify/update`. In `soft`, missing/invalid tokens retain
+the existing warning and request behavior; an untrusted begin request still takes the
+public ownership path. In `enforce`, a missing/invalid token receives 401 before the handler.
+Startup reports `internal auth: soft` or `internal auth: enforce` without the token.
+Enforce mode requires a configured non-empty `INTERNAL_API_TOKEN` or startup fails.
+
+1. Configure the **same private, non-empty** `INTERNAL_API_TOKEN` in backend and n8n.
+   Keep `INTERNAL_AUTH_MODE=soft` in the backend. Recreate affected services with the
+   approved environment configuration so their running processes receive the values;
+   do not print tokens or add them to Git. The exported workflows send `X-Internal-Token`.
+2. Run one complete event in soft mode, including all internal callback/notification paths.
+   Check backend logs for **zero** `missing or invalid token` warnings. Resolve every
+   warning and repeat the observation before proceeding; successful requests alone do
+   not prove that token configuration matches.
+3. Only after that gate, set `INTERNAL_AUTH_MODE=enforce` in the backend environment and
+   recreate the backend service. Keep the matching n8n token configured. Verify normal
+   internal requests and confirm that missing/wrong tokens receive 401.
+
+Rollback: set `INTERNAL_AUTH_MODE=soft` again and recreate the backend with the updated
+environment. This requires **no image rebuild** and no database change. Keep the shared
+token and existing nginx public-route restrictions in place. Changing an env file alone
+does not update a running container. These instructions authorize no deployment.
+
+The example env files disable n8n diagnostics and use `N8N_SECURE_COOKIE=true` for PROD
+behind HTTPS. Local HTTP development can explicitly override the cookie setting to false.
+Their workflow env allowlist contains only the variables referenced by exported workflows;
+OAuth `STARTGG_CLIENT_SECRET` is not exposed to workflow expressions. Retired basic-auth
+and Airtable entries are omitted; real `.env` and `n8n.env` files must be configured privately.

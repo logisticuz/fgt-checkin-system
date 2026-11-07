@@ -142,6 +142,9 @@ app.include_router(__import__("status_api").router)
 
 @app.on_event("startup")
 async def warn_missing_internal_token():
+    from app_state import validate_internal_auth_config
+
+    validate_internal_auth_config()
     if not INTERNAL_API_TOKEN:
         logger.warning("INTERNAL_API_TOKEN is unset; internal token monitoring is disabled.")
 
