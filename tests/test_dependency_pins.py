@@ -1,5 +1,6 @@
 """Check service pins; regenerate from the tested venv with --write-locks."""
 
+import json
 import re
 import sys
 from collections import deque
@@ -101,11 +102,154 @@ def test_dockerfile_copies_and_installs_its_lock_with_a_pinned_python_image(serv
     assert dockerfile.index(f"COPY {copy_source}") < dockerfile.index("RUN pip install")
 
 
-def test_nginx_uses_an_exact_release_tag():
-    compose = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
-    images = re.findall(r"^\s+image:\s*(nginx:\S+)\s*$", compose, re.MULTILINE)
-    assert len(images) == 1
-    assert re.fullmatch(r"nginx:1\.27\.\d+", images[0])
+def compose_image_references(compose):
+    """Read single-line image scalars; reject unsupported syntax instead of skipping it."""
+    images = []
+    for line in compose.splitlines():
+        entry = re.match(r"""^\s*(?:image|"image"|'image')\s*:\s*(.*)$""", line)
+        if entry is None:
+            continue
+        scalar = re.fullmatch(
+            r"""(?P<value>"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s#'"]+)(?:\s+#.*)?\s*""",
+            entry[1],
+        )
+        assert scalar is not None, f"Unsupported compose image scalar: {line!r}"
+        value = scalar["value"]
+        if value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise AssertionError(f"Unsupported quoted image: {value!r}") from error
+        elif value.startswith("'"):
+            value = value[1:-1].replace("''", "'")
+        images.append(value)
+    return images
+
+
+def assert_explicit_release_images(compose):
+    images = compose_image_references(compose)
+    assert images, "No active image references found"
+    for image in images:
+        assert re.fullmatch(r"[A-Za-z0-9_./:@\[\]-]+", image), image
+        assert not re.search(r"latest|stable", image, re.IGNORECASE), image
+        named, separator, digest = image.partition("@")
+        if separator:
+            assert re.fullmatch(r"sha256:[a-f0-9]{64}", digest), image
+        repository, separator, tag = named.rsplit("/", 1)[-1].partition(":")
+        assert repository and separator, f"Image needs an explicit release tag: {image}"
+        assert re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag), image
+
+
+@pytest.mark.parametrize("name", ["docker-compose.dev.yml", "docker-compose.prod.yml"])
+def test_nginx_uses_the_same_release_index_as_prod(name):
+    compose = (ROOT / name).read_text(encoding="utf-8")
+    images = [image for image in compose_image_references(compose) if image.startswith("nginx:")]
+    assert images == [
+        "nginx:1.29.4@sha256:" "c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec"
+    ]
+
+
+def test_nginx_smoke_uses_the_reviewed_release_index():
+    smoke = (ROOT / "tests" / "security_smoke.sh").read_text(encoding="utf-8")
+    images = re.findall(r"^\s+(nginx:\S+)\s+>/dev/null$", smoke, re.MULTILINE)
+    expected = (
+        "nginx:1.29.4@sha256:"
+        "c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec"
+    )
+    assert images == [expected, expected]
+
+
+def test_n8n_uses_the_same_release_and_multiarch_index_on_dev_and_prod():
+    expected = (
+        "n8nio/n8n:2.4.8@sha256:" "cae1f28d585a99d9ce9a56f82fbfc99fc100862ffef988d73fa2048d2687b0cc"
+    )
+    for name in ("docker-compose.dev.yml", "docker-compose.prod.yml"):
+        compose = (ROOT / name).read_text(encoding="utf-8")
+        images = [
+            image for image in compose_image_references(compose) if image.startswith("n8nio/n8n:")
+        ]
+        assert images == [expected]
+        assert not re.search(r":(?:latest|stable)(?:@|$)", images[0])
+
+
+@pytest.mark.parametrize("name", ["docker-compose.dev.yml", "docker-compose.prod.yml"])
+def test_certbot_uses_the_confirmed_prod_release_index(name):
+    compose = (ROOT / name).read_text(encoding="utf-8")
+    images = [
+        image for image in compose_image_references(compose) if image.startswith("certbot/certbot:")
+    ]
+    assert images == [
+        "certbot/certbot:v5.2.2@sha256:"
+        "5255405f241cd64b121f36ef0172711420816bbbd9c029674de53e5ed953182d"
+    ]
+
+
+@pytest.mark.parametrize("name", ["docker-compose.dev.yml", "docker-compose.prod.yml"])
+def test_compose_images_use_explicit_release_references(name):
+    assert_explicit_release_images((ROOT / name).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("nginx:1.29.4", "nginx:1.29.4"),
+        ("nginx:1.29.4 # latest/stable is only a comment", "nginx:1.29.4"),
+        ('"nginx:1.29.4"', "nginx:1.29.4"),
+        ("'nginx:1.29.4'", "nginx:1.29.4"),
+        ('"nginx:1.29.4" # latest/stable is only a comment', "nginx:1.29.4"),
+        ("'registry.invalid:5000/team/image:v1.2.3'", "registry.invalid:5000/team/image:v1.2.3"),
+        ("[::1]:5000/team/image:v1.2.3", "[::1]:5000/team/image:v1.2.3"),
+        (f'"nginx:1.29.4@sha256:{"a" * 64}"', f'nginx:1.29.4@sha256:{"a" * 64}'),
+    ],
+)
+def test_image_policy_accepts_explicit_release_scalars(value, expected):
+    compose = f"services:\n  proxy:\n    image: {value}\n"
+    assert compose_image_references(compose) == [expected]
+    assert_explicit_release_images(compose)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "certbot/certbot",
+        "'certbot/certbot'",
+        '"certbot/certbot"',
+        "registry.invalid:5000/team/image",
+        f'nginx@sha256:{"a" * 64}',
+        "nginx:latest",
+        "'nginx:stable'",
+        f'"nginx:latest@sha256:{"a" * 64}"',
+        '"registry.invalid/latest/nginx:1.29.4"',
+        "'registry.invalid/stable/nginx:1.29.4'",
+        '"nginx:1.29.4-stable"',
+        '"nginx:Latest"',
+        r'"nginx:l\u0061test"',
+        '"nginx:1.29.4" trailing',
+        '"nginx:1.29.4',
+        "",
+        ">",
+        "nginx:1.29.4#not-a-comment",
+        "nginx:1.29.4@sha256:bad",
+    ],
+)
+def test_image_policy_rejects_implicit_or_moving_releases(value):
+    with pytest.raises(AssertionError):
+        assert_explicit_release_images(f"services:\n  proxy:\n    image: {value}\n")
+
+
+def test_image_policy_ignores_commented_lines_and_reads_quoted_keys():
+    compose = """
+services:
+  # image: nginx:latest
+  proxy:
+    image: "nginx:1.29.4" # certbot/certbot:stable
+    # image: certbot/certbot
+  certbot:
+    'image': 'certbot/certbot:v5.2.2'
+# image: registry.invalid:5000/team/image
+"""
+    assert compose_image_references(compose) == ["nginx:1.29.4", "certbot/certbot:v5.2.2"]
+    assert_explicit_release_images(compose)
 
 
 if __name__ == "__main__":

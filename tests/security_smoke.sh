@@ -153,7 +153,7 @@ start_gateway() {
         --mount "type=bind,src=$(native_path "$scratch/certs"),dst=/etc/letsencrypt,readonly" \
         --mount "type=bind,src=$(native_path "$scratch/htpasswd"),dst=/etc/nginx/.htpasswd,readonly" \
         --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
-        nginx:1.27.5 >/dev/null
+        nginx:1.29.4@sha256:c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec >/dev/null
     for ((attempt=0; attempt<30; attempt++)); do
         if curl --noproxy '*' -ksSf --max-time 2 -H 'Host: www.checkin.fgctrollhattan.se' "$base/health" >/dev/null 2>&1; then return; fi
         sleep 0.2
@@ -166,7 +166,7 @@ containers+=("$dev_gateway")
 docker run -d --name "$dev_gateway" --network "$network" \
     --mount "type=bind,src=$(native_path "$root/nginx.dev.conf"),dst=/etc/nginx/conf.d/default.conf,readonly" \
     --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
-    nginx:1.27.5 >/dev/null
+    nginx:1.29.4@sha256:c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec >/dev/null
 docker exec "$dev_gateway" nginx -t
 # Official entrypoint has rendered envsubst before either syntax test or reload.
 docker exec "$gateway" nginx -t
@@ -349,7 +349,7 @@ try:
 finally:
     dev_connection.close()
 PY
-echo 'PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'
+echo 'PASS isolated nginx 1.29.4: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'
 
 # Restore the missing-sibling fixture after T-044's sibling isolation checks.
 docker rm -f "$meetup" >/dev/null

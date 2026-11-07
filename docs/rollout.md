@@ -77,7 +77,9 @@ hints remain for `DATA_BACKEND=airtable`. Real `.env` and `n8n.env` files are co
 
 ## nginx validation and graceful reload
 
-Keep the reviewed nginx 1.27.5 image and the existing certificate, htpasswd and
+Keep the reviewed nginx 1.29.4 image pinned to
+`nginx:1.29.4@sha256:c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec`,
+and the existing certificate, htpasswd and
 `ADMIN_AUTH_COOKIE_TOKEN` mounts/settings. `nginx.conf` is an envsubst **template**;
 only `${ADMIN_AUTH_COOKIE_TOKEN}` is substituted. Do not validate the unrendered
 template or substitute nginx's `$host`, `$scheme`, map or upstream variables.
@@ -261,3 +263,102 @@ awk -v day=2026-11-14 'index($0,"\"time\":\""day) && match($0,/"status":[0-9]+/)
 The masked URI/route group and `limit_req_status` retain venue-rate evidence across
 recreation. The access log is authoritative for counts; do not add the duplicated
 5xx entries in `error.log` to the totals.
+
+## n8n image pin, stopped-volume backup and rollback
+
+The reviewed n8n pin is
+`n8nio/n8n:2.4.8@sha256:cae1f28d585a99d9ce9a56f82fbfc99fc100862ffef988d73fa2048d2687b0cc`.
+This is an OCI multi-architecture index: amd64 selects
+`sha256:9166e30aa74282695e3d41bf26543ce1a02eb6d624745a9f71d0e4b0c8c995b8`,
+arm64 selects `sha256:c69c5414600894cb3eaeabd116bacc892bd46db7dd8456aef5d9175bfb2859c6`.
+The supplied PROD digest fragment matches the index; an architecture-specific child
+digest is expected to differ. No PROD operation is authorized by this runbook.
+
+Before changing a running n8n version:
+
+1. Identify the exact container, image ID/repository digest, named volume and project.
+   Inspect only the required metadata; do not dump environment values or credentials.
+   Confirm that no other container uses the volume. **Never run two n8n instances
+   against the same volume.** Preserve the previous image locally.
+2. **Stop n8n and back up the entire volume before any version transition.** Copying
+   only a live `database.sqlite` can omit SQLite WAL state. A stopped-volume tar retains
+   the database, configuration, ownership and binary data together. Keep it outside Git.
+   Record its SHA-256 and verify the copied SQLite database with a read-only integrity check.
+3. Keep the exact same `N8N_ENCRYPTION_KEY`; a restored SQLite file without the matching
+   key cannot decrypt its credentials. Preserve the volume configuration too. Compare
+   key/configuration identity internally, never print the key or expanded compose config.
+4. Change only the intended n8n image. For an existing DEV project, a read-only original
+   compose file plus an in-memory stdin image override preserves its mounts, key and port.
+   Use `up --detach --no-deps --pull never n8n` after prefetching the immutable image.
+   Do not recreate nginx or dependencies as part of this n8n operation.
+5. Require the expected `n8n --version`, readiness HTTP 200, completed migrations,
+   preserved workflow IDs and successful workflow activation logs. In n8n 2.x an exported
+   `active` flag alone does not prove runtime activation. Check the actual activation IDs
+   or UI, and record migration, task-runner, deprecation and activation warnings.
+   If a workflow cannot load, stop the new container and roll back; do not patch flows
+   during the image rehearsal. Do not execute provider workflows with real credentials.
+
+Rollback means **restore the full volume and the previous image**, not just swap images:
+
+1. Stop the upgraded container and confirm no other volume user is running. Retain a
+   migrated snapshot separately if needed for diagnosis.
+2. Verify the original backup hash. Mount only the explicitly verified target volume
+   into an offline restore helper, clear that volume and extract the complete original
+   archive, retaining ownership. Check database/config bytes against the backup before start.
+3. Start the exact previous image with the same encryption key. Require its old version,
+   readiness, workflow activation IDs and a clean startup against the restored schema.
+   An old binary pointed at a migrated 2.x database is not a rollback.
+4. Only after that rollback succeeds, take a fresh stopped-volume backup and repeat the
+   pinned upgrade. Keep the backup until the deployment has been accepted.
+
+DEV rehearsal targets are exclusively `fgt-dev-n8n-1`, its local
+`fgt-checkin-system_n8n_data` volume, and existing port 5679. The volume name also appears
+in PROD configuration, so verify the Docker host/context and sole DEV container user;
+the name alone does not identify a safe target. Leave Nimo and other containers untouched.
+
+For this rehearsal, an offline `alpine:3.21` helper used `--network none --read-only`,
+with the DEV volume mounted read-only for backup and writable only for the authorized
+restore, plus a backup directory inside agent-hub. Backup commands have this shape:
+Set `$volume` to the verified volume name and `$backupRoot` to an existing private
+backup directory before using these commands.
+
+```powershell
+docker stop --timeout 30 fgt-dev-n8n-1
+docker run --rm --network none --read-only --mount "type=volume,source=$volume,target=/data,readonly" --mount "type=bind,source=$backupRoot,target=/backup" alpine:3.21 tar -czf /backup/pre-upgrade.tar.gz -C /data .
+Get-FileHash -LiteralPath "$backupRoot/pre-upgrade.tar.gz" -Algorithm SHA256
+```
+
+Use direct argument calls for the post-restore `sha256sum /data/database.sqlite /data/config`
+check. A PowerShell pipeline can append CRLF to the last shell-script line; do not treat
+that verification failure as permission to start the old binary without checking the bytes.
+The rehearsal command ledger and safe activation/restore evidence are recorded in
+agent-hub under `reports/T-051.commands.md` and `backups/T-051-20261107`.
+
+The nginx pin follows the confirmed PROD image, independently of the mutable tag:
+`nginx:1.29.4@sha256:c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec`.
+It is an OCI index (amd64 child
+`sha256:617fef3c6adb90788d06f7ebe634fe990a6cd1e63c815facaf5fcaf3fa1ea003`).
+At verification time, `nginx:1.29.4` resolved to a different index; retain the reviewed
+digest rather than resolving that tag again. The conductor applies the DEV nginx change.
+
+### DEV rehearsal result, 2026-11-07
+
+The stopped 1.122.5 volume contained 22 workflows and passed SQLite integrity checks.
+The first 2.4.8 run completed all 12 migrations, kept all workflow IDs and activated
+all five previously active workflows. The entire original volume was then restored:
+database/config bytes matched the backup, the exact prior 1.122.5 image started with
+readiness 200, no migrations and its original five activation IDs. The encryption key
+environment matched at every transition without being printed.
+
+After a fresh stopped-volume backup, the final 2.4.8 run was healthy with readiness 200,
+all 12 migrations complete, no activation failures and the same seven registrations
+as the first upgrade. The two extra registrations are internal callable workflows:
+`FGC THN - Start.gg Check (Internal)` and `FGC THN - eBas Check (Internal)`.
+Their nodes are execute-workflow triggers, code and HTTP requests; no webhook, schedule
+or polling trigger was newly enabled. The conductor accepted this expected 2.x behavior.
+
+The JavaScript runner registered successfully. Internal Python runner startup warned
+that Python 3 was missing; no activated workflow contains a Python code node.
+The deprecation search matched a debug registration of `workflow-hooks-deprecated-v2`,
+not a deprecation warning. No provider workflow was executed during the rehearsal.
+The initial and fresh rollback archives remain in agent-hub, outside the repository.
