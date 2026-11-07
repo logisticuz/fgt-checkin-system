@@ -283,10 +283,15 @@ The only Docker target is the hard-coded `fgt-dev-backend-1`. Its helper checks
 the engine again inside the container before any write. It snapshots only the
 settings fields it changes, activates one unique `acceptance-<timestamp>-<random>`
 event with a synthetic game, and keeps settings writes locked during the HTTP
-checks. Three synthetic identities use the `.invalid` email namespace; the flow
+checks. An exclusive session advisory lock serializes the complete helper lifecycle
+before taking a snapshot; a busy helper or a previous active `acceptance-*` event
+refuses a new run. Three synthetic identities use the `.invalid` email namespace; the flow
 needs no PNR with integrations disabled. If a PNR is ever added to these checks,
 use the published Skatteverket constant in `tests/fixtures`, never a real number.
 
+Three distinct check-in IDs and tokens must match the current player's exact
+synthetic name/tag/email in the helper. Each token must authorize its own status
+URL and reject a different owned ID with 403; public status JSON stays private.
 The script checks orchestrate, capability-signed status, game saves and the TO
 payment API when exposed. A missing optional payment route is reported as SKIP.
 The helper's `finally` path restores the previous settings and deletes only this

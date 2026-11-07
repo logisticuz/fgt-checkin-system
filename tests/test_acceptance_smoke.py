@@ -189,10 +189,18 @@ class Fixture:
         if self.setup_fails:
             raise smoke.SmokeError("Fixture setup refused")
 
-    def verify(self, checkin_id=None):
+    def verify(self, checkin_id=None, *, player=None):
         assert self.settings["active_event_slug"] == self.slug
         if checkin_id is not None:
-            assert self.rows[checkin_id]["event_slug"] == self.slug
+            row = self.rows[checkin_id]
+            token = self.slug.rsplit("-", 1)[1]
+            if (
+                row["event_slug"] != self.slug
+                or row.get("tag") != f"acc-{token}-{player}"
+                or row.get("name") != f"Acceptance Smoke {token} {player}"
+                or row.get("email") != f"acceptance-{token}-{player}@example.invalid"
+            ):
+                raise smoke.SmokeError("Wrong current synthetic player")
 
     def finish(self):
         self.finished = True
@@ -202,7 +210,15 @@ class Fixture:
             raise smoke.SmokeError("Fixture cleanup not confirmed")
 
 
-def dev_client(fixture, *, fail_at=None, optional_payment=False):
+def dev_client(
+    fixture,
+    *,
+    fail_at=None,
+    optional_payment=False,
+    identity_bug=None,
+    status_identity=None,
+    binding_bug=False,
+):
     requests = []
 
     def handler(request):
@@ -218,7 +234,20 @@ def dev_client(fixture, *, fail_at=None, optional_payment=False):
         assert "personnummer" not in body
         if request.url.path == "/api/checkin/orchestrate":
             key = f"synthetic-{len(fixture.rows)}"
-            fixture.rows[key] = {"event_slug": fixture.slug, "games": [], "paid": False}
+            existing = next((key for key in fixture.rows if key.startswith("synthetic-")), None)
+            if identity_bug == "repeated-id" and existing:
+                key = existing
+            else:
+                fixture.rows[key] = {
+                    **body,
+                    "event_slug": fixture.slug,
+                    "games": [],
+                    "paid": False,
+                    "capability": "private-capability-" + key,
+                }
+                if identity_bug == "wrong-player" and existing:
+                    for field in ("tag", "name", "email"):
+                        fixture.rows[key][field] = fixture.rows[existing][field]
             if fail_at == "orchestrate":
                 return httpx.Response(500, text="private provider response")
             return httpx.Response(
@@ -226,12 +255,15 @@ def dev_client(fixture, *, fail_at=None, optional_payment=False):
                 json={
                     "slug": fixture.slug,
                     "checkin_id": key,
-                    "status_token": "private-capability",
+                    "status_token": fixture.rows[
+                        existing if identity_bug == "repeated-token" and existing else key
+                    ]["capability"],
                 },
             )
         if request.url.path.startswith("/api/checkin/"):
-            assert request.url.params["t"] == "private-capability"
             row = fixture.rows[request.url.path.split("/")[-2]]
+            if request.url.params["t"] != row["capability"] and not binding_bug:
+                return httpx.Response(403, json={"found": False})
             return httpx.Response(
                 200,
                 json={
@@ -239,6 +271,7 @@ def dev_client(fixture, *, fail_at=None, optional_payment=False):
                     "games": row["games"],
                     "payment_ok": row["paid"],
                     "ready": bool(row["games"]) and row["paid"],
+                    **({status_identity: "private-wrong-identity"} if status_identity else {}),
                 },
             )
         if request.url.path == "/api/player/games":
@@ -294,6 +327,39 @@ def test_dev_payment_api_can_be_absent_without_touching_another_row():
     assert list(fixture.rows) == ["real-player"]
 
 
+@pytest.mark.parametrize("bug", ["repeated-id", "repeated-token", "wrong-player"])
+def test_dev_rejects_reused_or_wrong_current_identity_and_still_cleans(bug):
+    fixture = Fixture()
+    client, requests = dev_client(fixture, identity_bug=bug)
+    with client:
+        checks = smoke.dev_write(client, DEV, fixture=fixture)
+    assert any(check.passed is False for check in checks)
+    assert len([request for request in requests if request.method == "POST"]) == 2
+    assert not any(check.name == "player 2 flow" and check.passed for check in checks)
+    assert fixture.finished and fixture.settings == fixture.snapshot
+    assert list(fixture.rows) == ["real-player"]
+
+
+@pytest.mark.parametrize("field", ["checkin_id", "tag", "name"])
+def test_dev_rejects_status_identity_contradictions_without_expanding_json(field):
+    fixture = Fixture()
+    client, _ = dev_client(fixture, status_identity=field)
+    with client:
+        checks = smoke.dev_write(client, DEV, fixture=fixture)
+    assert any(check.passed is False for check in checks)
+    assert fixture.finished and fixture.settings == fixture.snapshot
+
+
+def test_dev_requires_cross_id_status_tokens_to_be_rejected():
+    fixture = Fixture()
+    client, _ = dev_client(fixture, binding_bug=True)
+    with client:
+        checks = smoke.dev_write(client, DEV, fixture=fixture)
+    assert any(check.passed is False for check in checks)
+    assert not any(check.name == "status token binding" and check.passed for check in checks)
+    assert fixture.finished and list(fixture.rows) == ["real-player"]
+
+
 @pytest.mark.parametrize(
     "container",
     ["fgt-checkin-system-backend-1", "fgt-prod-backend-1", "fgt-dev-backend-1-extra", "backend"],
@@ -311,16 +377,19 @@ def test_helper_rechecks_engine_inside_container_before_importing_storage(monkey
     import json
 
     original = builtins.__import__
+    forbidden_imports = []
 
     def guarded_import(name, *args, **kwargs):
         if name in {"shared", "psycopg_pool"}:
-            pytest.fail("Storage must not even load before the container engine guard")
+            forbidden_imports.append(name)
+            raise ImportError("Storage must not load before the container engine guard")
         return original(name, *args, **kwargs)
 
     monkeypatch.setenv("INTEGRATION_ENGINE", "n8n")
     scope = {"__builtins__": {**vars(builtins), "__import__": guarded_import}}
     exec(compile(smoke.DEV_HELPER, "<mocked-dev-helper>", "exec"), scope)
     assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert forbidden_imports == []
 
 
 def test_dev_refuses_engine_or_nonlocal_admin_before_helper_or_write():
@@ -351,7 +420,20 @@ def test_readonly_cli_exit_code_is_nonzero_for_failed_probes(monkeypatch, capsys
     assert "private" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("scenario", ["finish", "eof", "unexpected-player", "delete-failure"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "finish",
+        "eof",
+        "unexpected-player",
+        "delete-failure",
+        "already-running",
+        "stale-active",
+        "overlap",
+        "correct-current",
+        "wrong-current",
+    ],
+)
 def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, monkeypatch):
     import builtins
     import contextlib
@@ -372,7 +454,13 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
         "offer_membership": True,
         "collect_acquisition_source": True,
     }
+    if scenario == "stale-active":
+        original["active_event_slug"] = "acceptance-previous-interrupted-run"
     settings = original.copy()
+    prior_owner = object() if scenario == "already-running" else None
+    lifecycle_owner = [prior_owner]
+    updates, snapshot_reads, competing_replies = [], [], []
+    other_attempted = [False]
     rows = {
         "real": {
             "event_slug": "existing-event",
@@ -383,6 +471,8 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
     }
 
     def update_settings(record_id, fields):
+        assert lifecycle_owner[0] is not None
+        updates.append(fields.copy())
         settings.update(fields)
         if fields.get("active_event_slug") == slug:
             for index in range(1, 4):
@@ -397,6 +487,7 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
         return {"record_id": record_id, "fields": settings.copy()}
 
     def delete_checkin(record_id):
+        assert lifecycle_owner[0] is not None
         assert rows[record_id]["event_slug"] == slug
         assert record_id.startswith("synthetic-")
         if scenario == "delete-failure":
@@ -405,11 +496,32 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
         return True
 
     class Connection:
+        @contextlib.contextmanager
         def transaction(self):
-            return contextlib.nullcontext()
+            yield
+            # Deterministically start B immediately after A's setup commit,
+            # before A can acquire its long-lived settings row lock.
+            if (
+                scenario == "overlap"
+                and not other_attempted[0]
+                and settings["active_event_slug"] == slug
+            ):
+                other_attempted[0] = True
+                run_competitor()
 
         def execute(self, query, params=None):
-            if query.startswith("SELECT pg_advisory"):
+            if query.startswith("SELECT pg_try_advisory_lock"):
+                acquired = lifecycle_owner[0] is None
+                if acquired:
+                    lifecycle_owner[0] = self
+                result = [(acquired,)]
+            elif query.startswith("SELECT pg_advisory_unlock"):
+                assert lifecycle_owner[0] is self
+                assert settings == original
+                lifecycle_owner[0] = None
+                result = [(True,)]
+            elif query.startswith("SELECT pg_advisory"):
+                assert lifecycle_owner[0] is not None
                 result = [(None,)]
             elif query.startswith("SELECT id FROM settings"):
                 result = [(1,)]
@@ -434,12 +546,18 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
         def close(self):
             pass
 
+    def current_settings():
+        assert lifecycle_owner[0] is not None
+        snapshot_reads.append(settings.copy())
+        return {"record_id": "1", "fields": settings.copy()}
+
     storage = SimpleNamespace(
         DATABASE_URL="dummy-test-configuration",
         _pool=None,
-        get_active_settings_with_id=lambda: {"record_id": "1", "fields": settings.copy()},
+        get_active_settings_with_id=current_settings,
         update_settings=update_settings,
         delete_checkin=delete_checkin,
+        get_checkin_by_record_id=lambda record_id: {"fields": rows[record_id].copy()},
     )
     fake_signal = SimpleNamespace(
         SIGALRM=1, SIGTERM=2, signal=lambda *args: None, alarm=lambda *args: None
@@ -455,7 +573,59 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
             return fake_signal
         return real_import(name, *args, **kwargs)
 
+    def run_competitor():
+        owned_before = lifecycle_owner[0]
+        settings_before = settings.copy()
+        second = SimpleNamespace(**vars(storage))
+        accesses = {"snapshot": 0, "write": 0}
+
+        def second_settings():
+            accesses["snapshot"] += 1
+            return {"record_id": "1", "fields": settings.copy()}
+
+        def second_update(record_id, fields):
+            accesses["write"] += 1
+            return update_settings(record_id, fields)
+
+        second.get_active_settings_with_id = second_settings
+        second.update_settings = second_update
+
+        def second_import(name, *args, **kwargs):
+            return (
+                SimpleNamespace(postgres_api=second)
+                if name == "shared"
+                else imported(name, *args, **kwargs)
+            )
+
+        previous_stdin = smoke.sys.stdin
+        smoke.sys.stdin = io.StringIO(
+            json.dumps({"action": "setup", "slug": "acceptance-20261107123457-deadbeef1234"}) + "\n"
+        )
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                exec(
+                    compile(smoke.DEV_HELPER, "<overlapping-helper-B>", "exec"),
+                    {"__builtins__": {**vars(builtins), "__import__": second_import}},
+                )
+        finally:
+            smoke.sys.stdin = previous_stdin
+        competing_replies.extend(json.loads(line) for line in captured.getvalue().splitlines())
+        assert lifecycle_owner[0] is owned_before
+        assert settings == settings_before
+        assert accesses == {"snapshot": 0, "write": 0}
+
     messages = [json.dumps({"action": "setup", "slug": slug})]
+    if scenario in {"correct-current", "wrong-current"}:
+        messages.append(
+            json.dumps(
+                {
+                    "action": "verify",
+                    "checkin_id": "synthetic-1",
+                    "player": 1 if scenario == "correct-current" else 2,
+                }
+            )
+        )
     if scenario != "eof":
         messages.append(json.dumps({"action": "finish"}))
     monkeypatch.setattr(smoke.sys, "stdin", io.StringIO("\n".join(messages) + "\n"))
@@ -467,13 +637,37 @@ def test_embedded_helper_finally_restores_and_preserves_real_players(scenario, m
             {"__builtins__": {**vars(builtins), "__import__": imported}},
         )
     replies = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert replies[0] == {"ok": True}
+    blocked = scenario in {"already-running", "stale-active"}
+    assert replies[0]["ok"] is not blocked
     assert replies[-1]["restored"] is True
-    assert replies[-1]["cleanup_ok"] is (scenario in {"finish", "eof"})
+    assert replies[-1]["cleanup_ok"] is (
+        scenario
+        in {
+            "finish",
+            "eof",
+            "overlap",
+            "already-running",
+            "stale-active",
+            "correct-current",
+            "wrong-current",
+        }
+    )
     assert settings == original
     assert rows["real"]["event_slug"] == "existing-event"
     if scenario == "unexpected-player":
         assert rows["unexpected"]["tag"] == "real"
+    if blocked:
+        assert updates == []
+    if scenario == "already-running":
+        assert snapshot_reads == []
+    if scenario == "overlap":
+        assert other_attempted[0] and competing_replies[-1]["ok"] is False
+        assert list(rows) == ["real"]
+    if scenario == "wrong-current":
+        assert replies[-1]["ok"] is False
+    if scenario == "correct-current":
+        assert replies[-1]["ok"] is True
+    assert lifecycle_owner[0] is prior_owner
     assert "Existing Player" not in output.getvalue()
 
 
@@ -565,5 +759,52 @@ def test_dev_admin_200_only_accepts_anonymous_landing_without_data(body, accepte
         checks = smoke.readonly(client, DEV, profile="dev")
     landing = next(check for check in checks if check.name == "DEV admin OAuth")
     assert landing.passed is accepted
+    smoke.print_checks(checks)
+    assert "private" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "ok,returncode,accepted", [(False, 0, False), (True, 1, False), (True, 0, True)]
+)
+def test_docker_fixture_requires_positive_final_ack_and_clean_exit(ok, returncode, accepted):
+    import io
+    from types import SimpleNamespace
+
+    fixture = smoke.DockerFixture()
+    fixture.final = {"ok": ok, "done": True, "cleanup_ok": True, "restored": True}
+    fixture.process = SimpleNamespace(stdin=io.StringIO(), wait=lambda **kwargs: returncode)
+    if accepted:
+        fixture.finish()
+    else:
+        with pytest.raises(smoke.SmokeError):
+            fixture.finish()
+    assert fixture.process.stdin.closed
+
+
+def test_dev_oauth_redirect_rejects_userinfo_without_following_or_printing_it(capsys):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        path = request.url.path
+        if path == "/admin/":
+            return httpx.Response(
+                302,
+                headers={
+                    **HEADERS,
+                    "Location": "http://user:private@localhost:8088/admin/auth/login",
+                },
+            )
+        if path in {"/api/events/stream", "/admin/api/events/stream"}:
+            return httpx.Response(401, headers=HEADERS)
+        return httpx.Response(
+            404 if path in smoke.INTERNAL_PATHS.values() else 200, headers=HEADERS
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        checks = smoke.readonly(client, DEV, profile="dev")
+    assert next(check for check in checks if check.name == "DEV admin OAuth").passed is False
+    assert not any(request.url.username for request in requests)
+    assert not any(request.url.path == "/admin/auth/login" for request in requests)
     smoke.print_checks(checks)
     assert "private" not in capsys.readouterr().out

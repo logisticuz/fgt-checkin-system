@@ -30,6 +30,8 @@ import signal
 import sys
 
 pool = storage = None
+lease = lifecycle_connection = None
+lifecycle_owned = False
 prepared = restored = False
 snapshot = settings_id = slug = None
 
@@ -107,6 +109,15 @@ try:
         kwargs={"autocommit": True, "connect_timeout": 5,
             "options": "-c lock_timeout=5000 -c statement_timeout=10000"})
     storage._pool = pool
+    # A dedicated session lease survives both setup commits and restoration.
+    # Never snapshot another helper's temporary settings or wait behind its run.
+    lease = pool.connection()
+    lifecycle_connection = lease.__enter__()
+    lifecycle_owned = lifecycle_connection.execute(
+        "SELECT pg_try_advisory_lock(hashtext('fgt:acceptance-smoke'))"
+    ).fetchone()[0]
+    if not lifecycle_owned:
+        raise RuntimeError("Another acceptance lifecycle is active")
     changes = {
         "active_event_slug": slug, "event_display_name": "Acceptance Smoke",
         "require_membership": False, "require_startgg": False,
@@ -119,6 +130,8 @@ try:
         current = storage.get_active_settings_with_id()
         if not row or not current or str(row[0]) != current["record_id"]:
             raise RuntimeError("Active settings missing")
+        if str(current["fields"].get("active_event_slug") or "").lower().startswith("acceptance-"):
+            raise RuntimeError("Previous acceptance settings require recovery")
         exists = connection.execute(
             "SELECT EXISTS(SELECT 1 FROM active_event_data WHERE event_slug=%s UNION ALL SELECT 1 FROM event_archive WHERE event_slug=%s UNION ALL SELECT 1 FROM event_stats WHERE event_slug=%s)",
             (slug, slug, slug),
@@ -152,16 +165,17 @@ try:
                     raise RuntimeError("Invalid helper operation")
                 record_id = message.get("checkin_id")
                 if record_id is not None:
+                    index = message.get("player")
+                    if type(index) is not int or not 1 <= index <= 3:
+                        raise RuntimeError("Expected current synthetic player")
                     record = storage.get_checkin_by_record_id(record_id)
                     fields = (record or {}).get("fields", {})
                     token = slug.rsplit("-", 1)[1]
-                    if fields.get("event_slug") != slug or not any(
-                        fields.get("tag") == f"acc-{token}-{index}"
-                        and fields.get("email") == f"acceptance-{token}-{index}@example.invalid"
-                        and fields.get("name") == f"Acceptance Smoke {token} {index}"
-                        for index in range(1, 4)
-                    ):
-                        raise RuntimeError("Row does not belong to this smoke")
+                    if (fields.get("event_slug") != slug
+                        or fields.get("tag") != f"acc-{token}-{index}"
+                        or fields.get("email") != f"acceptance-{token}-{index}@example.invalid"
+                        or fields.get("name") != f"Acceptance Smoke {token} {index}"):
+                        raise RuntimeError("Row does not belong to the current smoke player")
                 emit(True)
         except BaseException:
             overall = False
@@ -184,8 +198,16 @@ except BaseException:
             clean = False
     emit(False, done=True, cleanup_ok=clean, restored=restored or not prepared)
 finally:
-    if pool is not None:
-        pool.close()
+    try:
+        if lease is not None:
+            try:
+                if lifecycle_owned:
+                    lifecycle_connection.execute("SELECT pg_advisory_unlock(hashtext('fgt:acceptance-smoke'))")
+            finally:
+                lease.__exit__(None, None, None)
+    finally:
+        if pool is not None:
+            pool.close()
 '''
 INTERNAL_PATHS = {
     "begin": "/api/checkin/begin",
@@ -412,6 +434,7 @@ def readonly(
                         raise SmokeError("Invalid OAuth redirect") from None
                     if (
                         target.host != response.url.host
+                        or target.userinfo
                         or target.port != response.url.port
                         or target.scheme != response.url.scheme
                         or target.path != "/admin/auth/login"
@@ -513,8 +536,8 @@ class DockerFixture:
         if not self._receive()["ok"]:
             raise SmokeError("DEV fixture setup refused")
 
-    def verify(self, checkin_id=None):
-        self._send({"action": "verify", "checkin_id": checkin_id})
+    def verify(self, checkin_id=None, *, player=None):
+        self._send({"action": "verify", "checkin_id": checkin_id, "player": player})
         if not self._receive()["ok"]:
             raise SmokeError("DEV fixture ownership check failed")
 
@@ -529,10 +552,15 @@ class DockerFixture:
         finally:
             self.process.stdin.close()  # EOF also triggers the helper's finally path.
             try:
-                self.process.wait(timeout=20)
+                returncode = self.process.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 raise SmokeError("DEV settings restoration not confirmed") from None
-        if not (self.final.get("cleanup_ok") is True and self.final.get("restored") is True):
+        if not (
+            returncode == 0
+            and self.final.get("ok") is True
+            and self.final.get("cleanup_ok") is True
+            and self.final.get("restored") is True
+        ):
             raise SmokeError("DEV cleanup or settings restoration failed")
 
 
@@ -547,6 +575,7 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
     slug = "acceptance-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + token
     results = [Check("DEV guards", True, "loopback; both engines none")]
     setup_attempted = False
+    seen_ids, seen_tokens, identities = set(), set(), []
 
     def require_json(response, *, expected=200):
         if response.status_code != expected:
@@ -559,12 +588,19 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
             raise SmokeError("Synthetic flow returned invalid JSON")
         return data
 
-    def status(checkin_id, capability):
+    def status(checkin_id, capability, expected):
         for attempt in range(3):
             data = require_json(
                 http.request("GET", base + f"/api/checkin/{checkin_id}/status?t={capability}")
             )
             if data.get("found") is True:
+                for field, value in {
+                    "checkin_id": checkin_id,
+                    "tag": expected["tag"],
+                    "name": expected["name"],
+                }.items():
+                    if field in data and data[field] != value:
+                        raise SmokeError("Synthetic status identity did not match")
                 return data
             if attempt < 2:
                 time.sleep(0.2)
@@ -593,10 +629,15 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
                 or not re.fullmatch(r"[A-Za-z0-9_-]+", checkin_id)
                 or not isinstance(capability, str)
                 or not re.fullmatch(r"[A-Za-z0-9_.=-]+", capability)
+                or checkin_id in seen_ids
+                or capability in seen_tokens
             ):
                 raise SmokeError("Synthetic check-in authority was not confirmed")
-            fixture.verify(checkin_id)
-            status(checkin_id, capability)
+            seen_ids.add(checkin_id)
+            seen_tokens.add(capability)
+            identities.append((checkin_id, capability))
+            fixture.verify(checkin_id, player=index)
+            status(checkin_id, capability, payload)
             saved = require_json(
                 http.request(
                     "PATCH",
@@ -608,12 +649,12 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
                     },
                 )
             )
-            if saved.get("success") is not True or status(checkin_id, capability).get("games") != [
-                DEV_GAME
-            ]:
+            if saved.get("success") is not True or status(checkin_id, capability, payload).get(
+                "games"
+            ) != [DEV_GAME]:
                 raise SmokeError("Synthetic game save was not confirmed")
             results.append(Check(f"player {index} flow", True, "orchestrate; signed status; games"))
-            fixture.verify(checkin_id)
+            fixture.verify(checkin_id, player=index)
             dev_guard(client, admin_base)
             payment = admin.request(
                 "PATCH", admin_base + f"/players/{checkin_id}/payment", json={"payment_valid": True}
@@ -624,7 +665,7 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
                 )
             else:
                 paid = require_json(payment)
-                final = status(checkin_id, capability)
+                final = status(checkin_id, capability, payload)
                 if (
                     paid.get("success") is not True
                     or paid.get("payment_valid") is not True
@@ -633,6 +674,19 @@ def dev_write(client, base, *, admin_base=None, fixture=None):
                 ):
                     raise SmokeError("Synthetic TO payment was not confirmed")
                 results.append(Check(f"player {index} payment", True, "TO toggle; canonical ready"))
+        # The privacy whitelist need not echo identity. Prove token binding by
+        # requiring a different owned check-in to reject each token instead.
+        for index, (_, capability) in enumerate(identities):
+            other_id = identities[(index + 1) % len(identities)][0]
+            denied = require_json(
+                http.request("GET", base + f"/api/checkin/{other_id}/status?t={capability}"),
+                expected=403,
+            )
+            if denied.get("found") is not False:
+                raise SmokeError("Status token was not restricted to its own check-in")
+        results.append(
+            Check("status token binding", True, "three own statuses; cross-ID use denied")
+        )
     except SmokeError as error:
         results.append(Check("synthetic flow", False, str(error)))
     finally:
