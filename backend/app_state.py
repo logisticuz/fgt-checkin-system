@@ -96,6 +96,9 @@ DATA_BACKEND = os.getenv("DATA_BACKEND", "postgres").lower().strip()
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
 
 
+INTERNAL_AUTH_MODE = os.getenv("INTERNAL_AUTH_MODE", "soft").strip().lower()
+
+
 N8N_INTERNAL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 
 
@@ -164,12 +167,35 @@ class SSEManager:
 sse_manager = SSEManager()
 
 
+def validate_internal_auth_config():
+    """Validate the staged policy and report its mode once at ASGI startup."""
+    if INTERNAL_AUTH_MODE not in {"soft", "enforce"}:
+        raise RuntimeError("INTERNAL_AUTH_MODE must be soft or enforce")
+    if INTERNAL_AUTH_MODE == "enforce" and (
+        not INTERNAL_API_TOKEN or not INTERNAL_API_TOKEN.strip()
+    ):
+        raise RuntimeError("INTERNAL_AUTH_MODE=enforce requires a non-empty INTERNAL_API_TOKEN")
+    logger.info("internal auth: %s", INTERNAL_AUTH_MODE)
+
+
 async def require_internal_soft(request: Request):
-    """Observe missing/invalid internal tokens while allowing existing callers."""
+    """Observe tokens by default, or reject invalid internal callers in enforce mode."""
     if not INTERNAL_API_TOKEN:
+        if INTERNAL_AUTH_MODE == "enforce":
+            logger.warning(
+                "Internal request rejected: path=%s reason=token_unconfigured", request.url.path
+            )
+            raise HTTPException(status_code=401)
         return
     supplied = request.headers.get("X-Internal-Token", "")
     if not secrets.compare_digest(supplied.encode("utf-8"), INTERNAL_API_TOKEN.encode("utf-8")):
+        if INTERNAL_AUTH_MODE == "enforce":
+            logger.warning(
+                "Internal request rejected: path=%s reason=%s",
+                request.url.path,
+                "missing_token" if not supplied else "invalid_token",
+            )
+            raise HTTPException(status_code=401)
         logger.warning(
             "Internal request has a missing or invalid token: path=%s client=%s",
             request.url.path,

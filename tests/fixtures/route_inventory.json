@@ -174,7 +174,9 @@
       "POST"
     ],
     "update_startgg_registered_count",
-    [],
+    [
+      "require_internal_soft"
+    ],
     "starlette.responses.JSONResponse"
   ],
   [
