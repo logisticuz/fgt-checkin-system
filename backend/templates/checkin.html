@@ -694,10 +694,12 @@
         return;
       }
 
-      // Opaque check-in id from orchestrate, carried so later steps can address the
-      // check-in by id (never personnummer or contact data in a URL).
+      // Opaque check-in id + status capability token from orchestrate, carried so later steps
+      // can address the check-in by id (never personnummer or contact data in a URL). The
+      // token lives only in the URL: never in localStorage/sessionStorage.
       const checkinIdQ = data.checkin_id
-        ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}`
+        ? `checkin_id=${encodeURIComponent(String(data.checkin_id))}` +
+          (data.status_token ? `&t=${encodeURIComponent(String(data.status_token))}` : "")
         : "";
 
       if (data.ready) {

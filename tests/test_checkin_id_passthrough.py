@@ -58,7 +58,9 @@ def test_ready_page_without_member_offer_has_no_link_or_script(
 def test_pending_page_keeps_kiosk_and_id_on_ready_redirect(app_templates):  # noqa: F811
     html = render(app_templates, "status_pending.html")
     block = html[html.index("// Keep the opaque checkin_id") :][:600]
-    assert 'new URLSearchParams(window.location.search).get("checkin_id")' in block
+    # T-032: legacy links read checkin_id from the URL; capability links use the verified id.
+    assert "const pageParams = new URLSearchParams(window.location.search);" in html
+    assert 'BY_ID ? CHECKIN_ID : pageParams.get("checkin_id")' in block
     assert 'KIOSK_MODE ? "kiosk=true" : ""' in block
     assert "encodeURIComponent(checkinId)" in block
     assert '${statusQs ? "?" + statusQs : ""}' in block
@@ -99,5 +101,5 @@ def test_register_status_redirects_carry_the_id(app_templates, flow):  # noqa: F
 
 def test_v2_membership_only_redirect_carries_the_id():
     script = (BACKEND_DIR / "static" / "js" / "membership_v2.js").read_text(encoding="utf-8")
-    redirect = script[script.index("if (membershipOnly) {") :][:600]
+    redirect = script[script.index("if (membershipOnly) {") :][:1400]
     assert 'CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : ""' in redirect

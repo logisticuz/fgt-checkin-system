@@ -457,12 +457,15 @@
     // State from URL params
     // Override "needs" flags based on what's REQUIRED for this event
     const params = new URLSearchParams(window.location.search);
-    // Query for /status/<name>: keeps kiosk mode and the opaque checkin_id (never PII).
+    // Query for /status/<name>: keeps kiosk mode, the opaque checkin_id and its status
+    // capability token `t` (never PII).
     function statusQuery() {
       const checkinId = params.get("checkin_id");
+      const statusToken = params.get("t");
       const qs = [
         KIOSK_MODE ? "kiosk=true" : "",
         checkinId ? `checkin_id=${encodeURIComponent(checkinId)}` : "",
+        checkinId && statusToken ? `t=${encodeURIComponent(statusToken)}` : "",
       ].filter(Boolean).join("&");
       return qs ? `?${qs}` : "";
     }

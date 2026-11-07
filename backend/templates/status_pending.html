@@ -521,6 +521,17 @@
   <script>
     // Name is passed from backend template
     const name = {{ name | tojson }};
+    // T-032: the server puts checkin_id + status_token in the context only when the capability
+    // verifies. Then this page polls ONLY the id endpoint (no name lookup, so two people with
+    // the same name can't see each other's status). Legacy links keep the name-based polling.
+    const CHECKIN_ID = {{ checkin_id | default("") | tojson }};
+    const STATUS_TOKEN = {{ status_token | default("") | tojson }};
+    const BY_ID = Boolean(CHECKIN_ID && STATUS_TOKEN);
+    const REQUIREMENTS = {
+      require_startgg: {{ require_startgg | default(true) | tojson }},
+      require_membership: {{ require_membership | default(true) | tojson }},
+      require_payment: {{ require_payment | default(true) | tojson }},
+    };
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
     const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
@@ -713,6 +724,49 @@
     // Flag to stop polling (e.g., already checked in - status won't change from polling)
     let stopPolling = false;
 
+    // Fetch the current status in the shape the rest of this page expects.
+    async function fetchStatusData() {
+{% if checkin_id and status_token %}
+      const res = await fetch(
+        `/api/checkin/${encodeURIComponent(CHECKIN_ID)}/status?t=${encodeURIComponent(STATUS_TOKEN)}`,
+        { method: "GET", cache: "no-store" }
+      );
+      if (res.status === 403) return { linkExpired: true };
+      if (!res.ok) throw new Error(`Server responded ${res.status}`);
+      const found = await res.json();
+      if (!found || found.found !== true) return { notFound: true };
+      return {
+        ...REQUIREMENTS,
+        ready: found.ready === true,
+        status: found.status,
+        missing: found.missing,
+        member: found.member,
+        startgg: found.startgg,
+        payment: found.payment_ok,
+        startgg_events: Array.isArray(found.games) ? found.games : [],
+        name: name,
+      };
+{% else %}
+      const res = await fetch(`/api/participant/${encodeURIComponent(name)}/status`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`Server responded ${res.status}`);
+      return res.json();
+{% endif %}
+    }
+
+    // Terminal states for the id-based lookup: say why and stop polling.
+    function stopWithMessage(text) {
+      setText("statusText", text);
+      const statusHelpEl = document.getElementById("statusHelp");
+      if (statusHelpEl) statusHelpEl.textContent = "";
+      setStatusIcon("error");
+      document.getElementById("swish-section").classList.add("hidden");
+      stopPolling = true;
+      if (intervalId) clearInterval(intervalId);
+    }
+
     async function updateStatus(force = false) {
       if (inFlight) return;
       if (stopPolling && !force) return;
@@ -733,13 +787,15 @@
 
       try {
         // Poll backend API endpoint for current status
-        const res = await fetch(`/api/participant/${encodeURIComponent(name)}/status`, {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error(`Server responded ${res.status}`);
-
-        const data = await res.json();
+        const data = await fetchStatusData();
+        if (data.linkExpired) {
+          stopWithMessage("Your status link expired – ask a TO or check in again");
+          return;
+        }
+        if (data.notFound) {
+          stopWithMessage("We couldn't find your check-in – ask a TO");
+          return;
+        }
 
         const normalizedMissing = Array.isArray(data?.missing)
           ? data.missing.map(m => String(m || "").toLowerCase().replace(/[^a-z]/g, ""))
@@ -752,11 +808,25 @@
           // Cleanup sensitive data on success
           localStorage.removeItem("personnummer");
           localStorage.removeItem("telefon");
-          // Keep the opaque checkin_id (from this page's URL) for the Ready page's links.
-          const checkinId = new URLSearchParams(window.location.search).get("checkin_id");
+          const pageParams = new URLSearchParams(window.location.search);
+          if (BY_ID && pageParams.get("confirmed") === "1") {
+            // Loop guard: we already redirected once and the server rendered this pending page
+            // again (it still picks the template by name). Show the id-based result here.
+            setText("statusText", "Ready! You're all set.");
+            setStatusIcon("ready");
+            updateStatusTable(data);
+            document.getElementById("swish-section").classList.add("hidden");
+            stopPolling = true;
+            if (intervalId) clearInterval(intervalId);
+            return;
+          }
+          // Keep the opaque checkin_id (+ capability token) for the Ready page's links.
+          const checkinId = BY_ID ? CHECKIN_ID : pageParams.get("checkin_id");
           const statusQs = [
             KIOSK_MODE ? "kiosk=true" : "",
             checkinId ? `checkin_id=${encodeURIComponent(checkinId)}` : "",
+            BY_ID ? `t=${encodeURIComponent(STATUS_TOKEN)}` : "",
+            BY_ID ? "confirmed=1" : "",
           ].filter(Boolean).join("&");
           window.location.href = `/status/${encodeURIComponent(name)}${statusQs ? "?" + statusQs : ""}`;
           return;
