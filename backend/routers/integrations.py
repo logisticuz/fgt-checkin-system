@@ -18,7 +18,9 @@ from app_state import (
 router = APIRouter()
 
 
-@router.post("/api/startgg/registered-count", tags=["Integrations"])
+@router.post(
+    "/api/startgg/registered-count", tags=["Integrations"], dependencies=[Depends(require_internal_soft)]
+)
 async def update_startgg_registered_count(request: Request):
     """
     Receive Start.gg registered entrant count for current event.

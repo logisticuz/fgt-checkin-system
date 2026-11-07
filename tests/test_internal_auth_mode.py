@@ -17,13 +17,26 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "synthetic-private-internal-mode-token"
 BODY_MARKER = "synthetic-private-internal-body"
 WRONG_TOKEN = "synthetic-wrong-internal-mode-token"
-INTERNAL_PATHS = {
-    "/api/checkin/begin",
-    "/api/integration/result",
-    "/api/checkin/{checkin_id}/member-status",
-    "/api/notify/checkin",
-    "/api/notify/update",
-}
+
+
+def internal_paths_from_inventory():
+    """Classify callback namespaces independently of the guards being checked."""
+    inventory = json.loads(
+        (ROOT / "tests/fixtures/route_inventory.json").read_text(encoding="utf-8")
+    )
+    return {
+        path
+        for path, methods, *_ in inventory
+        if "POST" in methods
+        and (
+            path in {"/api/checkin/begin", "/api/integration/result"}
+            or path.startswith(("/api/notify/", "/api/startgg/"))
+            or path.endswith("/member-status")
+        )
+    }
+
+
+INTERNAL_PATHS = internal_paths_from_inventory()
 
 
 def policy(monkeypatch, backend, mode, token=TOKEN):
@@ -35,6 +48,8 @@ def policy(monkeypatch, backend, mode, token=TOKEN):
 def request_payload(database, path):
     if path == "/api/checkin/begin":
         return path, {"event_slug": "test-event", "payload": make_checkin()}
+    if path == "/api/startgg/registered-count":
+        return path, {"event_slug": "test-event", "startgg_registered_count": 42}
     if path in {"/api/integration/result", "/api/checkin/{checkin_id}/member-status"}:
         row = database.seed_checkin(member=False, member_source="ebas_check")
         if path == "/api/integration/result":
@@ -61,12 +76,16 @@ def warnings(caplog, backend):
     ]
 
 
+def database_state(database):
+    with database.pool.connection() as connection:
+        settings = connection.execute("SELECT * FROM settings ORDER BY id").fetchall()
+    return database.checkins(), settings
+
+
 def test_shared_dependency_covers_exactly_the_internal_route_inventory(backend_app):
-    inventory = json.loads(
-        (ROOT / "tests/fixtures/route_inventory.json").read_text(encoding="utf-8")
-    )
-    expected = {row[0] for row in inventory if "require_internal_soft" in row[3]}
-    assert expected == INTERNAL_PATHS
+    expected = internal_paths_from_inventory()
+    assert "/api/startgg/registered-count" in expected
+    assert len(expected) == 6
     actual = {
         getattr(context, "path", None) or route.path
         for route, context in route_contexts(backend_app.app)
@@ -91,7 +110,7 @@ def test_every_internal_endpoint_obeys_the_shared_policy(
     policy(monkeypatch, backend_app, mode)
     path, body = request_payload(pg_db, path)
     body["private_marker"] = BODY_MARKER
-    before = pg_db.checkins()
+    before = database_state(pg_db)
     headers = {} if supplied is None else {"X-Internal-Token": supplied}
     with TestClient(backend_app.app) as client:
         caplog.clear()
@@ -101,7 +120,7 @@ def test_every_internal_endpoint_obeys_the_shared_policy(
     if rejected:
         assert response.status_code == 401
         assert response.json() == {"detail": "Unauthorized"}
-        assert pg_db.checkins() == before
+        assert database_state(pg_db) == before
         reason = "missing_token" if supplied is None else "invalid_token"
         assert warnings(caplog, backend_app) == [
             f"Internal request rejected: path={path} reason={reason}"
@@ -109,6 +128,9 @@ def test_every_internal_endpoint_obeys_the_shared_policy(
     else:
         assert response.status_code == 200
         assert response.json()["success"] is True
+        if path == "/api/startgg/registered-count":
+            assert response.json()["startgg_registered_count"] == 42
+            assert database_state(pg_db) != before
         messages = warnings(caplog, backend_app)
         if supplied != TOKEN:
             assert len(messages) == 1
@@ -129,12 +151,12 @@ def test_non_ascii_token_is_rejected_without_echo(pg_db, backend_app, monkeypatc
     pg_db.seed_settings()
     policy(monkeypatch, backend_app, "enforce")
     path, body = request_payload(pg_db, path)
-    before = pg_db.checkins()
+    before = database_state(pg_db)
     with TestClient(backend_app.app) as client:
         caplog.clear()
         response = client.post(path, json=body, headers={"X-Internal-Token": b"\xff"})
     assert response.status_code == 401 and response.json() == {"detail": "Unauthorized"}
-    assert pg_db.checkins() == before
+    assert database_state(pg_db) == before
     assert warnings(caplog, backend_app) == [
         f"Internal request rejected: path={path} reason=invalid_token"
     ]
@@ -242,6 +264,10 @@ def test_env_examples_keep_only_required_workflow_access(filename):
             key, value = line.split("=", 1)
             values[key.strip()] = value.split("#", 1)[0].strip()
     assert not any(key.startswith(("AIRTABLE_", "N8N_BASIC_AUTH_")) for key in values)
+    optional = set(re.findall(r"(?m)^#\s*([A-Z][A-Z0-9_]*)=", text))
+    assert {"N8N_BASIC_AUTH_USER", "N8N_BASIC_AUTH_PASSWORD"} <= optional
+    if filename == ".env.example":
+        assert {"AIRTABLE_API_KEY", "AIRTABLE_BASE_ID"} <= optional
     assert values["N8N_DIAGNOSTICS_ENABLED"] == "false"
     assert values["N8N_SECURE_COOKIE"] == "true"
     assert values["INTERNAL_API_TOKEN"] == ""

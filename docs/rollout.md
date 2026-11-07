@@ -37,7 +37,8 @@ setting and must only be used deliberately; it is not needed for DEV or stub ope
 
 `INTERNAL_AUTH_MODE` defaults to `soft`. The shared dependency covers POST
 `/api/checkin/begin`, `/api/integration/result`, `/api/checkin/{checkin_id}/member-status`,
-`/api/notify/checkin` and `/api/notify/update`. In `soft`, missing/invalid tokens retain
+`/api/startgg/registered-count`, `/api/notify/checkin` and `/api/notify/update`.
+In `soft`, missing/invalid tokens retain
 the existing warning and request behavior; an untrusted begin request still takes the
 public ownership path. In `enforce`, a missing/invalid token receives 401 before the handler.
 Startup reports `internal auth: soft` or `internal auth: enforce` without the token.
@@ -46,7 +47,9 @@ Enforce mode requires a configured non-empty `INTERNAL_API_TOKEN` or startup fai
 1. Configure the **same private, non-empty** `INTERNAL_API_TOKEN` in backend and n8n.
    Keep `INTERNAL_AUTH_MODE=soft` in the backend. Recreate affected services with the
    approved environment configuration so their running processes receive the values;
-   do not print tokens or add them to Git. The exported workflows send `X-Internal-Token`.
+   do not print tokens or add them to Git. Import the reviewed workflow exports before
+   observing soft mode, including Event Stats' `Report to Backend` node with its
+   env-backed `X-Internal-Token` header.
 2. Run one complete event in soft mode, including all internal callback/notification paths.
    Check backend logs for **zero** `missing or invalid token` warnings. Resolve every
    warning and repeat the observation before proceeding; successful requests alone do
@@ -63,5 +66,7 @@ does not update a running container. These instructions authorize no deployment.
 The example env files disable n8n diagnostics and use `N8N_SECURE_COOKIE=true` for PROD
 behind HTTPS. Local HTTP development can explicitly override the cookie setting to false.
 Their workflow env allowlist contains only the variables referenced by exported workflows;
-OAuth `STARTGG_CLIENT_SECRET` is not exposed to workflow expressions. Retired basic-auth
-and Airtable entries are omitted; real `.env` and `n8n.env` files must be configured privately.
+OAuth `STARTGG_CLIENT_SECRET` is not exposed to workflow expressions. Optional commented
+`N8N_BASIC_AUTH_USER/PASSWORD` hints remain for outbound backend calls to Basic-protected
+webhooks; these do not enable retired n8n UI Basic Auth. Optional `AIRTABLE_API_KEY/BASE_ID`
+hints remain for `DATA_BACKEND=airtable`. Real `.env` and `n8n.env` files are configured privately.

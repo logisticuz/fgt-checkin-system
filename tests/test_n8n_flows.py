@@ -95,6 +95,27 @@ def backend_call(node):
     )
 
 
+def test_event_stats_backend_report_sends_the_private_callback_token():
+    flow = json.loads(
+        (ROOT / "n8n/flows/FGC THN - Start.gg Event Stats.json").read_text(encoding="utf-8")
+    )
+    for version in versions(flow):
+        callbacks = [node for node in version["nodes"] if backend_call(node)]
+        assert len(callbacks) == 1
+        parameters = callbacks[0]["parameters"]
+        assert parameters["method"] == "POST"
+        assert parameters["url"] == "http://backend:8000/api/startgg/registered-count"
+        assert parameters["sendHeaders"] is True
+        token_headers = [
+            header
+            for header in parameters["headerParameters"]["parameters"]
+            if header["name"].lower() == "x-internal-token"
+        ]
+        assert token_headers == [
+            {"name": "X-Internal-Token", "value": "={{ $env.INTERNAL_API_TOKEN }}"}
+        ]
+
+
 @pytest.fixture(params=BASE)
 def workflow(request):
     name = request.param
