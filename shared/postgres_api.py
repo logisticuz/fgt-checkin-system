@@ -644,10 +644,17 @@ def get_checkin_by_record_id(record_id: str) -> Optional[Dict[str, Any]]:
     return {"record_id": row_dict.get("record_id"), "fields": _checkin_fields_from_row(row_dict)}
 
 
-def _update_checkin_with_status(conn, record_id: str, fields: Dict[str, Any]):
+def _update_checkin_with_status(
+    conn, record_id: str, fields: Dict[str, Any], *, event_slug: Optional[str] = None
+):
     """Lock the current row and persist fields plus derived status in one transaction."""
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM active_event_data WHERE record_id = %s FOR UPDATE", (record_id,))
+        where_sql = "record_id = %s"
+        where_values = [record_id]
+        if event_slug is not None:
+            where_sql += " AND event_slug = %s"
+            where_values.append(event_slug)
+        cur.execute(f"SELECT * FROM active_event_data WHERE {where_sql} FOR UPDATE", where_values)
         row = cur.fetchone()
         if not row:
             return None
@@ -673,10 +680,12 @@ def _update_checkin_with_status(conn, record_id: str, fields: Dict[str, Any]):
         ]
         set_sql = ", ".join(f"{key} = %s" for key in update_fields)
         cur.execute(
-            f"UPDATE active_event_data SET {set_sql} WHERE record_id = %s RETURNING *",
-            [*update_fields.values(), record_id],
+            f"UPDATE active_event_data SET {set_sql} WHERE {where_sql} RETURNING *",
+            [*update_fields.values(), *where_values],
         )
         row = cur.fetchone()
+        if not row:
+            return None
         row_dict = _row_to_dict([desc[0] for desc in cur.description], row)
 
     result_fields = _checkin_fields_from_row(row_dict)
@@ -800,7 +809,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 cur.execute(
                     f"SELECT record_id FROM active_event_data "
                     f"WHERE LOWER({column}) = LOWER(%s) AND event_slug = %s "
-                    "ORDER BY created DESC LIMIT 1",
+                    "ORDER BY created DESC LIMIT 1 FOR UPDATE",
                     (tag or name, event_slug),
                 )
                 existing = cur.fetchone()
@@ -815,16 +824,17 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
                 if normalized_source is not None:
                     safe_fields["acquisition_source"] = normalized_source
-                updated = _update_checkin_with_status(conn, checkin_id, safe_fields)
-                if not updated:
-                    raise RuntimeError("Failed to update existing checkin")
-                return {
-                    "checkin_id": checkin_id,
-                    "record_id": checkin_id,
-                    "event_slug": event_slug,
-                    "created": False,
-                    "player_uuid": updated["fields"].get("player_uuid"),
-                }
+                updated = _update_checkin_with_status(
+                    conn, checkin_id, safe_fields, event_slug=event_slug
+                )
+                if updated:
+                    return {
+                        "checkin_id": checkin_id,
+                        "record_id": checkin_id,
+                        "event_slug": event_slug,
+                        "created": False,
+                        "player_uuid": updated["fields"].get("player_uuid"),
+                    }
 
             games = payload.get("tournament_games_registered")
             if isinstance(games, str):

@@ -38,6 +38,27 @@ def _wait_for_event_lock(database, slug, future, mode):
     return _wait_for_lock(database, "fgt-event:" + slug, future, mode)
 
 
+def _wait_for_row_lock(database, slug, future):
+    deadline = monotonic() + 5
+    with database.pool.connection() as probe:
+        while monotonic() < deadline:
+            if future.done():
+                future.result()
+                pytest.fail("Writer completed without waiting for the check-in row lock")
+            if probe.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks waiting JOIN pg_locks event_lock "
+                "ON event_lock.pid = waiting.pid WHERE NOT waiting.granted "
+                "AND waiting.locktype IN ('transactionid', 'tuple') "
+                "AND event_lock.granted AND event_lock.locktype = 'advisory' "
+                "AND event_lock.objid = "
+                "((hashtext('fgt-event:' || %s)::bigint & 4294967295)::oid))",
+                (slug,),
+            ).fetchone()[0]:
+                return
+            sleep(0.01)
+    pytest.fail("Writer did not wait for the check-in row lock")
+
+
 def _pause_archive(monkeypatch):
     barrier, release = Barrier(2), Event()
     original = postgres._match_or_create_player
@@ -399,3 +420,99 @@ def test_event_coverage_retry_is_bounded_and_does_not_partially_merge(
         row["record_id"]: row for row in before["active_event_data"]
     }
     assert all(rows[record_id]["player_uuid"] == keep["uuid"] for record_id in arrivals)
+
+
+@pytest.mark.parametrize("operation", ["move", "delete"])
+def test_repeat_checkin_inserts_in_its_event_after_the_matched_row_moves_or_vanishes(
+    archive_db, event, monkeypatch, operation
+):
+    original = archive_db.seed_checkin(event_slug=event, name="Test Original", tag="test-repeat")
+    destination = event + "-other"
+    barrier, release = Barrier(2), Event()
+    compute = postgres.compute_checkin_status
+
+    def pause_move(*args, **kwargs):
+        if current_thread().name.startswith("t035-row-writer"):
+            barrier.wait(timeout=5)
+            assert release.wait(timeout=10)
+        return compute(*args, **kwargs)
+
+    def pause_delete(query):
+        if current_thread().name.startswith("t035-row-writer") and query.startswith(
+            "DELETE FROM active_event_data"
+        ):
+            barrier.wait(timeout=5)
+            assert release.wait(timeout=10)
+
+    if operation == "move":
+        monkeypatch.setattr(postgres, "compute_checkin_status", pause_move)
+    else:
+        _observe_commands(archive_db, monkeypatch, after=pause_delete)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-row-writer") as writer:
+        with ThreadPoolExecutor(max_workers=1) as checkins:
+            if operation == "move":
+                writing = writer.submit(
+                    postgres.update_checkin, original["record_id"], {"event_slug": destination}
+                )
+            else:
+                writing = writer.submit(postgres.delete_checkin, original["record_id"])
+            try:
+                barrier.wait(timeout=5)
+                incoming = checkins.submit(
+                    postgres.begin_checkin, event, {"name": "Test Repeat", "tag": "test-repeat"}
+                )
+                _wait_for_row_lock(archive_db, event, incoming)
+            finally:
+                release.set()
+            assert writing.result(timeout=10)
+            result = incoming.result(timeout=10)
+
+    assert result["created"] is True
+    assert result["event_slug"] == event
+    assert result["checkin_id"] != original["record_id"]
+    rows = {row["record_id"]: row for row in archive_db.checkins()}
+    assert rows[result["checkin_id"]]["event_slug"] == event
+    assert rows[result["checkin_id"]]["name"] == "Test Repeat"
+    if operation == "move":
+        assert rows[original["record_id"]]["event_slug"] == destination
+        assert rows[original["record_id"]]["name"] == "Test Original"
+    else:
+        assert original["record_id"] not in rows
+
+
+def test_repeat_lookup_holds_the_event_qualified_row_lock_until_commit(
+    archive_db, event, monkeypatch
+):
+    original = archive_db.seed_checkin(event_slug=event, name="Test Original", tag="test-repeat")
+    destination = event + "-other"
+    barrier, release = Barrier(2), Event()
+
+    def pause_lookup(query):
+        if current_thread().name.startswith("t035-repeat") and query.startswith(
+            "SELECT record_id FROM active_event_data WHERE LOWER("
+        ):
+            barrier.wait(timeout=5)
+            assert release.wait(timeout=10)
+
+    _observe_commands(archive_db, monkeypatch, after=pause_lookup)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-repeat") as checkins:
+        with ThreadPoolExecutor(max_workers=1) as writer:
+            incoming = checkins.submit(
+                postgres.begin_checkin, event, {"name": "Test Repeat", "tag": "test-repeat"}
+            )
+            try:
+                barrier.wait(timeout=5)
+                moving = writer.submit(
+                    postgres.update_checkin, original["record_id"], {"event_slug": destination}
+                )
+                _wait_for_row_lock(archive_db, event, moving)
+            finally:
+                release.set()
+            result = incoming.result(timeout=10)
+            assert moving.result(timeout=10)
+
+    assert result["created"] is False
+    assert result["checkin_id"] == original["record_id"]
+    assert result["event_slug"] == event
+    assert archive_db.checkins()[0]["event_slug"] == destination
+    assert archive_db.checkins()[0]["name"] == "Test Repeat"
