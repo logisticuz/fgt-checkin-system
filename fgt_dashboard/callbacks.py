@@ -2268,6 +2268,126 @@ def register_callbacks(app):
             return visible, hidden, hidden
 
     @app.callback(
+        Output("insights-attention-title", "children"),
+        Output("insights-attention-list", "children"),
+        Input("tabs", "value"),
+        Input("btn-insights-refresh", "n_clicks"),
+        Input("insights-attention-refresh", "data"),
+        Input("duplicates-feedback", "children"),
+        Input("archive-feedback", "children"),
+    )
+    def load_stats_attention(selected_tab, _refresh, _resolved, _duplicates=None, _archive=None):
+        if selected_tab != "tab-insights":
+            raise PreventUpdate
+        read = getattr(storage_api, "get_stats_attention", None)
+        if read is None:
+            return "Things to check", "Unavailable on this data backend."
+        try:
+            queue = read()
+        except Exception:
+            logger.warning("Could not load statistics attention items")
+            return "Things to check", "Could not load the list. Refresh to try again."
+        owner = _is_dev_tools_owner()
+        items = []
+        button_style = {
+            "fontSize": "0.75rem",
+            "padding": "0.15rem 0.4rem",
+            "color": COLORS["accent_blue"],
+            "background": "transparent",
+            "border": f"1px solid {COLORS['border']}",
+            "borderRadius": "4px",
+            "cursor": "pointer",
+        }
+        labels = {
+            "acknowledge": "Acknowledge",
+            "not_recorded": "Mark not recorded",
+            "retry": "Update statistics",
+        }
+        for item in queue["issues"][:5]:
+            children = [
+                html.Span(
+                    f"{(item.get('event_name') or item.get('event_slug')) + ': ' if item.get('event_slug') not in (None, '*') else ''}{item['label']} "
+                )
+            ]
+            if item["action"] == "duplicates":
+                children.append(
+                    html.Button(
+                        "Open Duplicates",
+                        n_clicks=0,
+                        style=button_style,
+                        id={"type": "stats-attention-duplicates", "key": item["key"]},
+                    )
+                )
+            elif owner:
+                children.append(
+                    html.Button(
+                        labels[item["action"]],
+                        n_clicks=0,
+                        style=button_style,
+                        id={
+                            "type": "stats-attention-action",
+                            "key": item["key"],
+                            "fingerprint": item["fingerprint"],
+                            "action": item["action"],
+                        },
+                    )
+                )
+            items.append(html.Li(children))
+        content = html.Ul(items) if items else "Nothing needs checking."
+        if queue["count"] > 5:
+            content = html.Div(
+                [content, html.Small("Showing 5 items. Resolve these or refresh to see more.")]
+            )
+        return f"Things to check ({queue['count']})", content
+
+    @app.callback(
+        Output("insights-attention-feedback", "children"),
+        Output("insights-attention-refresh", "data"),
+        Output("btn-insights-refresh", "n_clicks"),
+        Input(
+            {"type": "stats-attention-action", "key": ALL, "fingerprint": ALL, "action": ALL},
+            "n_clicks",
+        ),
+        State("auth-store", "data"),
+        State("btn-insights-refresh", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def resolve_stats_attention(clicks, _client_auth, refresh_clicks=0):
+        if not any(clicks or []):
+            raise PreventUpdate
+        user = current_user() or {}
+        if not _is_dev_tools_owner():
+            return "Only the owner can resolve these items.", no_update, no_update
+        item = ctx.triggered_id
+        if not isinstance(item, dict):
+            raise PreventUpdate
+        try:
+            result = storage_api.resolve_stats_attention(
+                item["key"], item["fingerprint"], action=item["action"], user=user
+            )
+        except (ValueError, PermissionError) as error:
+            return str(error), no_update, no_update
+        except Exception:
+            logger.warning("Statistics attention action failed")
+            return "Could not save the resolution. Refresh to try again.", no_update, no_update
+        message = (
+            "Statistics still need an update. Try again after the problem is resolved."
+            if result.get("stale")
+            else "Saved."
+        )
+        return message, datetime.now(timezone.utc).isoformat(), (refresh_clicks or 0) + 1
+
+    @app.callback(
+        Output("insights-subtabs", "value"),
+        Input({"type": "stats-attention-duplicates", "key": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_attention_duplicates(clicks):
+        if not any(clicks or []):
+            raise PreventUpdate
+        return "duplicates"
+
+    @app.callback(
         Output("insights-games-table", "columns"),
         Input("insights-games-table", "data"),
         State("insights-games-table", "columns"),

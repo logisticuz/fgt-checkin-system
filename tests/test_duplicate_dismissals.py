@@ -146,6 +146,8 @@ def test_merge_cleans_removed_profile_dismissals_and_undo_still_works(twins, arc
         tuple(sorted((a["uuid"], low["uuid"]))),
         tuple(sorted((keep["uuid"], high["uuid"]))),
     }
+    # T067 refreshes derived fields on merge/undo; compare the canonical baseline.
+    postgres.refresh_archive_stats()
     before_players = table_rows(archive_db, "players")
 
     merge = postgres.merge_players(keep["uuid"], b["uuid"], reason="synthetic test merge")

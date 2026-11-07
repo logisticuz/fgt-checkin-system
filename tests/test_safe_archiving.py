@@ -107,10 +107,11 @@ def test_archive_failure_rolls_back_players_archive_and_active_changes(
         for table in ("active_event_data", "event_archive", "players", "event_stats")
     }
 
-    def fail_stats(*args):
+    def fail_archive(*args, **kwargs):
         raise RuntimeError("Synthetic failure after copying rows")
 
-    monkeypatch.setattr(postgres, "compute_event_stats", fail_stats)
+    # Factual archive failures remain atomic; T067 separately degrades stats-only failures.
+    monkeypatch.setattr(postgres, "_finish_archive_edit", fail_archive)
     with pytest.raises(RuntimeError, match="Synthetic failure"):
         archive(event, clear_active=True)
     assert {table: table_rows(archive_db, table) for table in before} == before
@@ -337,6 +338,7 @@ def merge_data(archive_db):
 def test_undo_latest_unchanged_merge_restores_exact_rows_profiles_and_totals(
     archive_db, merge_data
 ):
+    postgres.refresh_archive_stats()
     before = {
         table: table_rows(archive_db, table)
         for table in ("players", "event_archive", "active_event_data")
