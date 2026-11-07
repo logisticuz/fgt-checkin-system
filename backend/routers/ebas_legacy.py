@@ -1,6 +1,7 @@
 """Ebas legacy routes moved from main.py without handler changes."""
 
 from fastapi import APIRouter
+from status_api import verify_capability
 from shared.ebas_client import _private_transport_logging
 
 from app_state import (
@@ -13,6 +14,8 @@ from app_state import (
     Request,
     Response,
     asyncio,
+    get_active_settings,
+    get_checkin_by_record_id,
     get_checkin_by_tag,
     get_membership_flow,
     httpx,
@@ -143,16 +146,25 @@ async def ebas_register(request: Request):
     personnummer = sanitized.get("personnummer") or ""
     email = sanitized.get("email") or ""
     telephone = sanitized.get("telephone") or sanitized.get("telefon") or ""
-    tag = (sanitized.get("tag") or "").strip().lower()
-    slug = sanitized.get("slug") or ""
-
-    # Find checkin_id by tag+slug (for n8n v2 callback)
-    checkin = get_checkin_by_tag(tag, slug) if tag and slug else None
+    checkin_id = body.get("checkin_id")
+    if not verify_capability(checkin_id, body.get("status_token")):
+        raise HTTPException(status_code=403, detail="Invalid or expired check-in authorization")
+    checkin = get_checkin_by_record_id(checkin_id) if get_checkin_by_record_id else None
+    fields = (checkin or {}).get("fields", {})
+    slug = fields.get("event_slug")
+    if not checkin or not slug or slug != get_active_settings().get("active_event_slug"):
+        raise HTTPException(status_code=404, detail="Player not found in active event")
+    tag = (fields.get("tag") or "").strip().lower()
+    supplied_tag = sanitized.get("tag")
+    if (
+        supplied_tag is not None
+        and (not isinstance(supplied_tag, str) or supplied_tag.strip().lower() != tag)
+    ) or (
+        sanitized.get("slug") is not None and sanitized["slug"] != slug
+    ):
+        raise HTTPException(status_code=403, detail="Check-in authorization does not match the target")
     if checkin and checkin.get("fields", {}).get("member") is True:
         return {"success": True, "already_member": True}
-    checkin_id = (checkin or {}).get("record_id")
-    if not checkin_id:
-        raise HTTPException(status_code=400, detail="Check in before registering membership")
     if not personnummer:
         raise HTTPException(status_code=400, detail="Personnummer is required")
 

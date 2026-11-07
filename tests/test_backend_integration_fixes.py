@@ -135,9 +135,13 @@ def test_provider_error_logs_never_include_body_or_contact_sentinels(
         assert response.status_code == 200 and response.json()["degraded"] is True
     else:
         row = pg_db.seed_checkin()
+        from status_api import capability_token
+
         response = app_client.post(
             "/api/ebas/register",
             json={
+                "checkin_id": row["record_id"],
+                "status_token": capability_token(row["record_id"]),
                 "tag": row["tag"],
                 "slug": row["event_slug"],
                 "personnummer": "0" * 12,
