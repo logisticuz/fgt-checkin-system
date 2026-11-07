@@ -261,3 +261,72 @@ awk -v day=2026-11-14 'index($0,"\"time\":\""day) && match($0,/"status":[0-9]+/)
 The masked URI/route group and `limit_req_status` retain venue-rate evidence across
 recreation. The access log is authoritative for counts; do not add the duplicated
 5xx entries in `error.log` to the totals.
+
+## Acceptance smoke gates
+
+Before an authorized deployment, run the synthetic write gate only after DEV runs
+the integration release with `INTEGRATION_ENGINE=none`. The conductor runs this
+gate; builders must not run it against the existing live-capable DEV stack:
+
+```sh
+python scripts/acceptance_smoke.py --mode dev-write --profile dev --base http://localhost:8088
+```
+
+Both the public base and the admin API base must be `localhost` or `127.0.0.1` and
+their `/health` responses must explicitly report `components.integration_engine`
+as `none`. The admin API defaults to the existing DEV backend binding
+`http://127.0.0.1:8001`; `--admin-base` can select another loopback HTTP origin.
+Redirects cannot bypass the write guard. HTTP checks supply no credentials; the
+helper uses the DEV backend's existing storage configuration without displaying it.
+
+The only Docker target is the hard-coded `fgt-dev-backend-1`. Its helper checks
+the engine again inside the container before any write. It snapshots only the
+settings fields it changes, activates one unique `acceptance-<timestamp>-<random>`
+event with a synthetic game, and keeps settings writes locked during the HTTP
+checks. Three synthetic identities use the `.invalid` email namespace; the flow
+needs no PNR with integrations disabled. If a PNR is ever added to these checks,
+use the published Skatteverket constant in `tests/fixtures`, never a real number.
+
+The script checks orchestrate, capability-signed status, game saves and the TO
+payment API when exposed. A missing optional payment route is reported as SKIP.
+The helper's `finally` path restores the previous settings and deletes only this
+run's event rows whose synthetic name, tag and email all match. It never archives,
+reopens or deletes historical events or changes a real player. EOF or its bounded
+session timeout also triggers restoration. Cleanup/restoration must be confirmed;
+a failed confirmation is a failed gate. Do not kill the helper/container mid-run.
+
+As the final step after an authorized PROD deployment, use the credential-free
+read-only profile. These commands are documentation, not deployment authorization:
+
+```sh
+python scripts/acceptance_smoke.py --mode readonly --profile prod \
+  --base https://checkin.fgctrollhattan.se \
+  --admin-base https://admin.fgctrollhattan.se \
+  --meetup-base https://meetup.fgctrollhattan.se \
+  --membercard-base https://membercard.fgctrollhattan.se
+```
+
+Only GET/HEAD are permitted in this mode. The script sends no cookies, Basic auth,
+PNRs or other credentials, and follows only the declared origin or the public
+check-in host's canonical `www` redirect. It checks health/pages/assets, public
+internal-route 404s, anonymous admin 401 with no Set-Cookie, and security headers.
+Sibling flags are optional; omitted siblings show SKIP. Responses, names, tokens
+and personal data are never included in the compact PASS/FAIL/SKIP table.
+Any failed check exits non-zero; a successful syntax check or deployment alone
+does not replace this gate.
+
+For DEV, use the explicit read-only profile:
+
+```sh
+python scripts/acceptance_smoke.py --mode readonly --profile dev \
+  --base http://localhost:8088 --admin-base http://localhost:8088/admin
+```
+
+DEV expects `/admin/` to redirect to application OAuth with 302 and no Basic gate,
+and the root Dash layout/dependencies/assets to be reachable (200 or the same OAuth
+302). Only DEV's explicit `/api/events/stream` exception expects token-gated 401;
+PROD's public host must return 404 there. The admin SSE path is token-gated 401
+with no Set-Cookie in both profiles. Every other internal public path must be
+404; 401/405 is a failure because it indicates the request reached an upstream.
+The old main-branch gateway can therefore report FAIL until integration is deployed.
+Report those findings; do not weaken the gate or send credentials to make it pass.
