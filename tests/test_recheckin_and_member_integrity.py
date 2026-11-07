@@ -288,6 +288,19 @@ def test_integration_audit_never_copies_sensitive_payloads(pg_db, caplog, source
     pg_db.seed_settings()
     row = pg_db.seed_checkin()
     synthetic_identifier = "0" * 12  # Deliberately invalid synthetic identifier, never a real PNR.
+    if source != "ebas":
+        before = pg_db.checkins()
+        with pytest.raises(ValueError, match="^invalid_source$") as error:
+            postgres.apply_integration_result(
+                row["record_id"],
+                source,
+                {"private": synthetic_identifier},
+                data={"member": True, "personnummer": synthetic_identifier},
+            )
+        assert synthetic_identifier not in str(error.value)
+        assert synthetic_identifier not in caplog.text
+        assert pg_db.checkins() == before
+        return
     postgres.apply_integration_result(
         row["record_id"],
         source,

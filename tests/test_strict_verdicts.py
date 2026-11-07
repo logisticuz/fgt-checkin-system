@@ -361,3 +361,117 @@ def test_stale_callback_never_reports_a_successful_write(app_client, pg_db, sour
     assert response.json()["success"] is False and response.json()["updated"] is False
     assert response.json()["state"] == "stale_rejected"
     assert pg_db.checkins() == before
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("state", ["unavailable", "skipped"])
+@pytest.mark.parametrize("member", [False, True])
+def test_non_verdict_legacy_ack_has_the_exact_stored_four_field_shape(
+    app_client, pg_db, state, member
+):
+    pg_db.seed_settings(require_startgg=False)
+    row = pg_db.seed_checkin(
+        member=member, member_source="ebas_check", status="Ready" if member else "Pending"
+    )
+    before = pg_db.checkins()
+    response = app_client.post(
+        f"/api/checkin/{row['record_id']}/member-status",
+        json={
+            "ok": False,
+            "state": state,
+            "member": not member,
+            "error": {"code": "provider_timeout", "message": PRIVATE},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": False,
+        "checkin_id": row["record_id"],
+        "member": member,
+        "status": row["status"],
+    }
+    assert pg_db.checkins() == before
+    assert audit(pg_db, "legacy_member_result")["state"] == state
+    assert PRIVATE not in response.text
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("ok", [{"nested": [PRIVATE]}, "false", True])
+def test_unsupported_source_is_safe_4xx_without_persistence_or_input_echo(
+    app_client, pg_db, backend_app, monkeypatch, caplog, ok
+):
+    row = existing(pg_db)
+    before = pg_db.checkins()
+    calls = []
+    monkeypatch.setattr(
+        backend_app.integrations.storage_api,
+        "apply_integration_result",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": "unknown_" + PRIVATE,
+            "ok": ok,
+            "data": {"member": False},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": {"state": "unavailable", "error_code": "invalid_source"}}
+    assert calls == [] and pg_db.checkins() == before
+    assert PRIVATE not in response.text and PRIVATE not in caplog.text
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("ok", [{"nested": [PRIVATE]}, "false", True])
+def test_direct_storage_also_rejects_an_unsupported_source_without_echo(pg_db, ok):
+    row = existing(pg_db)
+    before = pg_db.checkins()
+    with pytest.raises(ValueError) as error:
+        postgres.apply_integration_result(row["record_id"], "unknown_" + PRIVATE, ok)
+    assert str(error.value) == "invalid_source"
+    assert pg_db.checkins() == before
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("source", ["swish", "stripe"])
+@pytest.mark.parametrize("ok", [{"nested": PRIVATE}, "false"])
+def test_supported_non_provider_callbacks_reject_malformed_ok_without_echo(
+    app_client, pg_db, source, ok
+):
+    row = existing(pg_db)
+    before = pg_db.checkins()
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": source,
+            "ok": ok,
+            "data": {"payment_valid": False},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == {"state": "unavailable", "error_code": "invalid_ok"}
+    assert PRIVATE not in response.text and pg_db.checkins() == before
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("source", ["swish", "stripe"])
+def test_supported_non_provider_callback_contract_is_preserved(app_client, pg_db, source):
+    row = existing(pg_db)
+    response = app_client.post(
+        "/api/integration/result",
+        json={
+            "checkin_id": row["record_id"],
+            "source": source,
+            "ok": True,
+            "data": {"payment_valid": False},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True and response.json()["ok"] is True
+    assert response.json()["source"] == source and response.json()["updated"] is True
+    stored = pg_db.checkins()[0]
+    assert stored["payment_valid"] is False
+    assert stored["member"] is True and stored["startgg"] is True

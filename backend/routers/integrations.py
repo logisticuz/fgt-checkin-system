@@ -98,18 +98,26 @@ async def integration_result_endpoint(request: Request):
             status_code=400, detail={"state": "unavailable", "error_code": "invalid_payload"}
         )
     checkin_id, source = body.get("checkin_id"), body.get("source")
-    if (
-        not isinstance(checkin_id, str)
-        or not checkin_id.strip()
-        or not isinstance(source, str)
-        or not source.strip()
-    ):
+    if not isinstance(checkin_id, str) or not checkin_id.strip():
         raise HTTPException(
             status_code=400, detail={"state": "unavailable", "error_code": "invalid_target"}
         )
-    checkin_id, source = checkin_id.strip(), source.strip()
+    if not isinstance(source, str) or source.strip().lower() not in {
+        "ebas",
+        "startgg",
+        "swish",
+        "stripe",
+    }:
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_source"}
+        )
+    checkin_id, source = checkin_id.strip(), source.strip().lower()
 
     ok = body.get("ok")
+    if source in {"swish", "stripe"} and type(ok) is not bool:
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_ok"}
+        )
     data = body.get("data")
     error = body.get("error")
     fetched_at = body.get("fetched_at")
@@ -177,16 +185,6 @@ async def checkin_member_status_endpoint(checkin_id: str, request: Request):
         raise HTTPException(
             status_code=400, detail={"state": "unavailable", "error_code": result["error_code"]}
         )
-    if not result["ok"]:
-        return {
-            "success": False,
-            "checkin_id": checkin_id,
-            "ok": False,
-            "updated": False,
-            "state": result["state"],
-            "error_code": result["error_code"],
-        }
-
     return {
         "success": result["updated"] is True,
         "checkin_id": checkin_id,

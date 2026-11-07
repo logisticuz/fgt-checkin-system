@@ -1231,7 +1231,7 @@ def apply_legacy_member_status(
         result = (
             _update_checkin_with_status(conn, checkin_id, fields, event_slug=current["event_slug"])
             if verdict["ok"]
-            else {}
+            else {"fields": {"member": current["member"], "status": current["status"]}}
         )
         if verdict["ok"] and not result:
             raise RuntimeError("Failed to update checkin from legacy member result")
@@ -1363,12 +1363,19 @@ def apply_integration_result(
     """Apply integration result to a checkin record and write audit log."""
     if not checkin_id:
         raise ValueError("checkin_id is required")
-    if not source:
-        raise ValueError("source is required")
+    if not isinstance(source, str) or source.strip().lower() not in {
+        "ebas",
+        "startgg",
+        "swish",
+        "stripe",
+    }:
+        raise ValueError("invalid_source")
 
     update_fields: Dict[str, Any] = {}
 
     src = source.lower().strip()
+    if src in {"swish", "stripe"} and type(ok) is not bool:
+        raise ValueError("invalid_ok")
     verdict = None
     if src in {"ebas", "startgg"}:
         verdict = validate_provider_verdict(
