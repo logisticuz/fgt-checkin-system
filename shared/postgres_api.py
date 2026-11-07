@@ -694,7 +694,10 @@ def _update_checkin_with_status(
 
 
 def update_checkin(
-    record_id: str, fields: Dict[str, Any], typecast: bool = False
+    record_id: str,
+    fields: Dict[str, Any],
+    typecast: bool = False,
+    member_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Update a checkin and derive its status from the locked stored row."""
     if not record_id:
@@ -725,7 +728,12 @@ def update_checkin(
             )
             if not cur.fetchone():
                 return None
-        return _update_checkin_with_status(conn, record_id, fields)
+        if "member" in (fields or {}):
+            provenance = member_source or fields.get("member_source") or "to"
+            if provenance not in ("to", "v2", "ebas_check"):
+                raise ValueError("Invalid membership source")
+            fields = {**fields, "member_source": provenance}
+        return _update_checkin_with_status(conn, record_id, fields, event_slug=event_slug)
 
 
 def recompute_active_statuses(event_slug: str) -> int:
@@ -946,6 +954,190 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _integration_audit(conn, action, table, event_slug, checkin_id, details):
+    """Keep callback/member audit evidence in the same transaction as the write."""
+    conn.execute(
+        """INSERT INTO audit_log
+           (user_id, user_name, action, target_table, target_event, target_record, details)
+           VALUES ('integration', 'integration', %s, %s, %s, %s, %s)""",
+        (action, table, event_slug, checkin_id, json.dumps(details)),
+    )
+
+
+def _lock_integration_checkin(conn, checkin_id):
+    """Acquire the event lock before the row lock, matching archive's lock order."""
+    slug = conn.execute(
+        "SELECT event_slug FROM active_event_data WHERE record_id = %s", (checkin_id,)
+    ).fetchone()
+    if not slug:
+        return None
+    conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (slug[0],))
+    conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM active_event_data WHERE record_id = %s AND event_slug = %s FOR UPDATE",
+            (checkin_id, slug[0]),
+        )
+        row = cur.fetchone()
+        return _row_to_dict([column[0] for column in cur.description], row) if row else None
+
+
+def start_integration_attempt(checkin_id: str, sources=("ebas", "startgg")) -> str:
+    """Record one backend-generated run ID for both sources before sending n8n work."""
+    attempt_id = str(uuid.uuid4())
+    sources = tuple(dict.fromkeys(sources))
+    if not sources or any(source not in ("ebas", "startgg") for source in sources):
+        raise ValueError("Invalid integration sources")
+    with _get_pool().connection() as conn, conn.transaction():
+        if not _lock_integration_checkin(conn, checkin_id):
+            raise ValueError("Check-in is no longer active")
+        assignments = []
+        for source in sources:
+            assignments.extend(
+                (
+                    f"last_{source}_attempt_id = %s",
+                    f"last_{source}_attempt_started_at = clock_timestamp()",
+                    f"last_{source}_result_at = NULL",
+                )
+            )
+        conn.execute(
+            "UPDATE active_event_data SET " + ", ".join(assignments) + " WHERE record_id = %s",
+            [*[attempt_id for _ in sources], checkin_id],
+        )
+    return attempt_id
+
+
+def _membership_provenance(conn, current):
+    """Also protect confirmed receipts predating the provenance column or its update."""
+    if current.get("member_source") in ("to", "v2"):
+        return current["member_source"]
+    confirmed = conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM membership_attempts attempt
+               JOIN membership_receipts receipt ON receipt.attempt_id = attempt.id
+               WHERE attempt.checkin_id = %s AND attempt.event_slug = %s
+                 AND attempt.state = 'submitted' AND receipt.outcome = 'submitted'
+                 AND receipt.verified_at IS NOT NULL)""",
+        (current["record_id"], current["event_slug"]),
+    ).fetchone()[0]
+    return "v2" if confirmed else current.get("member_source")
+
+
+def apply_legacy_member_status(checkin_id: str, member: bool):
+    """Apply a legacy automated membership callback without erasing TO/v2 authority."""
+    with _get_pool().connection() as conn, conn.transaction():
+        current = _lock_integration_checkin(conn, checkin_id)
+        if current is None:
+            return None
+        provenance = _membership_provenance(conn, current)
+        fields = {}
+        if provenance != "to" and not (provenance == "v2" and not member):
+            fields = {"member": member}
+            if provenance != "v2":
+                fields["member_source"] = "ebas_check"
+        result = _update_checkin_with_status(
+            conn, checkin_id, fields, event_slug=current["event_slug"]
+        )
+        _integration_audit(
+            conn,
+            "legacy_member_result",
+            "active_event_data",
+            current["event_slug"],
+            checkin_id,
+            {"updated": bool(fields)},
+        )
+        return result
+
+
+def _acknowledge_membership_link(conn, attempt_id):
+    conn.execute(
+        """UPDATE membership_attempts SET member_link_reconciled_at = clock_timestamp(),
+           last_reconciled_at = clock_timestamp(), updated_at = clock_timestamp()
+           WHERE id = %s""",
+        (attempt_id,),
+    )
+
+
+def mark_membership_checkin(attempt_id: str) -> str:
+    """Link a submitted receipt to its active or exact archived check-in atomically."""
+    from shared import membership_store as store
+
+    attempt_id = store._id(attempt_id)
+    with _get_pool().connection() as conn, conn.transaction():
+        initial = conn.execute(
+            "SELECT event_slug, checkin_id FROM membership_attempts WHERE id = %s", (attempt_id,)
+        ).fetchone()
+        if not initial:
+            raise ValueError("Membership attempt is missing")
+        event_slug = initial[0]
+        conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (event_slug,)
+        )
+        conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+        checkin_id = initial[1]
+        row = conn.execute(
+            """SELECT member, member_source FROM active_event_data
+               WHERE record_id = %s AND event_slug = %s FOR UPDATE""",
+            (checkin_id, event_slug),
+        ).fetchone()
+        table = "active_event_data"
+        if row is None:
+            table = "event_archive"
+            row = conn.execute(
+                """SELECT member, member_source FROM event_archive
+                   WHERE source_record_id = %s AND event_slug = %s FOR UPDATE""",
+                (checkin_id, event_slug),
+            ).fetchone()
+        # Follow event -> merge -> check-in row -> membership-person/attempt order.
+        attempt = store._locked_person_attempt(conn, attempt_id)
+        if attempt["state"] != "submitted":
+            return attempt["state"]
+        if checkin_id is None:
+            _acknowledge_membership_link(conn, attempt_id)
+            return "submitted"
+        if row is None:
+            conn.execute(
+                """UPDATE membership_attempts SET state = 'manual_review',
+                   outcome_error_code = 'checkin_missing', updated_at = clock_timestamp()
+                   WHERE id = %s""",
+                (attempt_id,),
+            )
+            store._receipt_outcome(conn, attempt_id, "manual_review")
+            _integration_audit(
+                conn,
+                "membership_checkin_missing",
+                table,
+                event_slug,
+                checkin_id,
+                {"outcome": "manual_review", "error_code": "checkin_missing"},
+            )
+            return "manual_review"
+        # A TO override is authoritative even when a submitted receipt is polled again.
+        if row[1] == "to" or (row[0] is True and row[1] == "v2"):
+            _acknowledge_membership_link(conn, attempt_id)
+            return "submitted"
+        if table == "active_event_data":
+            _update_checkin_with_status(
+                conn, checkin_id, {"member": True, "member_source": "v2"}, event_slug=event_slug
+            )
+        else:
+            conn.execute(
+                """UPDATE event_archive SET member = true, member_source = 'v2'
+                   WHERE source_record_id = %s AND event_slug = %s""",
+                (checkin_id, event_slug),
+            )
+        _integration_audit(
+            conn,
+            "membership_member_updated",
+            table,
+            event_slug,
+            checkin_id,
+            {"member_source": "v2"},
+        )
+        _acknowledge_membership_link(conn, attempt_id)
+    return "submitted"
+
+
 def apply_integration_result(
     checkin_id: str,
     source: str,
@@ -954,6 +1146,8 @@ def apply_integration_result(
     error: Optional[Dict[str, Any]] = None,
     fetched_at: Optional[str] = None,
     state: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    recompute_payment_expected: bool = False,
 ) -> Dict[str, Any]:
     """Apply integration result to a checkin record and write audit log."""
     if not checkin_id:
@@ -994,28 +1188,89 @@ def apply_integration_result(
         else:
             update_fields["payment_valid"] = bool(ok)
 
-    updated = update_checkin(checkin_id, update_fields) if update_fields else None
-    if update_fields and not updated:
-        raise RuntimeError("Failed to update checkin from integration result")
-
-    fields = (updated or {}).get("fields", {})
-    event_slug = fields.get("event_slug") if isinstance(fields, dict) else None
-
     audit_source = src if src in {"startgg", "ebas", "swish", "stripe"} else "unknown"
-    log_action(
-        {"user_id": "integration", "user_name": f"n8n:{audit_source}", "user_email": ""},
-        "integration_result",
-        "active_event_data",
-        target_event=event_slug,
-        target_record=checkin_id,
-        details=json.dumps(
-            {
-                "source": audit_source,
-                "ok": bool(ok),
-                "updated_fields": sorted(update_fields),
+    result_time = None
+    invalid_time = False
+    if fetched_at is not None:
+        try:
+            result_time = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+            if result_time.tzinfo is None:
+                raise ValueError
+        except (TypeError, ValueError):
+            result_time = None
+            invalid_time = True
+    with _get_pool().connection() as conn, conn.transaction():
+        current = _lock_integration_checkin(conn, checkin_id)
+        event_slug = current["event_slug"] if current else None
+        stale = current is None
+        if current and src in ("ebas", "startgg"):
+            current_id = current[f"last_{src}_attempt_id"]
+            stale = (attempt_id != current_id) if current_id else attempt_id is not None
+            stale = stale or (current_id is not None and invalid_time)
+            started = current[f"last_{src}_attempt_started_at"]
+            previous = current[f"last_{src}_result_at"]
+            if result_time is not None:
+                stale = stale or (started is not None and result_time < started)
+                stale = stale or (previous is not None and result_time <= previous)
+            elif current_id and previous is not None:
+                stale = True
+        if stale:
+            _integration_audit(
+                conn,
+                "stale_rejected",
+                "active_event_data",
+                event_slug,
+                checkin_id,
+                {"source": audit_source, "outcome": "stale_rejected"},
+            )
+            logger.info(
+                "Integration result rejected: source=%s outcome=stale_rejected", audit_source
+            )
+            return {
+                "checkin_id": checkin_id,
+                "source": src,
+                "ok": ok,
+                "updated": False,
+                "state": "stale_rejected",
             }
-        ),
-    )
+        if src == "ebas" and "member" in update_fields:
+            provenance = _membership_provenance(conn, current)
+            if provenance == "to" or (provenance == "v2" and update_fields["member"] is False):
+                update_fields.pop("member")
+            elif provenance != "v2":
+                update_fields["member_source"] = "ebas_check"
+        if (
+            recompute_payment_expected
+            and src == "startgg"
+            and "tournament_games_registered" in update_fields
+        ):
+            settings = conn.execute(
+                "SELECT swish_expected_per_game FROM settings WHERE is_active=true ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            per_game = settings[0] if settings else 0
+            if per_game:
+                update_fields["payment_expected"] = (
+                    len(update_fields["tournament_games_registered"]) * per_game
+                )
+        if update_fields and not _update_checkin_with_status(
+            conn, checkin_id, update_fields, event_slug=event_slug
+        ):
+            raise RuntimeError("Failed to update checkin from integration result")
+        if src in ("ebas", "startgg"):
+            # src is a closed whitelist, never interpolated directly from arbitrary input.
+            conn.execute(
+                f"UPDATE active_event_data SET last_{src}_result_at = COALESCE(%s, clock_timestamp()) "
+                "WHERE record_id = %s",
+                (result_time, checkin_id),
+            )
+        _integration_audit(
+            conn,
+            "integration_result",
+            "active_event_data",
+            event_slug,
+            checkin_id,
+            {"source": audit_source, "ok": bool(ok), "updated_fields": sorted(update_fields)},
+        )
 
     return {
         "checkin_id": checkin_id,
@@ -2719,7 +2974,7 @@ def archive_event(
                 cur.execute(
                     """
                     SELECT record_id, name, tag, email, telephone, status,
-                           member, startgg, payment_valid,
+                           member, member_source, startgg, payment_valid,
                            payment_amount, payment_expected,
                            tournament_games_registered, checkin_uuid,
                            external_id, startgg_event_id, is_guest, added_via, acquisition_source
@@ -2762,7 +3017,7 @@ def archive_event(
                         swish_expected_per_game,
                         tournament_games_registered, checkin_uuid,
                         external_id, startgg_event_id, is_guest, added_via, acquisition_source,
-                        archived_at, player_uuid
+                        archived_at, player_uuid, member_source
                     ) VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
@@ -2771,7 +3026,7 @@ def archive_event(
                         %s,
                         %s, %s,
                         %s, %s, %s, %s, %s,
-                        %s, %s
+                        %s, %s, %s
                     )
                     ON CONFLICT (event_slug, source_record_id)
                         WHERE source_record_id IS NOT NULL
@@ -2781,6 +3036,7 @@ def archive_event(
                         name = EXCLUDED.name, tag = EXCLUDED.tag,
                         email = EXCLUDED.email, telephone = EXCLUDED.telephone,
                         status = EXCLUDED.status, member = EXCLUDED.member,
+                        member_source = EXCLUDED.member_source,
                         startgg = EXCLUDED.startgg, payment_valid = EXCLUDED.payment_valid,
                         payment_amount = EXCLUDED.payment_amount,
                         payment_expected = EXCLUDED.payment_expected,
@@ -2818,6 +3074,7 @@ def archive_event(
                             c.get("acquisition_source"),
                             now,
                             player_results[i][0],
+                            c.get("member_source"),
                         )
                         for i, c in enumerate(checkins)
                     ],
@@ -3148,7 +3405,7 @@ def reopen_event(
                                 payment_amount, payment_expected,
                                 tournament_games_registered, checkin_uuid,
                                 startgg_event_id, is_guest, added_via, acquisition_source, player_uuid,
-                                created
+                                created, member_source
                             )
                             SELECT
                                 gen_random_uuid()::text,
@@ -3171,7 +3428,7 @@ def reopen_event(
                                 COALESCE(NULLIF(added_via, ''), 'reopen_restore'),
                                 acquisition_source,
                                 player_uuid,
-                                %s
+                                %s, member_source
                             FROM event_archive
                             WHERE event_slug = %s
                             """,

@@ -31,6 +31,7 @@ def _callback_results(n8n_stub, backend_app, results):
                     "/api/integration/result",
                     json={
                         "checkin_id": checkin_id,
+                        "attempt_id": n8n_stub.calls[-1]["json"].get("attempt_id"),
                         "source": source,
                         "ok": True,
                         "data": {key: value},

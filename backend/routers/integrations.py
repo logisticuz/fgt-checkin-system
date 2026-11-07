@@ -108,6 +108,7 @@ async def integration_result_endpoint(request: Request):
             error=error,
             fetched_at=fetched_at,
             state=body.get("state"),
+            attempt_id=body.get("attempt_id"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -132,14 +133,14 @@ async def checkin_member_status_endpoint(checkin_id: str, request: Request):
 
     member = bool(body.get("member", False))
 
-    result = update_checkin(checkin_id, {"member": member})
+    result = storage_api.apply_legacy_member_status(checkin_id, member)
     if not result:
         raise HTTPException(status_code=500, detail="Storage update failed")
 
     return {
         "success": True,
         "checkin_id": checkin_id,
-        "member": member,
+        "member": result["fields"].get("member", False),
         "status": result["fields"]["status"],
     }
 

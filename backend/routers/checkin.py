@@ -225,6 +225,7 @@ async def orchestrate_checkin(request: Request):
             "personnummer": personnummer,
             "name": name,
         }
+        n8n_payload["attempt_id"] = storage_api.start_integration_attempt(checkin_id)
 
         n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
 
