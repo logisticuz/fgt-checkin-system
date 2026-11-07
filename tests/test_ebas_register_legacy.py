@@ -15,7 +15,10 @@ SYNTHETIC_PERSONNUMMER = "000000000000"
 
 @pytest.fixture
 def legacy_context(pg_db, backend_app, n8n_stub, monkeypatch):
+    from status_api import capability_token
+
     monkeypatch.setattr(backend_app.ebas_legacy, "INTEGRATION_ENGINE", "n8n")
+    pg_db.seed_settings()
     row = pg_db.seed_checkin()
     monkeypatch.setattr(backend_app.ebas_legacy, "EBAS_REGISTER_WAIT_SECONDS", 0.2)
     monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registrations", {})
@@ -23,6 +26,8 @@ def legacy_context(pg_db, backend_app, n8n_stub, monkeypatch):
     monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registration_tasks", set())
     n8n_stub.response = {"success": True}
     payload = {
+        "checkin_id": row["record_id"],
+        "status_token": capability_token(row["record_id"]),
         "personnummer": SYNTHETIC_PERSONNUMMER,
         "tag": row["tag"],
         "slug": row["event_slug"],

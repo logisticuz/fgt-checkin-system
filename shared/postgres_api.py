@@ -12,6 +12,8 @@ import os
 import logging
 import json
 import uuid
+import hmac
+import re
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
@@ -790,7 +792,69 @@ def delete_checkin(record_id: str) -> bool:
             return cur.rowcount > 0
 
 
-def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _ownership_phone(value):
+    if not isinstance(value, str):
+        return ""
+    digits = re.sub(r"[^0-9]", "", value)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("0"):
+        digits = "46" + digits[1:]
+    return digits
+
+
+def _contact_ownership_verified(payload, email, telephone):
+    submitted_phone = _ownership_phone(payload.get("telephone"))
+    stored_phone = _ownership_phone(telephone)
+    submitted_email = payload.get("email")
+    submitted_email = submitted_email.strip().lower() if isinstance(submitted_email, str) else ""
+    stored_email = email.strip().lower() if isinstance(email, str) else ""
+    phone_matches = bool(submitted_phone and stored_phone) and hmac.compare_digest(
+        submitted_phone.encode("utf-8"), stored_phone.encode("utf-8")
+    )
+    email_matches = bool(submitted_email and stored_email) and hmac.compare_digest(
+        submitted_email.encode("utf-8"), stored_email.encode("utf-8")
+    )
+    return phone_matches or email_matches
+
+
+def _begin_existing_checkin(conn, event_slug, checkin_id, payload, *, public):
+    """Compare ownership with contacts from the already-locked, pre-update row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT email, telephone, acquisition_source FROM active_event_data "
+            "WHERE record_id = %s AND event_slug = %s FOR UPDATE",
+            (checkin_id, event_slug),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+    ownership_verified = not public or _contact_ownership_verified(payload, row[0], row[1])
+    safe_fields = {}
+    if ownership_verified:
+        for key in ("name", "email", "telephone"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                safe_fields[key] = value.strip()
+    source = _normalize_acquisition_source(payload.get("acquisition_source"))
+    if source is not None and (ownership_verified or not row[2]):
+        safe_fields["acquisition_source"] = source
+    updated = _update_checkin_with_status(conn, checkin_id, safe_fields, event_slug=event_slug)
+    if not updated:
+        return None
+    return {
+        "checkin_id": checkin_id,
+        "record_id": checkin_id,
+        "event_slug": event_slug,
+        "created": False,
+        "player_uuid": updated["fields"].get("player_uuid"),
+        "ownership_verified": ownership_verified,
+    }
+
+
+def begin_checkin(
+    event_slug: str, payload: Dict[str, Any], *, public: bool = False
+) -> Dict[str, Any]:
     """
     Create or update a check-in attempt and return checkin_id.
 
@@ -823,26 +887,11 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 existing = cur.fetchone()
 
             if existing:
-                checkin_id = existing[0]
-                safe_fields = {}
-                for key in ("name", "email", "telephone"):
-                    value = payload.get(key)
-                    if isinstance(value, str) and value.strip():
-                        safe_fields[key] = value.strip()
-                normalized_source = _normalize_acquisition_source(payload.get("acquisition_source"))
-                if normalized_source is not None:
-                    safe_fields["acquisition_source"] = normalized_source
-                updated = _update_checkin_with_status(
-                    conn, checkin_id, safe_fields, event_slug=event_slug
+                result = _begin_existing_checkin(
+                    conn, event_slug, existing[0], payload, public=public
                 )
-                if updated:
-                    return {
-                        "checkin_id": checkin_id,
-                        "record_id": checkin_id,
-                        "event_slug": event_slug,
-                        "created": False,
-                        "player_uuid": updated["fields"].get("player_uuid"),
-                    }
+                if result:
+                    return result
 
             games = payload.get("tournament_games_registered")
             if isinstance(games, str):
@@ -894,33 +943,40 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 else {}
             )
             fields["status"] = compute_checkin_status(fields, settings)["status"]
+            candidate_id = str(uuid.uuid4())
+            conflict_update = (
+                "tag = active_event_data.tag"
+                if public
+                else """
+                name = COALESCE(NULLIF(BTRIM(EXCLUDED.name), ''), active_event_data.name),
+                email = COALESCE(NULLIF(BTRIM(EXCLUDED.email), ''), active_event_data.email),
+                telephone = COALESCE(NULLIF(BTRIM(EXCLUDED.telephone), ''), active_event_data.telephone),
+                acquisition_source = COALESCE(NULLIF(EXCLUDED.acquisition_source, ''),
+                                              active_event_data.acquisition_source)
+            """
+            )
             cur.execute(
-                """
+                f"""
                 INSERT INTO active_event_data (
-                    event_slug, external_id,
+                    record_id, event_slug, external_id,
                     name, tag, email, telephone,
                     status, member, startgg, payment_valid,
                     payment_amount, payment_expected,
                     tournament_games_registered, checkin_uuid,
                     startgg_event_id, is_guest, added_via, acquisition_source, player_uuid
                 ) VALUES (
-                    %s, %s,
+                    %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s,
                     %s, %s,
                     %s, %s, %s, %s, %s
                 )
-                ON CONFLICT (event_slug, lower(tag)) DO UPDATE SET
-                    name = COALESCE(NULLIF(BTRIM(EXCLUDED.name), ''), active_event_data.name),
-                    email = COALESCE(NULLIF(BTRIM(EXCLUDED.email), ''), active_event_data.email),
-                    telephone = COALESCE(NULLIF(BTRIM(EXCLUDED.telephone), ''),
-                                         active_event_data.telephone),
-                    acquisition_source = COALESCE(NULLIF(EXCLUDED.acquisition_source, ''),
-                                                  active_event_data.acquisition_source)
+                ON CONFLICT (event_slug, lower(tag)) DO UPDATE SET {conflict_update}
                 RETURNING record_id
                 """,
                 (
+                    candidate_id,
                     event_slug,
                     fields["external_id"],
                     fields["name"],
@@ -943,6 +999,11 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             )
             checkin_id = cur.fetchone()[0]
+            if public and checkin_id != candidate_id:
+                result = _begin_existing_checkin(conn, event_slug, checkin_id, payload, public=True)
+                if not result:
+                    raise RuntimeError("Check-in changed during ownership verification")
+                return result
             _update_checkin_with_status(conn, checkin_id, {})
 
     return {
@@ -951,6 +1012,7 @@ def begin_checkin(event_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "event_slug": event_slug,
         "created": True,
         "player_uuid": matched_player_uuid,
+        "ownership_verified": True,
     }
 
 

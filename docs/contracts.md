@@ -196,3 +196,31 @@ The merge lock phase rechecks its event coverage and retries its lock-only savep
 new affected event appeared while waiting, up to three attempts before a visible error.
 Merge/undo use a 10-second transaction lock timeout; ordinary writers share the global lock.
 No active row is written under an uncovered event. See `docs/locking.md` for the lock table.
+
+## Public capability issuance and legacy registration ownership
+
+`POST /api/checkin/orchestrate` issues `status_token` for a newly created row. For a repeat
+check-in, it requires either a non-empty matching telephone (digits normalized to Swedish
+`46` form, accepting `0`/`+46`/`0046`) or a non-empty matching email (trimmed, lower-case).
+Both comparisons use constant-time byte comparison against the locked pre-update row.
+The database returns the ownership verdict atomically with begin/upsert; no stored contacts
+are included in the response. A concurrent insert conflict receives the same existing-row
+proof check and cannot claim to be a new creation.
+
+An unverified repeat still returns its check-in result, with `ownership:"unverified"` and
+no `status_token`. The UI must show "Ask a TO to help you continue". Its stored name, email,
+and telephone remain unchanged, preventing a failed request from establishing proof for a
+second request. Acquisition source may fill an empty value. Verified repeats retain the
+existing safe-field update rules; membership, registration and payment flags remain protected.
+
+In legacy mode with integrations enabled, `POST /api/ebas/register` additionally requires
+`checkin_id` and its `status_token`. Invalid/missing/expired/foreign capabilities return 403
+before any n8n call, including the already-member shortcut. The backend acts only on the
+signed row in the active event (404 if absent/inactive); optional tag/slug fields must match
+that row or return 403. Tag/slug never select a different target. The capability is not
+forwarded to n8n. Existing membership-mode and disabled-engine gates retain their precedence.
+
+An unverified repeat also returns `reason:"ownership_unverified"` and
+`integrations.ebas:"skipped"`. Its n8n payload omits `personnummer` entirely and records
+callback authority for Start.gg only. An eBas callback using that run ID is rejected as
+stale; any previously authorized eBas run remains unchanged. Start.gg continues normally.

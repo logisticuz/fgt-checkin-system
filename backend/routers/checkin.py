@@ -197,20 +197,25 @@ async def orchestrate_checkin(request: Request):
 
     # 1. begin_checkin (dedupe by tag+slug)
     try:
-        checkin_result = begin_fn(slug, {
-            "name": name,
-            "tag": tag,
-            "email": email,
-            "telephone": telefon,
-            "status": "Pending",
-            "added_via": "startgg_flow",
-            "acquisition_source": acquisition_source,
-        })
+        checkin_result = begin_fn(
+            slug,
+            {
+                "name": name,
+                "tag": tag,
+                "email": email,
+                "telephone": telefon,
+                "status": "Pending",
+                "added_via": "startgg_flow",
+                "acquisition_source": acquisition_source,
+            },
+            public=True,
+        )
     except Exception as e:
         logger.exception(f"begin_checkin failed: {e}")
         raise HTTPException(status_code=500, detail=f"Check-in creation failed: {e}")
 
     checkin_id = checkin_result["checkin_id"]
+    ownership_verified = checkin_result.get("ownership_verified") is True
     logger.info(f"Orchestrate: checkin_id={checkin_id}, tag={tag}, slug={slug}")
 
     # 2. Forward to n8n v5 webhook (synchronous - n8n calls /api/integration/result internally)
@@ -222,10 +227,15 @@ async def orchestrate_checkin(request: Request):
             "checkin_id": checkin_id,
             "tag": tag,
             "slug": slug,
-            "personnummer": personnummer,
             "name": name,
         }
-        n8n_payload["attempt_id"] = storage_api.start_integration_attempt(checkin_id)
+        if ownership_verified:
+            n8n_payload["personnummer"] = personnummer
+            n8n_payload["attempt_id"] = storage_api.start_integration_attempt(checkin_id)
+        else:
+            n8n_payload["attempt_id"] = storage_api.start_integration_attempt(
+                checkin_id, sources=("startgg",)
+            )
 
         n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
 
@@ -298,11 +308,14 @@ async def orchestrate_checkin(request: Request):
     integrations, degraded = _orchestrate_integrations(
         n8n_resp, n8n_response_data, n8n_payload
     )
+    if not ownership_verified:
+        integrations["ebas"] = "skipped"
+        degraded = INTEGRATION_ENGINE != "n8n" or "unavailable" in integrations.values()
     membership_unknown = integrations["ebas"] != "ok"
     response_missing = [
         item for item in missing if not (membership_unknown and item == "Membership")
     ]
-    return {
+    result = {
         "ready": ready,
         "slug": slug,
         "missing": response_missing,
@@ -313,10 +326,15 @@ async def orchestrate_checkin(request: Request):
         "name": name,
         "tag": tag,
         "checkin_id": checkin_id,
-        "status_token": __import__("status_api").capability_token(checkin_id),
         "integrations": integrations,
         "degraded": degraded,
     }
+    if ownership_verified:
+        result["status_token"] = __import__("status_api").capability_token(checkin_id)
+    else:
+        result["ownership"] = "unverified"
+        result["reason"] = "ownership_unverified"
+    return result
 
 
 @router.patch("/api/player/games", tags=["Checkin"])
