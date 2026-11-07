@@ -305,3 +305,61 @@ def test_unverified_repeat_cannot_run_ebas_or_apply_its_callback(
     assert stored["last_startgg_attempt_id"] == n8n_stub.calls[-1]["json"]["attempt_id"]
     assert stored["member"] is False and stored["startgg"] is True
     assert stored["email"] == OWNER_EMAIL and stored["telephone"] == OWNER_PHONE
+
+
+@pytest.mark.parametrize("nested_payload", [False, True])
+@pytest.mark.parametrize(
+    ("configured", "supplied", "trusted"),
+    [
+        ("synthetic-internal-token", None, False),
+        ("synthetic-internal-token", "wrong-token", False),
+        (None, "synthetic-internal-token", False),
+        (None, None, False),
+        ("", "", False),
+        ("synthetic-internal-token", "synthetic-internal-token", True),
+    ],
+)
+def test_begin_cannot_replace_contacts_then_mint_capability_without_valid_internal_token(
+    member_client,
+    membership_db,
+    backend_app,
+    monkeypatch,
+    configured,
+    supplied,
+    trusted,
+    nested_payload,
+):
+    owner = _owner(membership_db, member=True, startgg=True, payment_valid=True)
+    monkeypatch.setattr(backend_app.checkin, "INTERNAL_API_TOKEN", configured)
+    monkeypatch.setattr(backend_app.app_state, "INTERNAL_API_TOKEN", configured)
+    attack = _repeat(owner, public=False, ownership_verified=True, created=True)
+    request_body = (
+        {"event_slug": owner["event_slug"], "payload": attack}
+        if nested_payload
+        else {**attack, "event_slug": owner["event_slug"]}
+    )
+    headers = {} if supplied is None else {"X-Internal-Token": supplied}
+
+    begun = member_client.post("/api/checkin/begin", json=request_body, headers=headers)
+
+    assert begun.status_code == 200
+    assert begun.json()["checkin_id"] == owner["record_id"]
+    assert begun.json()["ownership_verified"] is trusted
+    assert "status_token" not in begun.json()
+    row = membership_db.checkins()[0]
+    expected = attack if trusted else owner
+    for field in ("name", "email", "telephone"):
+        assert row[field] == expected[field]
+    assert row["member"] and row["startgg"] and row["payment_valid"]
+
+    repeated = member_client.post("/api/checkin/orchestrate", json=attack)
+
+    assert repeated.status_code == 200
+    body = repeated.json()
+    if trusted:
+        assert verify_capability(owner["record_id"], body["status_token"])
+    else:
+        assert body["ownership"] == "unverified"
+        assert "status_token" not in body
+        assert membership_db.checkins()[0]["email"] == OWNER_EMAIL
+        assert membership_db.checkins()[0]["telephone"] == OWNER_PHONE

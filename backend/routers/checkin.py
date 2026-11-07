@@ -1,5 +1,7 @@
 """Checkin routes moved from main.py without handler changes."""
 
+import secrets
+
 from fastapi import APIRouter
 from status_api import verify_capability
 from shared.ebas_client import _private_transport_logging
@@ -9,6 +11,7 @@ from app_state import (
     EBAS_REGISTER_TIMEOUT_SECONDS,
     HTTPException,
     INTEGRATION_ENGINE,
+    INTERNAL_API_TOKEN,
     N8N_BASIC_AUTH_PASSWORD,
     N8N_BASIC_AUTH_USER,
     N8N_INTERNAL,
@@ -90,8 +93,12 @@ async def begin_checkin_endpoint(request: Request):
     if isinstance(payload, dict) and not payload.get("added_via"):
         payload["added_via"] = "api"
 
+    supplied_token = request.headers.get("X-Internal-Token", "")
+    trusted_internal = bool(INTERNAL_API_TOKEN) and secrets.compare_digest(
+        supplied_token.encode("utf-8"), INTERNAL_API_TOKEN.encode("utf-8")
+    )
     try:
-        result = begin_fn(event_slug, payload)
+        result = begin_fn(event_slug, payload, public=not trusted_internal)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -224,3 +224,10 @@ An unverified repeat also returns `reason:"ownership_unverified"` and
 `integrations.ebas:"skipped"`. Its n8n payload omits `personnummer` entirely and records
 callback authority for Start.gg only. An eBas callback using that run ID is rejected as
 stale; any previously authorized eBas run remains unchanged. Start.gg continues normally.
+
+`POST /api/checkin/begin` uses the same public ownership rules unless `X-Internal-Token`
+matches the configured, non-empty `INTERNAL_API_TOKEN` using constant-time comparison.
+An unset/empty server token never grants trusted behavior. Missing or wrong headers leave
+the route in public mode even though its soft-auth dependency permits the request.
+Neither flat nor nested payload flags can claim trusted ownership. A valid internal token
+permits the existing trusted safe-field updates; begin itself does not issue a capability.
