@@ -11,7 +11,31 @@ from psycopg import sql
 
 from scripts import recompute_stats as cli
 from shared import migrate, postgres_api as postgres
+from tests import test_lock_coverage as private_locks
 from tests.test_dashboard_row_identity import dashboard  # noqa: F401
+
+
+class _StatsLockCursor(private_locks._Cursor):
+    """Extend T058's real-lock test namespace to the CLI's nonblocking variants."""
+
+    def __iter__(self):
+        return iter(self.cursor)
+
+    def execute(self, query, *args, **kwargs):
+        if isinstance(query, str) and "pg_try_advisory_xact_lock" in query:
+            query = query.replace("hashtext('fgt", "hashtext(current_schema() || ':fgt")
+        return super().execute(query, *args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def private_stats_lock_namespace(request, monkeypatch):
+    if "pg_db" not in request.fixturenames:
+        return
+    database = request.getfixturevalue("pg_db")
+    connections = private_locks._LockConnections(database)
+    monkeypatch.setattr(private_locks, "_Cursor", _StatsLockCursor)
+    monkeypatch.setattr(database, "pool", connections)
+    monkeypatch.setattr(postgres, "_get_pool", lambda: connections)
 
 
 def snapshot(db):
@@ -158,7 +182,7 @@ def test_dry_run_is_database_read_only_and_checksums_unchanged(history, monkeypa
         next(item for item in result["events"] if item["event_slug"] == "later")["after"][
             "total_revenue"
         ]
-        == 85
+        == 35
     )
 
 
@@ -240,7 +264,7 @@ def test_verified_free_changes_only_expected_and_payment_requirement(history):
     assert result["corrections"]
 
 
-def test_confirmed_price_fills_paid_zero_only_and_preserves_nonzero(history):
+def test_confirmed_price_changes_only_expectations_and_preserves_every_amount(history):
     preview(
         history,
         apply=True,
@@ -252,7 +276,7 @@ def test_confirmed_price_fills_paid_zero_only_and_preserves_nonzero(history):
                 "SELECT player_uuid,payment_amount FROM event_archive WHERE event_slug='later'"
             )
         )
-        assert amounts == {"a": Decimal(35), "c": Decimal(50)}
+        assert amounts == {"a": Decimal(35), "c": Decimal(0)}
         assert (
             conn.execute(
                 "SELECT payment_amount FROM event_archive WHERE event_slug='same-day' AND player_uuid='b'"
@@ -275,8 +299,10 @@ def test_price_comparison_is_dry_only_and_keeps_unknown_game_counts(history):
     result = preview(history, compare_prices={"later": (Decimal(25), False)})
     assert snapshot(history) == before
     person, game = result["comparisons"]
-    assert person["revenue"] == "60.00" and person["amounts_filled"] == 1
-    assert game["revenue"] == "35.00" and game["unknown_game_count"] == 1
+    assert person["revenue"] == game["revenue"] == "35.00"
+    assert person["paid_amount_not_recorded"] == game["paid_amount_not_recorded"] == 1
+    assert person["expected_payment_corrections"] == 0
+    assert game["expected_payment_corrections"] == 1 and game["unknown_game_count"] == 1
     with pytest.raises(ValueError, match="dry-run only"):
         preview(history, apply=True, compare_prices={"later": (Decimal(25), False)})
 
@@ -771,7 +797,9 @@ def test_apply_refuses_any_active_event_but_dry_run_remains_readonly(history, ki
 @pytest.mark.parametrize("resource", ["fgt:player-merges", "fgt-event:first"])
 def test_apply_refuses_archive_maintenance_locks_without_waiting(history, resource):
     with history.pool.connection() as busy, busy.transaction():
-        busy.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (resource,))
+        busy.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':' || %s))", (resource,)
+        )
         with pytest.raises(ValueError, match="progress|archived"):
             preview(history, apply=True)
 
@@ -873,3 +901,182 @@ def test_dashboard_missing_membership_data_and_series_metric_labels(dashboard, m
     row = values["insights-events-table"][0]
     assert row["member_rate"] == "– (not recorded)"
     assert row["retention_rate"] == "0%" and row["same_series_return_rate"] == "–"
+
+
+@pytest.mark.parametrize("recorded", [None, 0, Decimal("12.50"), Decimal("-5.00")])
+def test_tariff_never_creates_or_rewrites_recorded_money(history, recorded):
+    with history.pool.connection() as conn:
+        conn.execute(
+            "UPDATE event_archive SET payment_amount=%s WHERE event_slug='later' AND player_uuid='c'",
+            (recorded,),
+        )
+        before = conn.execute(
+            "SELECT id,payment_valid,payment_amount FROM event_archive ORDER BY id"
+        ).fetchall()
+    dry = preview(history, event_prices={"later": (Decimal(25), True)})
+    assert all(set(item["after"]) == {"payment_expected"} for item in dry["corrections"])
+    result = preview(history, apply=True, event_prices={"later": (Decimal(25), True)})
+    with history.pool.connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT id,payment_valid,payment_amount FROM event_archive ORDER BY id"
+            ).fetchall()
+            == before
+        )
+        assert (
+            conn.execute(
+                "SELECT payment_expected FROM event_archive WHERE event_slug='later' AND player_uuid='c'"
+            ).fetchone()[0]
+            == 50
+        )
+        policy = conn.execute(
+            "SELECT requirements_snapshot FROM event_stats WHERE event_slug='later'"
+        ).fetchone()[0]
+        assert policy["event_price"] == {"amount": "25", "basis": "game"}
+    if recorded is None or recorded == 0:
+        assert any(
+            item["kind"] == "payment_valid_without_amount"
+            and item["message"] == "Paid, amount not recorded"
+            for item in result["deviations"]
+            if item.get("event_slug") == "later"
+        )
+
+
+def test_verified_price_basis_survives_ordinary_recompute_and_free_assertion_clears_it(history):
+    preview(history, apply=True, event_prices={"first": (Decimal("25.00"), False)})
+    result = postgres.recompute_event_stats("first", dry_run=True)
+    assert result["after"]["requirements_snapshot"]["event_price"] == {
+        "amount": "25.00",
+        "basis": "person",
+    }
+    preview(history, apply=True, free_events=["first"])
+    with history.pool.connection() as conn:
+        policy = conn.execute(
+            "SELECT requirements_snapshot FROM event_stats WHERE event_slug='first'"
+        ).fetchone()[0]
+    assert policy == {"require_payment": False}
+
+
+def test_real_insights_unknown_noshow_output_survives_trend_and_ops(dashboard, monkeypatch):
+    from unittest.mock import Mock
+
+    event = {
+        "event_slug": "fightbox",
+        "event_date": "2026-01-01",
+        "archived_at": "2026-01-02",
+        "total_participants": 3,
+        "new_players": 3,
+        "returning_players": 0,
+        "no_show_count": None,
+        "no_show_rate": None,
+        "retention_rate": 0,
+        "requirements_snapshot": {"require_membership": False},
+    }
+    monkeypatch.setattr(
+        dashboard.storage, "get_event_history_dashboard", Mock(return_value=[event]), raising=False
+    )
+    result = dashboard.callbacks["update_insights"](
+        "tab-insights", 1, [], "all", [], 10, "", "", None, None
+    )
+    values = {
+        item.component_id: value
+        for item, value in zip(dashboard.definitions["update_insights"]["output"], result)
+    }
+    unknown = values["insights-events-table"][0]
+    assert unknown["no_show_rate"] == unknown["no_show_count"] == "–"
+    rows = [
+        unknown,
+        {**unknown, "event_date": "2026-01-02", "no_show_rate": 0, "no_show_count": 0},
+        {**unknown, "event_date": "2026-01-03", "no_show_rate": 25, "no_show_count": 1},
+    ]
+    figure = dashboard.callbacks["render_events_noshow_trend"](rows)
+    assert figure["data"][0]["y"] == [None, 0.0, 25.0]
+    assert figure["data"][0]["connectgaps"] is False
+    assert figure["data"][1]["y"] == [3, 3, 3]
+    assert "n/a" in figure["data"][1]["hovertext"][0]
+    ops = dashboard.callbacks["build_events_ops_table"](rows)
+    assert ops[0]["no_show_rate"] == ops[0]["no_show_band"] == ops[0]["event_quality"] == "n/a"
+    assert ops[0]["no_show_count"] == "n/a" and "n/a" in ops[0]["ops_flag"]
+    assert ops[1]["no_show_rate"] == 0.0 and ops[1]["no_show_band"] == "Low"
+    assert ops[1]["ops_flag"] == "OK"
+
+
+@pytest.mark.parametrize("guest", [False, True])
+def test_dashboard_projects_unique_ready_startgg_and_guest_numerators(
+    pg_db, dashboard, monkeypatch, guest
+):
+    from unittest.mock import Mock
+
+    pg_db.insert("players", {"uuid": "unique-player"})
+    pg_db.insert(
+        "event_stats",
+        {
+            "event_slug": "fightbox",
+            "event_date": "2026-01-01",
+            "archived_at": "2026-01-02",
+            "total_participants": 2,
+            "member_count": 2,
+            "guest_count": 0,
+            "startgg_count": 2,
+            "status_breakdown": {"Ready": 2},
+            "games_breakdown": {"Stored game summary": 99},
+            "startgg_snapshot": {"tournament_entrants_players": 1},
+            "requirements_snapshot": {"require_membership": True},
+        },
+    )
+    for _ in range(2):
+        pg_db.insert(
+            "event_archive",
+            {
+                "event_slug": "fightbox",
+                "event_date": "2026-01-01",
+                "archived_at": "2026-01-02",
+                "player_uuid": "unique-player",
+                "member": True,
+                "startgg": True,
+                "is_guest": guest,
+                "status": "Ready",
+            },
+        )
+    before = snapshot(pg_db)
+    events = postgres.get_event_history_dashboard()
+    assert events[0]["total_participants"] == events[0]["startgg_count"] == 1
+    assert events[0]["guest_count"] == int(guest)
+    assert events[0]["status_breakdown"] == {"Ready": 1}
+    assert (
+        events[0]["games_breakdown"]
+        == postgres.get_event_game_stats(["fightbox"])["fightbox"]["games_breakdown"]
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_event_history_dashboard", Mock(return_value=events), raising=False
+    )
+    result = dashboard.callbacks["update_insights"](
+        "tab-insights", 1, [], "all", [], 10, "", "", None, None
+    )
+    values = {
+        item.component_id: value
+        for item, value in zip(dashboard.definitions["update_insights"]["output"], result)
+    }
+    assert values["insights-kpi-readyrate"] == "100%"
+    assert values["insights-kpi-startggrate"] == ("0%" if guest else "100%")
+    assert values["insights-kpi-guestrate"] == ("100%" if guest else "0%")
+    assert snapshot(pg_db) == before
+
+
+def test_t065_aliases_drive_expected_game_count_and_derived_player_games(history):
+    history.insert("game_aliases", {"alias": "synthetic alias", "canonical": "Synthetic Canonical"})
+    with history.pool.connection() as conn:
+        conn.execute(
+            "UPDATE event_archive SET tournament_games_registered=ARRAY['synthetic alias','Synthetic Canonical'], payment_expected=99 WHERE event_slug='later'"
+        )
+    result = preview(history, event_prices={"later": (Decimal(25), True)})
+    corrections = [item for item in result["corrections"] if item["event_slug"] == "later"]
+    assert len(corrections) == 2
+    assert all(item["after"]["payment_expected"] == 25 for item in corrections)
+    player = next(item for item in result["players"] if item["player_uuid"] == "c")
+    assert player["after"]["game_counts"] == {"Synthetic Canonical": 1}
+    assert player["after"]["games_played"] == ["Synthetic Canonical"]
+    with history.pool.connection() as conn:
+        assert conn.execute(
+            "SELECT tournament_games_registered FROM event_archive WHERE event_slug='later' LIMIT 1"
+        ).fetchone()[0] == ['synthetic alias', 'Synthetic Canonical']

@@ -383,16 +383,22 @@ totals/first-seen diffs for authorized review; contacts are never printed.
 `--free-events slug1,slug2` is an explicit verified assertion. It resets expected payment and
 records only the free requirement; existing nonzero payment amounts remain unchanged.
 `--event-price slug=25` asserts a per-person price; `slug=25/game` uses only recorded nonempty
-game counts. Only paid rows with NULL/zero amounts can receive the verified amount. All nonzero
-amounts are preserved, underpayments and unknown game counts are flagged, and unpaid flags are
-never promoted. No price is assumed from current settings or old expected amounts.
+game counts, deduplicated through T065's exact canonical alias map when installed. These inputs change ONLY `payment_expected`; NULL, zero and nonzero recorded
+`payment_amount` values are always preserved, including when `payment_valid=true`. A paid flag
+with a missing/zero amount is a human deviation: "paid, amount not recorded". Underpayments and
+unknown game counts are flagged. Neither payment amounts nor paid flags are inferred from a tariff.
+Verified price inputs are stored as `requirements_snapshot.event_price={amount,basis}` (`game` or `person`)
+so reopening can restore the event's actual tariff. A verified free assertion clears the inactive tariff.
+No price is assumed from current settings or old expected amounts.
 `--compare-price slug=25` is dry-run only and shows both bases without choosing one.
 
 `--event` restricts event-stat repair and explicit inputs; player aggregates still use the whole
 archive. `players.total_events` counts distinct event visits, `total_paid` sums every recorded payment amount, and
 first/last seen use known event dates at UTC midnight. Duplicate facts remain flagged for a human.
-Paid duplicates are not given automatic price-based fills or expected-payment edits; their payment obligation needs review.
+Duplicate paid check-ins are not given automatic expected-payment edits; their single-attendance obligation needs review.
 No-show is unknown when only game slots (not a unique registration count) were recorded.
+Unknown no-show points remain gaps in the trend and show `n/a` in Ops, with no Low/OK rating.
+All non-game numerators (Ready, Start.gg, guests and members) use the same unique visits as participants.
 
 Apply migration 010 with the migration runner before a separately authorized `--apply`. The
 repair and audit commit atomically; no provider is contacted. Apply refuses any active event/check-in rows or busy archive/activation; table and advisory locks protect that check.

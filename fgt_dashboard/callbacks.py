@@ -3755,12 +3755,15 @@ def register_callbacks(app):
     def build_events_ops_table(rows):
         rows = rows or []
 
-        def _to_float(value: Any) -> float:
-            text = str(value or "").strip().replace("%", "")
+        def _to_float(value: Any, default=0.0):
+            from math import isfinite
+
+            text = str(value if value is not None else "").strip().replace("%", "")
             try:
-                return float(text) if text else 0.0
-            except Exception:
-                return 0.0
+                number = float(text)
+                return number if isfinite(number) else default
+            except (TypeError, ValueError):
+                return default
 
         def _parse_checkin_conversion(value: Any) -> float:
             text = str(value or "").strip()
@@ -3789,12 +3792,14 @@ def register_callbacks(app):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            no_show_rate = _to_float(row.get("no_show_rate"))
+            no_show_rate = _to_float(row.get("no_show_rate"), default=None)
             manual_share = _to_float(row.get("manual_share"))
             checkin_conversion = _parse_checkin_conversion(row.get("checked_in_vs_registered"))
 
             flags: List[str] = []
-            if no_show_rate >= 30:
+            if no_show_rate is None:
+                flags.append("No-show n/a")
+            elif no_show_rate >= 30:
                 flags.append("High no-show")
             elif no_show_rate >= 18:
                 flags.append("Elevated no-show")
@@ -3810,12 +3815,18 @@ def register_callbacks(app):
                     "event_display_name": row.get("event_display_name", ""),
                     "event_date": row.get("event_date", ""),
                     "checked_in_vs_registered": row.get("checked_in_vs_registered", "-"),
-                    "no_show_count": row.get("no_show_count", 0),
-                    "no_show_rate": round(no_show_rate, 1),
-                    "no_show_band": _noshow_band(no_show_rate),
+                    "no_show_count": (
+                        row.get("no_show_count")
+                        if _to_float(row.get("no_show_count"), default=None) is not None
+                        else "n/a"
+                    ),
+                    "no_show_rate": round(no_show_rate, 1) if no_show_rate is not None else "n/a",
+                    "no_show_band": _noshow_band(no_show_rate) if no_show_rate is not None else "n/a",
                     "manual_count": row.get("manual_count", 0),
                     "manual_share": row.get("manual_share", "-"),
-                    "event_quality": row.get("event_quality", "-"),
+                    "event_quality": (
+                        row.get("event_quality", "-") if no_show_rate is not None else "n/a"
+                    ),
                     "ops_flag": " | ".join(flags) if flags else "OK",
                 }
             )
@@ -4169,6 +4180,15 @@ def register_callbacks(app):
     def render_events_noshow_trend(rows):
         rows = rows or []
 
+        def optional_number(value, *, integer=False):
+            from math import isfinite
+
+            try:
+                number = float(value)
+                return (int(number) if integer else number) if isfinite(number) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+
         points: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -4176,17 +4196,14 @@ def register_callbacks(app):
             date_text = str(row.get("event_date") or "").strip()
             if not date_text:
                 continue
-            try:
-                y_val = float(row.get("no_show_rate") or 0.0)
-            except Exception:
-                y_val = 0.0
+            y_val = optional_number(row.get("no_show_rate"))
             points.append(
                 {
                     "event": str(row.get("event_display_name") or "event"),
                     "date": date_text,
                     "y": y_val,
-                    "count": int(row.get("no_show_count") or 0),
-                    "participants": int(row.get("total_participants") or 0),
+                    "count": optional_number(row.get("no_show_count"), integer=True),
+                    "participants": optional_number(row.get("total_participants"), integer=True),
                 }
             )
 
@@ -4218,14 +4235,16 @@ def register_callbacks(app):
         no_show_hover = [
             (
                 f"<b>{p['event']}</b><br>Date: {p['date']}"
-                f"<br>No-show: {p['y']:.1f}%<br>No-shows: {p['count']}"
+                f"<br>No-show: {format(p['y'], '.1f') + '%' if p['y'] is not None else 'n/a'}"
+                f"<br>No-shows: {p['count'] if p['count'] is not None else 'n/a'}"
             )
             for p in points
         ]
         participant_hover = [
             (
                 f"<b>{p['event']}</b><br>Date: {p['date']}"
-                f"<br>Participants: {p['participants']}<br>No-show: {p['y']:.1f}%"
+                f"<br>Participants: {p['participants']}"
+                f"<br>No-show: {format(p['y'], '.1f') + '%' if p['y'] is not None else 'n/a'}"
             )
             for p in points
         ]
@@ -4237,6 +4256,7 @@ def register_callbacks(app):
                     "mode": "lines+markers",
                     "x": x_vals,
                     "y": no_show_vals,
+                    "connectgaps": False,
                     "line": {"color": "#38bdf8", "width": 2},
                     "marker": {
                         "size": 7,
@@ -4263,7 +4283,7 @@ def register_callbacks(app):
                     "hovertemplate": "%{hovertext}<extra></extra>",
                     "name": "Participants",
                     "yaxis": "y2",
-                }
+                },
             ],
             "layout": {
                 "paper_bgcolor": "#0f172a",

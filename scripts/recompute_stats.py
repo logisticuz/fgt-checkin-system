@@ -2,7 +2,8 @@
 
 Explicit prices are assertions, never guesses: --event-price slug=25 is per person,
 slug=25/game uses recorded game counts. --compare-price slug=25 previews both bases
-without choosing one. Free-event assertions affect expectations, not recorded amounts.
+without choosing one. Price/free assertions affect ONLY expectations, never recorded amounts.
+A paid flag with a NULL/zero amount remains a human data gap, regardless of the tariff.
 """
 
 import argparse
@@ -262,10 +263,13 @@ def repair(
                         "basis": "game" if per_game else "person",
                         "price": str(amount),
                         "revenue": str(preview["after"]["total_revenue"]),
-                        "amounts_filled": sum(
-                            "payment_amount" in item["after"]
+                        "expected_payment_corrections": sum(
+                            "payment_expected" in item["after"]
                             for item in scenario["corrections"]
                             if item["event_slug"] == slug
+                        ),
+                        "paid_amount_not_recorded": sum(
+                            item["kind"] == "payment_valid_without_amount" for item in deviations
                         ),
                         "below_expected": sum(
                             item["kind"] == "paid_below_expected" for item in deviations
@@ -308,11 +312,11 @@ def repair(
                 for item in players
             ]
             for correction in context["corrections"]:
-                values = correction["after"]
-                assignments = ", ".join(f"{key} = %s" for key in values)
+                if set(correction["after"]) != {"payment_expected"}:
+                    raise ValueError("Repair may only change archived payment expectations")
                 connection.execute(
-                    f"UPDATE event_archive SET {assignments} WHERE id = %s",
-                    [*values.values(), correction["archive_id"]],
+                    "UPDATE event_archive SET payment_expected = %s WHERE id = %s",
+                    (correction["after"]["payment_expected"], correction["archive_id"]),
                 )
             for slug in selected:
                 postgres.recompute_event_stats(
@@ -390,11 +394,6 @@ def counts_summary(result):
                     and "payment_expected" in correction["after"]
                     for correction in result["corrections"]
                 ),
-                "amount_fills": sum(
-                    correction["event_slug"] == item["event_slug"]
-                    and "payment_amount" in correction["after"]
-                    for correction in result["corrections"]
-                ),
                 "flags": dict(
                     sorted(
                         Counter(
@@ -468,6 +467,11 @@ def print_result(result, *, player_details=False):
                     ]
                 )
             )
+    missing_amounts = sum(
+        item["kind"] == "payment_valid_without_amount" for item in result["deviations"]
+    )
+    if missing_amounts:
+        print(f"Human review: paid, amount not recorded ({missing_amounts} archive rows).")
     print("Counts: " + json.dumps(counts_summary(result), default=str, sort_keys=True))
 
 

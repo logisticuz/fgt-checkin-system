@@ -2009,27 +2009,33 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         context = _stats_context(conn)
         for row in result:
             slug = row["event_slug"]
-            projected = (recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)["after"]
-                         if slug in context["events"] else context["metadata"].get(slug, {}))
+            projected = (
+                recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)["after"]
+                if slug in context["events"]
+                else context["metadata"].get(slug, {})
+            )
             for key in (
-                    "event_date",
-                    "total_participants",
-                    "total_revenue",
-                    "avg_payment",
-                    "member_count",
-                    "member_percentage",
-                    "new_players",
-                    "returning_players",
-                    "retention_rate",
-                    "same_series_return_rate",
-                    "same_series_base_count",
-                    "same_series_returned_players",
-                    "startgg_registered_count",
-                    "startgg_registered_players",
-                    "checked_in_count",
-                    "no_show_count",
-                    "no_show_rate",
-                    "requirements_snapshot",
+                "event_date",
+                "total_participants",
+                "total_revenue",
+                "avg_payment",
+                "member_count",
+                "member_percentage",
+                "guest_count",
+                "startgg_count",
+                "status_breakdown",
+                "new_players",
+                "returning_players",
+                "retention_rate",
+                "same_series_return_rate",
+                "same_series_base_count",
+                "same_series_returned_players",
+                "startgg_registered_count",
+                "startgg_registered_players",
+                "checked_in_count",
+                "no_show_count",
+                "no_show_rate",
+                "requirements_snapshot",
             ):
                 if key in projected:
                     row[key] = projected[key]
@@ -2727,6 +2733,15 @@ def _stats_context(
         )
         columns = [item[0] for item in cur.description]
         rows = [_row_to_dict(columns, value) for value in cur.fetchall()]
+        # Consume T065's exact alias map through this existing read-only connection.
+        cur.execute("SELECT to_regclass('game_aliases')")
+        aliases = {}
+        if cur.fetchone()[0] is not None:
+            cur.execute("SELECT alias, canonical FROM game_aliases ORDER BY alias")
+            aliases = {
+                str(alias).strip().lower(): str(canonical).strip()
+                for alias, canonical in cur.fetchall()
+            }
     events, corrections, price_warnings = {}, [], []
     attendance_counts = {}
     for row in rows:
@@ -2753,7 +2768,11 @@ def _stats_context(
             )
         elif slug in (event_prices or {}):
             amount, per_game = event_prices[slug]
-            games = row["tournament_games_registered"]
+            games = {
+                _canonical_game_name(game, aliases)
+                for game in row["tournament_games_registered"] or []
+            }
+            games.discard("")
             if per_game and not games:
                 price_warnings.append(
                     {
@@ -2766,11 +2785,7 @@ def _stats_context(
                 expected = amount * (len(games) if per_game else 1)
                 if row["payment_expected"] != expected:
                     updates["payment_expected"] = expected
-                # A paid flag alone never supplies a price. This branch needs explicit input.
-                if row["payment_valid"] and (
-                    row["payment_amount"] is None or row["payment_amount"] == 0
-                ):
-                    updates["payment_amount"] = expected
+                # A tariff establishes the expectation, never the recorded amount.
         if updates:
             corrections.append(
                 {
@@ -2833,6 +2848,7 @@ def _stats_context(
         "member_not_recorded": set(member_not_recorded),
         "corrections": corrections,
         "price_warnings": price_warnings,
+        "game_aliases": aliases,
     }
 
 
@@ -2921,8 +2937,14 @@ def recompute_event_stats(
         requirements = dict(previous.get("requirements_snapshot") or {})
         if event_slug in context["free_events"]:
             requirements["require_payment"] = False
+            requirements.pop("event_price", None)
         if event_slug in context["event_prices"]:
+            amount, per_game = context["event_prices"][event_slug]
             requirements["require_payment"] = True
+            requirements["event_price"] = {
+                "amount": str(amount),
+                "basis": "game" if per_game else "person",
+            }
         if event_slug in context["membership_requirements"]:
             requirements["require_membership"] = context["membership_requirements"][event_slug]
         if event_slug in context["member_not_recorded"]:
@@ -3096,7 +3118,10 @@ def recompute_player_aggregates(
 
                 games = {}
                 for row in rows:
-                    for game in row["tournament_games_registered"] or []:
+                    for game in {
+                        _canonical_game_name(raw, context["game_aliases"])
+                        for raw in row["tournament_games_registered"] or []
+                    } - {""}:
                         games[game] = games.get(game, 0) + 1
                 games = dict(sorted(games.items()))
                 after = {
@@ -3213,7 +3238,13 @@ def scan_event_stats_integrity(
                     and amount == 0
                     and requirements.get("require_payment") is not False
                 ):
-                    deviations.append({"kind": "payment_valid_without_amount", **base})
+                    deviations.append(
+                        {
+                            "kind": "payment_valid_without_amount",
+                            "message": "Paid, amount not recorded",
+                            **base,
+                        }
+                    )
                 if row["payment_valid"] and amount < expected:
                     deviations.append(
                         {
