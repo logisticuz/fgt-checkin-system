@@ -35,7 +35,7 @@ BASE = {
             "Webhook",
             "eBas Check",
         },
-        "invariant": "983b2bef3f296d2335e2b6a1654440be69f8aeb4d5dc6038a9aefdd9cf78504c",
+        "invariant": "d4a2c076b74f0afaad69465cdf1d345e87ec5587a50ef4d2dd49df7ba9a69111",
         "callbacks": 4,
     },
     "FGC THN - eBas Membership Check.json": {
@@ -81,7 +81,7 @@ BASE = {
             "Query Start.gg",
             "Webhook",
         },
-        "invariant": "a8c993072dcf5406726d48fcfb17923d5615dfa007940b33af69bba3bc8640c4",
+        "invariant": "29f4d2f27c1e2de73436ff82c7e3d0a3c37cfe56bdf863c4ac9fbaac45d57278",
         "callbacks": 0,
     },
 }

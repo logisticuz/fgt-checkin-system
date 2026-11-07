@@ -218,9 +218,9 @@
     "instanceId": "862b58fb4544c8e896cb018ad266be57051f49e4a4e880744d5213db94f44524"
   },
   "pinData": {},
-  "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
-  "activeVersionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
-  "versionCounter": 10,
+  "versionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
+  "activeVersionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
+  "versionCounter": 11,
   "triggerCount": 1,
   "shared": [
     {
@@ -283,7 +283,7 @@
   "activeVersion": {
     "updatedAt": "2026-01-31T00:12:39.000Z",
     "createdAt": "2026-01-30T15:37:31.080Z",
-    "versionId": "26bc90ee-6491-4b05-9d2c-299a57d788bc",
+    "versionId": "96a81ac0-3b3b-4ff0-9418-500b20898e8d",
     "workflowId": "Tt8amKeBzTjwBWmY",
     "nodes": [
       {
