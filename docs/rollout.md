@@ -19,3 +19,16 @@ Archive needs 003's `source_record_id`; callback tracking and membership provena
 If startup migrations are disabled operationally, migrations still must be applied and the
 preflight must pass before the new writers start. Keep services using the prior release while
 repairing migration prerequisites. This document authorizes no deployment or real-data changes.
+
+## eBas transport gate
+
+`EBAS_TRANSPORT` defaults to `stub`: validation, submission and confirmation use a
+deterministic in-process fake transport, even if `EBAS_API_KEY` is configured. DEV keeps
+this default. Stub results can update local membership state; they do not register anyone
+with eBas. Startup logs only `eBas transport: stub` or `eBas transport: live`.
+
+PROD must deliberately set `EBAS_TRANSPORT=live` in the backend service environment at
+rollout, with the private eBas configuration and `INTEGRATION_ENGINE=n8n`.
+`live` with `INTEGRATION_ENGINE=none` refuses startup. The explicit override
+`EBAS_ALLOW_LIVE_WITH_ENGINE_NONE=1` permits real provider access despite that engine
+setting and must only be used deliberately; it is not needed for DEV or stub operation.

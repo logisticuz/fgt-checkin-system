@@ -22,7 +22,7 @@ from shared import (
     postgres_api,
     verification_service as verification,
 )
-from shared.ebas_client import EbasClient, MemberInput
+from shared.ebas_client import MemberInput, create_ebas_client, initialize_ebas_transport
 
 BYLAWS_VERSION = "2026-11-06"
 PRIVACY_VERSION = "2026-11-06-ebas+app-v1"
@@ -251,7 +251,7 @@ async def _payload(request):
 
 
 def _get_ebas_client():
-    return EbasClient()
+    return create_ebas_client()
 
 
 def _destination(attempt):
@@ -551,6 +551,7 @@ async def _reconcile_loop():
 
 @asynccontextmanager
 async def _lifespan(app):
+    initialize_ebas_transport()
     tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(_reconcile_loop())]
     try:
         yield

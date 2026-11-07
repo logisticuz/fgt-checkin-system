@@ -267,10 +267,21 @@ def _in_progress(response) -> bool:
 
 
 class EbasClient:
-    def __init__(self, config: EbasConfig | None = None, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        config: EbasConfig | None = None,
+        client: httpx.Client | None = None,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ):
         self.config = config if config is not None else EbasConfig.from_env()
         self._owns_client = client is None
-        self._client = client if client is not None else httpx.Client(trust_env=False)
+        if client is not None:
+            self._client = client
+        elif transport is not None:
+            self._client = httpx.Client(transport=transport, trust_env=False)
+        else:
+            self._client = httpx.Client(trust_env=False)
 
     def close(self) -> None:
         if self._owns_client:
@@ -412,3 +423,56 @@ class EbasClient:
         return ConfirmResult(
             body["member_found"], approved_source if body["member_found"] else None
         )
+
+
+class StubEbasTransport(httpx.BaseTransport):
+    """Deterministic local eBas responses; never retain or forward request data."""
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "validate_members.json":
+            data = {"response": {"request_result": "success", "member_errors": []}}
+        elif action == "submit_member_with_lookup.json":
+            data = {"stored_member": True, "request_result": "success"}
+        elif action == "confirm_membership.json":
+            data = {"response": {"member_found": True}}
+        else:
+            return httpx.Response(404, json={}, request=request)
+        return httpx.Response(200, json=data, request=request)
+
+
+def ebas_transport_mode() -> Literal["stub", "live"]:
+    """Fail closed on invalid or contradictory transport configuration."""
+    mode = os.getenv("EBAS_TRANSPORT", "stub").strip().lower() or "stub"
+    if mode not in ("stub", "live"):
+        raise ValueError("EBAS_TRANSPORT must be stub or live")
+    engine = os.getenv("INTEGRATION_ENGINE", "n8n").strip().lower()
+    if (
+        mode == "live"
+        and engine == "none"
+        and os.getenv("EBAS_ALLOW_LIVE_WITH_ENGINE_NONE") != "1"
+    ):
+        raise ValueError(
+            "EBAS_TRANSPORT=live is incompatible with INTEGRATION_ENGINE=none; "
+            "deliberate live access requires EBAS_ALLOW_LIVE_WITH_ENGINE_NONE=1"
+        )
+    return mode
+
+
+def initialize_ebas_transport() -> str:
+    """Validate once at application startup and log only the selected mode."""
+    mode = ebas_transport_mode()
+    if mode == "live":
+        EbasConfig.from_env()
+    logger.info("eBas transport: %s", mode)
+    return mode
+
+
+def create_ebas_client() -> EbasClient:
+    """The application factory: local stub by default; real transport needs opt-in."""
+    if ebas_transport_mode() == "live":
+        return EbasClient()
+    return EbasClient(
+        EbasConfig(api_key="stub", base_url="https://ebas.stub.invalid/apis"),
+        transport=StubEbasTransport(),
+    )
