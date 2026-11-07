@@ -32,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def offline_defaults(monkeypatch):
     monkeypatch.delenv("EBAS_TRANSPORT", raising=False)
+    monkeypatch.delenv("EBAS_STUB_CONFIRM", raising=False)
+    monkeypatch.delenv("IS_PROD", raising=False)
     monkeypatch.delenv("EBAS_ALLOW_LIVE_WITH_ENGINE_NONE", raising=False)
     monkeypatch.setenv("INTEGRATION_ENGINE", "none")
     monkeypatch.setenv("EBAS_API_KEY", API_KEY)
@@ -87,7 +89,9 @@ def test_default_factory_uses_local_stub_and_ignores_provider_key(
             client.submit_member_with_lookup(member, date(2026, 11, 7)).state
             == "submitted"
         )
-        assert client.confirm_membership(PNR, 2026).found is True
+        assert client.confirm_membership(PNR, 2026) == ebas_client.ConfirmResult(
+            None, error_code="stub_transport"
+        )
     assert client._client.is_closed
     constructor.assert_not_called()
 
@@ -124,9 +128,10 @@ def test_default_stub_start_verify_and_status_make_zero_outbound_calls(
 
 
 @pytest.mark.db
-def test_default_stub_status_reconcile_makes_zero_outbound_calls(
-    backend_app, gate_db, no_outbound
+def test_explicit_stub_found_status_reconcile_makes_zero_outbound_calls(
+    backend_app, gate_db, no_outbound, monkeypatch
 ):
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", "found")
     attempt_id, details = direct_attempt(gate_db, submitting=True)
     with TestClient(backend_app.app) as client:
         response = client.get(f"/api/membership/{attempt_id}/status")
@@ -137,9 +142,10 @@ def test_default_stub_status_reconcile_makes_zero_outbound_calls(
 
 @pytest.mark.db
 @pytest.mark.parametrize("flow", ["v2", "legacy", "off"])
-def test_default_stub_background_reconcile_is_also_offline(
+def test_explicit_stub_found_background_reconcile_is_also_offline(
     backend_app, gate_db, no_outbound, monkeypatch, flow
 ):
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", "found")
     attempt_id, details = direct_attempt(gate_db, submitting=True)
     monkeypatch.setattr(membership_flow, "_membership_flow", flow)
     monkeypatch.setattr(api, "BACKGROUND_RECONCILE_TICK_SECONDS", 0.01)
@@ -214,6 +220,33 @@ def test_invalid_transport_fails_closed_without_echoing_its_value(
         with TestClient(backend_app.app):
             pass
     assert API_KEY not in str(error.value) + caplog.text
+
+
+@pytest.mark.parametrize("outcome,found", [("found", True), ("not_found", False)])
+def test_stub_confirmation_requires_explicit_nonproduction_opt_in(
+    no_outbound, monkeypatch, outcome, found
+):
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", outcome)
+    with ebas_client.create_ebas_client() as client:
+        assert client.confirm_membership(PNR, 2026) == ebas_client.ConfirmResult(found)
+
+
+@pytest.mark.parametrize("variable,value", [("IS_PROD", "true"), ("ENV", "prod"), ("APP_ENV", "production")])
+def test_production_stub_logs_one_startup_error_and_ignores_positive_opt_in(
+    backend_app, no_outbound, monkeypatch, caplog, variable, value
+):
+    monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", "found")
+    with caplog.at_level(logging.ERROR):
+        with TestClient(backend_app.app):
+            for _ in range(2):
+                with ebas_client.create_ebas_client() as client:
+                    assert client.confirm_membership(
+                        PNR, 2026
+                    ) == ebas_client.ConfirmResult(None, error_code="stub_transport")
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1 and "EBAS STUB IN PRODUCTION" in errors[0].getMessage()
+    assert PNR not in caplog.text and API_KEY not in caplog.text
 
 
 def test_only_the_factory_constructs_production_ebas_clients():

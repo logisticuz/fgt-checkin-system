@@ -3,6 +3,8 @@
 import httpx
 import pytest
 
+from shared import membership_check
+from shared.ebas_client import ConfirmResult, EbasConfig
 from tests.fixtures import make_checkin
 
 pytestmark = pytest.mark.db
@@ -13,20 +15,42 @@ PERSONNUMMER = "200001010016"  # Invented test input; every upstream transport i
 def n8n_engine(backend_app, monkeypatch):
     monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
 
+    class PythonCheck:
+        config = EbasConfig("synthetic-native-check-key")
+        found = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def confirm_membership(self, pnr, year):
+            return ConfirmResult(self.found)
+
+    check = PythonCheck()
+    monkeypatch.setattr(membership_check, "create_ebas_client", lambda: check)
+    return check
+
 
 def _assert_no_membership_hint(body):
     assert body["member"] is not False
     assert "Membership" not in body["missing"]
 
 
-def _callback_results(n8n_stub, backend_app, results):
+def _callback_results(n8n_stub, backend_app, results, python_check):
+    python_check.found = results.get("ebas")
+
     async def callbacks(request):
         checkin_id = n8n_stub.calls[-1]["json"]["checkin_id"]
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=backend_app.app), base_url="http://testserver"
+            transport=httpx.ASGITransport(app=backend_app.app),
+            base_url="http://testserver",
         ) as client:
             for source, value in results.items():
-                key = "member" if source == "ebas" else "registered"
+                if source == "ebas":
+                    continue  # Native confirmation owns eBas; n8n can report Start.gg only.
+                key = "registered"
                 response = await client.post(
                     "/api/integration/result",
                     json={
@@ -56,7 +80,9 @@ def test_disabled_engine_is_explicitly_degraded(app_client, pg_db, n8n_stub):
 
 
 @pytest.mark.parametrize("failure", ["timeout", "http_error", "invalid_shape", "empty_summary"])
-def test_failed_orchestrator_is_unavailable(app_client, pg_db, n8n_stub, n8n_engine, failure):
+def test_failed_orchestrator_is_unavailable(
+    app_client, pg_db, n8n_stub, n8n_engine, failure
+):
     if failure == "timeout":
 
         def timeout(request):
@@ -68,7 +94,9 @@ def test_failed_orchestrator_is_unavailable(app_client, pg_db, n8n_stub, n8n_eng
     elif failure == "invalid_shape":
         n8n_stub.response = []
 
-    response = app_client.post("/api/checkin/orchestrate", json=make_checkin())
+    response = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -82,11 +110,17 @@ def test_failed_orchestrator_is_unavailable(app_client, pg_db, n8n_stub, n8n_eng
     assert len(n8n_stub.calls) == 1
 
 
-def test_successful_callbacks_remain_ready(app_client, pg_db, n8n_stub, backend_app, n8n_engine):
+def test_successful_callbacks_remain_ready(
+    app_client, pg_db, n8n_stub, backend_app, n8n_engine
+):
     n8n_stub.response = {"integrations": {"ebas": "ok", "startgg": "ok"}}
-    _callback_results(n8n_stub, backend_app, {"ebas": True, "startgg": True})
+    _callback_results(
+        n8n_stub, backend_app, {"ebas": True, "startgg": True}, n8n_engine
+    )
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    ).json()
 
     assert body["integrations"] == {"ebas": "ok", "startgg": "ok"}
     assert body["degraded"] is False
@@ -100,9 +134,13 @@ def test_confirmed_negative_membership_still_offers_signup(
     app_client, n8n_stub, backend_app, n8n_engine
 ):
     n8n_stub.response = {"integrations": {"ebas": "ok", "startgg": "ok"}}
-    _callback_results(n8n_stub, backend_app, {"ebas": False, "startgg": True})
+    _callback_results(
+        n8n_stub, backend_app, {"ebas": False, "startgg": True}, n8n_engine
+    )
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    ).json()
 
     assert body["degraded"] is False
     assert body["member"] is False
@@ -130,9 +168,12 @@ def test_explicit_provider_state_is_distinct_from_its_boolean_result(
     results = {"startgg": True}
     if member is not None:
         results["ebas"] = member
-    _callback_results(n8n_stub, backend_app, results)
+    _callback_results(n8n_stub, backend_app, results, n8n_engine)
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate",
+        json=make_checkin(personnummer=PERSONNUMMER if state != "skipped" else ""),
+    ).json()
 
     assert body["integrations"] == {"ebas": availability, "startgg": "ok"}
     assert body["degraded"] is degraded
@@ -155,8 +196,15 @@ def test_explicit_provider_state_is_distinct_from_its_boolean_result(
         ({"state": "verified_false"}, False, "ok", False),
     ],
 )
-def test_t028_summary_results_override_legacy_booleans_and_other_reports(
-    app_client, n8n_stub, backend_app, n8n_engine, ebas_state, member, availability, degraded
+def test_python_ebas_and_t028_startgg_results_override_other_reports(
+    app_client,
+    n8n_stub,
+    backend_app,
+    n8n_engine,
+    ebas_state,
+    member,
+    availability,
+    degraded,
 ):
     n8n_stub.response = {
         "integration_complete": True,
@@ -172,9 +220,12 @@ def test_t028_summary_results_override_legacy_booleans_and_other_reports(
     results = {"startgg": True}
     if member is not None:
         results["ebas"] = member
-    _callback_results(n8n_stub, backend_app, results)
+    _callback_results(n8n_stub, backend_app, results, n8n_engine)
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate",
+        json=make_checkin(personnummer=PERSONNUMMER if ebas_state != "skipped" else ""),
+    ).json()
 
     assert body["integrations"] == {"ebas": availability, "startgg": "ok"}
     assert body["degraded"] is degraded
@@ -184,6 +235,7 @@ def test_t028_summary_results_override_legacy_booleans_and_other_reports(
 
 
 def test_reviewer_t028_negative_membership_probe(app_client, n8n_stub, n8n_engine):
+    n8n_engine.found = False
     n8n_stub.response = {
         "integration_complete": True,
         "member": False,
@@ -191,7 +243,9 @@ def test_reviewer_t028_negative_membership_probe(app_client, n8n_stub, n8n_engin
         "results": {"ebas": "verified_false", "startgg": "verified_true"},
     }
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    ).json()
 
     assert body["integrations"] == {"ebas": "ok", "startgg": "ok"}
     assert body["degraded"] is False
@@ -203,9 +257,11 @@ def test_one_unavailable_provider_keeps_the_other_result(
     app_client, pg_db, n8n_stub, backend_app, n8n_engine
 ):
     n8n_stub.response = {"integrations": {"ebas": "unavailable", "startgg": "ok"}}
-    _callback_results(n8n_stub, backend_app, {"startgg": True})
+    _callback_results(n8n_stub, backend_app, {"startgg": True}, n8n_engine)
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    ).json()
 
     assert body["integrations"] == {"ebas": "unavailable", "startgg": "ok"}
     assert body["degraded"] is True
@@ -219,9 +275,12 @@ def test_one_unavailable_provider_keeps_the_other_result(
 def test_startgg_outage_does_not_hide_a_confirmed_membership_requirement(
     app_client, n8n_stub, n8n_engine
 ):
+    n8n_engine.found = False
     n8n_stub.response = {"integrations": {"ebas": "ok", "startgg": "unavailable"}}
 
-    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
+    body = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
+    ).json()
 
     assert body["degraded"] is True
     assert body["member"] is False
@@ -245,17 +304,18 @@ def test_outage_preserves_previously_verified_flags(app_client, pg_db, n8n_stub,
     assert pg_db.checkins()[0]["status"] == "Ready"
 
 
-def test_legacy_positive_summary_remains_supported(app_client, n8n_stub, n8n_engine):
+def test_legacy_startgg_summary_cannot_substitute_for_python_ebas_check(
+    app_client, n8n_stub, n8n_engine
+):
     n8n_stub.response = {"integration_complete": True, "member": True, "startgg": True}
 
-    body = app_client.post(
-        "/api/checkin/orchestrate", json=make_checkin(personnummer=PERSONNUMMER)
-    ).json()
+    body = app_client.post("/api/checkin/orchestrate", json=make_checkin()).json()
 
-    assert body["integrations"] == {"ebas": "ok", "startgg": "ok"}
+    assert body["integrations"] == {"ebas": "skipped", "startgg": "ok"}
     assert body["degraded"] is False
     # Provider summary never overwrites the authoritative stored flags.
-    assert body["member"] is False
+    assert body["member"] is None
+    _assert_no_membership_hint(body)
     assert body["ready"] is False
 
 

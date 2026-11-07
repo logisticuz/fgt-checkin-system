@@ -231,3 +231,39 @@ An unset/empty server token never grants trusted behavior. Missing or wrong head
 the route in public mode even though its soft-auth dependency permits the request.
 Neither flat nor nested payload flags can claim trusted ownership. A valid internal token
 permits the existing trusted safe-field updates; begin itself does not issue a capability.
+
+## Check-in eBas confirmation runs in Python
+
+Check-in orchestration never includes `personnummer` in the n8n v5 payload, for either
+verified or unverified ownership. n8n receives only a Start.gg-scoped attempt ID.
+The v5 eBas branch remains in the exported workflow but has no PNR/work to perform;
+its eBas summaries are ignored, and its Start.gg attempt cannot authorize eBas writes.
+
+For a verified owner with a personal ID and enabled integrations, Python confirms the
+current year's membership through `create_ebas_client`, off the event loop. Its distinct
+eBas-scoped attempt is applied through `apply_integration_result`, preserving stale-run
+rejection, membership provenance and the event/global/row lock order. Found/not-found
+map to verified true/false; provider or transport errors map to unavailable, never false.
+The response keeps the existing `integrations`/`degraded` shape; native eBas availability
+replaces n8n's eBas telemetry. Missing PNR, unverified ownership, or disabled integrations
+skip the check. The disabled engine makes no eBas or n8n calls.
+
+The private check overlaps the n8n wait within the existing orchestration timeout budget.
+If its result arrives after that deadline, the response reports unavailable; any late
+write still uses the same stale/provenance guards. PNR references are discarded after
+confirmation and are never passed to the writer, logs, error messages, or response.
+
+The legacy `/api/ebas/register` path still sends PNR to n8n as the user's explicitly
+accepted temporary exception (2026-11-07 decision). It is outside this check-path change.
+
+Confirm and validate accept only successful HTTP status codes. Confirm also rejects any
+`error`/`errors` field or non-success `request_result`; an error envelope containing
+`member_found: false` is unavailable and cannot change stored membership.
+The default stub confirmation returns `stub_transport`/unavailable. Synthetic tests may
+explicitly choose `EBAS_STUB_CONFIRM=found|not_found` in DEV. Production ignores that opt-in,
+keeps checks unavailable, and logs one startup ERROR when the stub is selected; a real
+backend check requires the deliberately configured live transport.
+
+Before the client call, 10-digit PNRs use the workflow's fixed century cutoff: YY > 30
+means 19YY, otherwise 20YY. A `-` preserves that rule; `+` selects a century at least
+100 calendar years old. Explicit 12-digit centuries are preserved. PNR is never logged.

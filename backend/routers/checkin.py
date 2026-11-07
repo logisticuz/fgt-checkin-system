@@ -1,10 +1,13 @@
 """Checkin routes moved from main.py without handler changes."""
 
+import asyncio
 import secrets
 
 from fastapi import APIRouter
 from status_api import verify_capability
 from shared.ebas_client import _private_transport_logging
+from shared.membership_check import start_membership_check
+from starlette.concurrency import run_in_threadpool
 
 from app_state import (
     Depends,
@@ -160,8 +163,8 @@ async def orchestrate_checkin(request: Request):
     Flow:
       1. Validate & sanitize form data
       2. begin_checkin() in Postgres (dedupe by tag+slug)
-      3. Forward to n8n v5 webhook (Start.gg + eBas checks)
-      4. n8n calls /api/integration/result during execution
+      3. Check eBas in Python and forward Start.gg-only work to n8n
+      4. Apply both sources through the existing attempt-scoped integration writer
       5. Re-read updated checkin, compute final status
       6. Update status, broadcast SSE, return result
 
@@ -170,7 +173,9 @@ async def orchestrate_checkin(request: Request):
     """
     begin_fn = getattr(storage_api, "begin_checkin", None)
     if not begin_fn:
-        raise HTTPException(status_code=501, detail="Orchestration requires postgres backend")
+        raise HTTPException(
+            status_code=501, detail="Orchestration requires postgres backend"
+        )
 
     try:
         body = await request.json()
@@ -186,7 +191,7 @@ async def orchestrate_checkin(request: Request):
     sanitized = sanitize_checkin_payload(body)
 
     # Get active settings
-    settings = get_active_settings()
+    settings = await run_in_threadpool(get_active_settings)
     slug = settings.get("active_event_slug", "")
     if not slug:
         raise HTTPException(status_code=400, detail="No active event configured")
@@ -199,12 +204,14 @@ async def orchestrate_checkin(request: Request):
     name = sanitized.get("namn") or sanitized.get("name") or ""
     telefon = sanitized.get("telefon") or sanitized.get("telephone") or ""
     email = sanitized.get("email") or ""
-    personnummer = sanitized.get("personnummer") or ""
+    personnummer = sanitized.pop("personnummer", "") or ""
+    personnummer = body.pop("personnummer", None) or personnummer
     acquisition_source = sanitized.get("acquisition_source")
 
     # 1. begin_checkin (dedupe by tag+slug)
     try:
-        checkin_result = begin_fn(
+        checkin_result = await run_in_threadpool(
+            begin_fn,
             slug,
             {
                 "name": name,
@@ -225,10 +232,12 @@ async def orchestrate_checkin(request: Request):
     ownership_verified = checkin_result.get("ownership_verified") is True
     logger.info(f"Orchestrate: checkin_id={checkin_id}, tag={tag}, slug={slug}")
 
-    # 2. Forward to n8n v5 webhook (synchronous - n8n calls /api/integration/result internally)
+    # 2. n8n has Start.gg authority only; the private Python check has its own eBas attempt.
     n8n_response_data = {}
     n8n_resp = None
     n8n_payload = {}
+    ebas_task = None
+    ebas_state = "skipped"
     if INTEGRATION_ENGINE == "n8n":
         n8n_payload = {
             "checkin_id": checkin_id,
@@ -236,13 +245,19 @@ async def orchestrate_checkin(request: Request):
             "slug": slug,
             "name": name,
         }
-        if ownership_verified:
-            n8n_payload["personnummer"] = personnummer
-            n8n_payload["attempt_id"] = storage_api.start_integration_attempt(checkin_id)
-        else:
-            n8n_payload["attempt_id"] = storage_api.start_integration_attempt(
-                checkin_id, sources=("startgg",)
+        n8n_payload["attempt_id"] = await run_in_threadpool(
+            storage_api.start_integration_attempt, checkin_id, sources=("startgg",)
+        )
+        if ownership_verified and personnummer:
+            ebas_attempt = await run_in_threadpool(
+                storage_api.start_integration_attempt, checkin_id, sources=("ebas",)
             )
+        deadline = time.monotonic() + EBAS_REGISTER_TIMEOUT_SECONDS
+        if ownership_verified and personnummer:
+            ebas_task = start_membership_check(
+                checkin_id, ebas_attempt, personnummer, EBAS_REGISTER_TIMEOUT_SECONDS
+            )
+        personnummer = None
 
         n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
 
@@ -250,38 +265,62 @@ async def orchestrate_checkin(request: Request):
             n8n_headers = {"Content-Type": "application/json"}
             if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
                 import base64
+
                 token = base64.b64encode(
                     f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
                 ).decode()
                 n8n_headers["authorization"] = f"Basic {token}"
 
             with _private_transport_logging():
-                n8n_resp = await httpx_client.post(
-                    n8n_url,
-                    json=n8n_payload,
-                    headers=n8n_headers,
-                    timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+                n8n_resp = await asyncio.wait_for(
+                    httpx_client.post(
+                        n8n_url,
+                        json=n8n_payload,
+                        headers=n8n_headers,
+                        timeout=httpx.Timeout(
+                            EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0
+                        ),
+                    ),
+                    timeout=max(0, deadline - time.monotonic()),
                 )
 
             if n8n_resp.status_code < 400:
                 n8n_response_data = n8n_resp.json()
             else:
                 logger.warning(
-                    "integration_error code=n8n_http_error status=%s", n8n_resp.status_code
+                    "integration_error code=n8n_http_error status=%s",
+                    n8n_resp.status_code,
                 )
         except Exception:
             logger.warning("integration_error code=n8n_transport_error status=none")
             # Continue - checkin is created, integrations just didn't run
 
+        if ebas_task is not None:
+            try:
+                if ebas_task.done():
+                    ebas_state = ebas_task.result()
+                else:
+                    ebas_state = await asyncio.wait_for(
+                        asyncio.shield(ebas_task),
+                        timeout=max(0, deadline - time.monotonic()),
+                    )
+            except Exception:
+                ebas_state = "unavailable"
+    personnummer = None
+
     # 3. Re-read the updated checkin record
     get_by_id = getattr(storage_api, "get_checkin_by_record_id", None)
     checkin_record = None
     if get_by_id:
-        checkin_record = get_by_id(checkin_id)
+        checkin_record = await run_in_threadpool(get_by_id, checkin_id)
 
     if not checkin_record:
         # Fallback to tag+slug lookup
-        checkin_record = get_checkin_by_tag(tag.lower(), slug) if tag else None
+        checkin_record = (
+            await run_in_threadpool(get_checkin_by_tag, tag.lower(), slug)
+            if tag
+            else None
+        )
 
     fields = (checkin_record or {}).get("fields", {})
 
@@ -300,24 +339,28 @@ async def orchestrate_checkin(request: Request):
 
     # 5. Update status in DB
     record_id = (checkin_record or {}).get("record_id", checkin_id)
-    update_checkin(record_id, {"status": final_status})
+    await run_in_threadpool(update_checkin, record_id, {"status": final_status})
 
     # 6. Broadcast SSE
-    await sse_manager.broadcast("checkin", {
-        "type": "new_checkin",
-        "name": name,
-        "tag": tag,
-        "status": final_status,
-        "timestamp": time.time(),
-    })
+    await sse_manager.broadcast(
+        "checkin",
+        {
+            "type": "new_checkin",
+            "name": name,
+            "tag": tag,
+            "status": final_status,
+            "timestamp": time.time(),
+        },
+    )
 
     # 7. Return response compatible with checkin.html
     integrations, degraded = _orchestrate_integrations(
         n8n_resp, n8n_response_data, n8n_payload
     )
-    if not ownership_verified:
-        integrations["ebas"] = "skipped"
-        degraded = INTEGRATION_ENGINE != "n8n" or "unavailable" in integrations.values()
+    integrations["ebas"] = (
+        "ok" if ebas_state in ("verified_true", "verified_false") else ebas_state
+    )
+    degraded = INTEGRATION_ENGINE != "n8n" or "unavailable" in integrations.values()
     membership_unknown = integrations["ebas"] != "ok"
     response_missing = [
         item for item in missing if not (membership_unknown and item == "Membership")
