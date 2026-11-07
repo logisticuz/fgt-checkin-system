@@ -142,6 +142,7 @@ def lookup_checkin_status(checkin_id: str, *, include_display: bool = False) -> 
         "ready": computed["ready"],
         "missing": computed["missing"],
         "member": bool(fields.get("member")),
+        "member_lookup_state": fields.get("member_lookup_state") or "unknown",
         "startgg": bool(fields.get("startgg")),
         "payment_ok": "Payment" not in computed["missing"],
         "games": (

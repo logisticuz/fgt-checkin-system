@@ -164,7 +164,7 @@ def get_checkins(slug: str = None, include_all: bool = False) -> List[Dict[str, 
     fields = [
         "name", "email", "telephone", "tag",
         "payment_amount", "payment_expected", "payment_valid",
-        "member", "startgg", "is_guest", "status",
+        "member", "member_lookup_state", "startgg", "is_guest", "status",
         "tournament_games_registered",
         "UUID", "event_slug", "startgg_event_id", "external_id",
     ]
@@ -184,6 +184,7 @@ def get_checkins(slug: str = None, include_all: bool = False) -> List[Dict[str, 
 
             # Membership / registration / payment
             "member": f.get("member"),
+            "member_lookup_state": f.get("member_lookup_state") or "unknown",
             "startgg": f.get("startgg"),
             "is_guest": f.get("is_guest"),
             "payment_amount": f.get("payment_amount"),
