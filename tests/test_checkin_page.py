@@ -41,7 +41,10 @@ def test_personal_fields_have_autocomplete_off(checkin_html):
 def test_no_personal_data_is_written_to_local_storage(checkin_html):
     assert "localStorage.setItem" not in checkin_html
     hygiene = HYGIENE_JS.read_text(encoding="utf-8")
-    assert "localStorage.setItem" not in hygiene and "sessionStorage.setItem" not in hygiene
+    # The only write is T-062's per-tab kiosk start timestamp (nothing personal).
+    writes = re.findall(r"(?:local|session)Storage\.setItem\(([^,]+),", hygiene)
+    assert writes == ["KIOSK_START_KEY"]
+    assert 'const KIOSK_START_KEY = "kioskStartedAt";' in hygiene
     # Old keys are removed on load (the script loads before the page's inline script).
     for key in ("namn", "telefon", "tag", "eventSlug", "personnummer", "selectedGames"):
         assert f'"{key}"' in hygiene

@@ -61,10 +61,22 @@ def render_status(app_templates, template_name, **overrides):
 
 
 def script_block(rendered):
-    # Greedily include an injected closing tag so the safety assertion detects it.
-    match = re.search(r"<script\b[^>]*>(.*)</script\s*>", rendered, re.IGNORECASE | re.DOTALL)
-    assert match is not None
-    return match.group(1)
+    """The page's main (last) inline script, greedily up to the final closing tag.
+
+    Greedy, so an injected closing tag stays inside and the safety assertion detects it. Since
+    T-062 the pages also have a small kiosk guard in <head>; that block comes first.
+    """
+    openings = list(re.finditer(r"<script\b(?![^>]*\bsrc=)[^>]*>", rendered, re.IGNORECASE))
+    closings = list(re.finditer(r"</script\s*>", rendered, re.IGNORECASE))
+    assert openings and closings
+    return rendered[openings[-1].end() : closings[-1].start()]
+
+
+def inline_scripts(source):
+    """Every inline script body (for checks that must cover all of them)."""
+    return re.findall(
+        r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", source, re.IGNORECASE | re.DOTALL
+    )
 
 
 def json_constant(script, name):
@@ -83,6 +95,11 @@ def test_hostile_inputs_cannot_end_script_block(app_templates, template_name):
     rendered = render_status(app_templates, template_name)
     assert "</script" not in script_block(rendered).lower()
     assert HOSTILE_GAME not in rendered
+    # No injected script tags anywhere: never more than the template itself has
+    # (conditional blocks may render fewer).
+    source = (BACKEND_DIR / "templates" / template_name).read_text(encoding="utf-8")
+    assert rendered.lower().count("</script") <= source.lower().count("</script")
+    assert rendered.lower().count("<script") <= source.lower().count("<script")
 
 
 def test_ready_name_and_games_remain_escaped_html(app_templates):
@@ -115,7 +132,7 @@ def test_default_swish_settings_keep_their_types(app_templates):
 @pytest.mark.parametrize("template_name", TEMPLATE_NAMES)
 def test_all_script_template_values_use_tojson(template_name):
     source = (BACKEND_DIR / "templates" / template_name).read_text(encoding="utf-8")
-    expressions = re.findall(r"{{(.*?)}}", script_block(source), re.DOTALL)
+    expressions = re.findall(r"{{(.*?)}}", "\n".join(inline_scripts(source)), re.DOTALL)
     assert expressions
     assert all(re.search(r"\|\s*tojson\s*$", expression) for expression in expressions)
 

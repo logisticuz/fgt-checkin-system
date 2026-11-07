@@ -611,11 +611,16 @@
 
     function leaveTo(url) {
       clearFields();  // so a Back/bfcache restore can't show this person's details
-      CheckinHygiene.purgePersonalStorage();
-      window.location.href = url;
+      // Kiosk: replace this history entry (T-062), so Back never leads to a player page.
+      CheckinHygiene.navigate(url, KIOSK_MODE);
     }
 
     CheckinHygiene.install({ kiosk: KIOSK_MODE, reset: resetForm });
+    if (KIOSK_MODE) {
+      // A new kiosk start: older kiosk player pages left in history now send Back home.
+      CheckinHygiene.markKioskStart();
+      CheckinHygiene.replaceKioskLinks();
+    }
 
     // Form submission
     document.getElementById("checkin-form").addEventListener("submit", async function(e) {

@@ -665,7 +665,14 @@
         query = qs ? "?" + qs : "";
       }
       setTimeout(function () {
-        window.location.href = "/status/" + encodeURIComponent(name) + query;
+        const url = "/status/" + encodeURIComponent(name) + query;
+        // T-062: on the kiosk, replace the history entry so this token page can't be reopened
+        // with Back by the next person. Normal mode keeps the old push navigation.
+        if (window.CheckinHygiene) {
+          CheckinHygiene.navigate(url, CheckinHygiene.isKioskPage(false));
+        } else {
+          window.location.href = url;
+        }
       }, 2000);
       return;
     }
