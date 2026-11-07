@@ -91,3 +91,38 @@ def test_checkin_and_register_carry_the_token(app_templates):  # noqa: F811
     helper = register[register.index("function statusQuery()") :][:600]
     assert 'params.get("t")' in helper
     assert "checkinId && statusToken ? `t=${encodeURIComponent(statusToken)}`" in helper
+
+
+SUCCESS_TAGS = re.compile(r"<[a-z0-9]+ [^>]*\bdata-success\b[^>]*>")
+
+
+def test_ready_page_hides_all_success_ui_until_the_id_confirms(app_templates):  # noqa: F811
+    html = render(
+        app_templates, "status_ready.html", checkin_id="chk-1", status_token="tok", games=["G"]
+    )
+    tags = SUCCESS_TAGS.findall(html)
+    assert len(tags) == 7  # ✓, Ready, heading, tag, thank-you, games, member offer
+    assert all(tag.endswith(" hidden>") for tag in tags), tags
+    assert "<audio id=\"readySound\">" in html  # no autoplay before confirmation
+    assert "Confirming your check-in…" in html
+
+
+def test_ready_page_without_capability_shows_success_and_sound_as_before(
+    app_templates,
+):  # noqa: F811
+    html = render(app_templates, "status_ready.html", games=["G"])
+    tags = SUCCESS_TAGS.findall(html)
+    assert tags and not any(" hidden" in tag for tag in tags)
+    assert "<audio id=\"readySound\" autoplay>" in html
+    assert "status-check-notice\"" not in html.split("</style>")[1]
+
+
+def test_v2_membership_only_redirect_reuses_status_query():
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parents[1] / "backend" / "static" / "js" / "membership_v2.js"
+    ).read_text(encoding="utf-8")
+    redirect = script[script.index("if (membershipOnly) {") :][:1400]
+    assert 'typeof statusQuery === "function"' in redirect
+    assert '"t=" + encodeURIComponent(token)' in redirect

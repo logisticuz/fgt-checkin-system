@@ -615,12 +615,23 @@
 
     if (membershipOnly) {
       const name = (typeof state === "object" && state && state.name) || params.get("name") || "";
-      const qs = [
-        sessionStorage.getItem("kioskMode") === "true" ? "kiosk=true" : "",
-        CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : "",
-      ].filter(Boolean).join("&");
+      // Reuse register.html's statusQuery() (kiosk + checkin_id + capability token t) so the
+      // status page keeps polling by id; same fallback if this step runs elsewhere.
+      /* global statusQuery */
+      let query = "";
+      if (typeof statusQuery === "function") {
+        query = statusQuery();
+      } else {
+        const token = params.get("t");
+        const qs = [
+          sessionStorage.getItem("kioskMode") === "true" ? "kiosk=true" : "",
+          CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : "",
+          CHECKIN_ID && token ? "t=" + encodeURIComponent(token) : "",
+        ].filter(Boolean).join("&");
+        query = qs ? "?" + qs : "";
+      }
       setTimeout(function () {
-        window.location.href = "/status/" + encodeURIComponent(name) + (qs ? "?" + qs : "");
+        window.location.href = "/status/" + encodeURIComponent(name) + query;
       }, 2000);
       return;
     }

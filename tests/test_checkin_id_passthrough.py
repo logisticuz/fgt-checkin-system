@@ -101,5 +101,5 @@ def test_register_status_redirects_carry_the_id(app_templates, flow):  # noqa: F
 
 def test_v2_membership_only_redirect_carries_the_id():
     script = (BACKEND_DIR / "static" / "js" / "membership_v2.js").read_text(encoding="utf-8")
-    redirect = script[script.index("if (membershipOnly) {") :][:600]
+    redirect = script[script.index("if (membershipOnly) {") :][:1400]
     assert 'CHECKIN_ID ? "checkin_id=" + encodeURIComponent(CHECKIN_ID) : ""' in redirect
