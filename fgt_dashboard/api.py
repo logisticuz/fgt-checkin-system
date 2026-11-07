@@ -370,10 +370,10 @@ async def auth_login(request: Request):
     """Redirect user to Start.gg OAuth authorization page."""
     import secrets
 
-    from shared.auth import OAUTH_STATE_COOKIE_NAME, OAUTH_STATE_MAX_AGE, seal_oauth_state
+    from shared.auth import OAUTH_STATE_MAX_AGE, oauth_state_cookie_name, seal_oauth_state
 
-    cookie_path = "/auth" if IS_PROD else "/"
     secure_cookie = IS_PROD or request.url.scheme == "https"
+    cookie_name = oauth_state_cookie_name(secure=secure_cookie)
     if not OAUTH_REDIRECT_URI:
         return JSONResponse(
             {"error": "STARTGG_REDIRECT_URI not configured"},
@@ -385,13 +385,13 @@ async def auth_login(request: Request):
         url = build_authorize_url(OAUTH_REDIRECT_URI, state=state)
         response = RedirectResponse(url=url)
         response.set_cookie(
-            key=OAUTH_STATE_COOKIE_NAME,
+            key=cookie_name,
             value=signed_state,
             max_age=OAUTH_STATE_MAX_AGE,
             httponly=True,
             secure=secure_cookie,
             samesite="lax",
-            path=cookie_path,
+            path="/",
         )
         return response
     except ValueError as e:
@@ -407,8 +407,8 @@ async def auth_login(request: Request):
             {"error": "Unable to start authentication.", "log_id": error_id}, status_code=500
         )
         response.delete_cookie(
-            OAUTH_STATE_COOKIE_NAME,
-            path=cookie_path,
+            cookie_name,
+            path="/",
             secure=secure_cookie,
             httponly=True,
             samesite="lax",
@@ -419,15 +419,18 @@ async def auth_login(request: Request):
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = "", state: str = ""):
     """Validate the OAuth code and redirect without placing it in HTML or JavaScript."""
-    from shared.auth import OAUTH_STATE_COOKIE_NAME, verify_oauth_state
+    from shared.auth import oauth_state_cookie_name, verify_oauth_state
+
+    secure_cookie = IS_PROD or request.url.scheme == "https"
+    cookie_name = oauth_state_cookie_name(secure=secure_cookie)
 
     def invalid(reason, message):
         logger.warning("OAuth callback rejected reason=%s", reason)
         response = JSONResponse({"error": message}, status_code=400)
         response.delete_cookie(
-            OAUTH_STATE_COOKIE_NAME,
-            path="/auth" if IS_PROD else "/",
-            secure=IS_PROD or request.url.scheme == "https",
+            cookie_name,
+            path="/",
+            secure=secure_cookie,
             httponly=True,
             samesite="lax",
         )
@@ -435,7 +438,7 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
 
     if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):
         return invalid("invalid_code", "Invalid authorization code")
-    if not verify_oauth_state(request.cookies.get(OAUTH_STATE_COOKIE_NAME), state):
+    if not verify_oauth_state(request.cookies.get(cookie_name), state):
         return invalid("invalid_state", "Invalid authentication state")
     finalize_path = "/auth/callback/finalize" if IS_PROD else "/admin/auth/callback/finalize"
     return RedirectResponse(
@@ -446,19 +449,22 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
 @app.get("/auth/callback/finalize")
 async def auth_callback_finalize(request: Request, code: str = "", state: str = ""):
     """Finalize OAuth callback from Start.gg."""
-    from shared.auth import OAUTH_STATE_COOKIE_NAME, verify_oauth_state
+    from shared.auth import oauth_state_cookie_name, verify_oauth_state
+
+    secure_cookie = IS_PROD or request.url.scheme == "https"
+    cookie_name = oauth_state_cookie_name(secure=secure_cookie)
 
     def finish(response):
         response.delete_cookie(
-            OAUTH_STATE_COOKIE_NAME,
-            path="/auth" if IS_PROD else "/",
-            secure=IS_PROD or request.url.scheme == "https",
+            cookie_name,
+            path="/",
+            secure=secure_cookie,
             httponly=True,
             samesite="lax",
         )
         return response
 
-    if not verify_oauth_state(request.cookies.get(OAUTH_STATE_COOKIE_NAME), state):
+    if not verify_oauth_state(request.cookies.get(cookie_name), state):
         logger.warning("OAuth finalize rejected reason=invalid_state")
         return finish(JSONResponse({"error": "Invalid authentication state"}, status_code=400))
     if not re.fullmatch(r"[A-Za-z0-9._~-]{1,512}", code):

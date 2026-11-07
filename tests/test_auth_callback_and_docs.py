@@ -209,7 +209,9 @@ def test_disabled_dashboard_docs_do_not_fall_through_to_login_or_dash(load_appli
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("prod,scheme", [(False, "http"), (False, "https"), (True, "https")])
+@pytest.mark.parametrize(
+    "prod,scheme", [(False, "http"), (False, "https"), (True, "http"), (True, "https")]
+)
 def test_login_state_matches_authorize_url_and_cookie_flags(
     load_application, monkeypatch, prod, scheme
 ):
@@ -220,8 +222,12 @@ def test_login_state_matches_authorize_url_and_cookie_flags(
         query = parse_qs(urlsplit(response.headers["location"]).query)
         state = query["state"][0]
         cookie = SimpleCookie()
-        cookie.load(response.headers["set-cookie"])
-        challenge = cookie[oauth.OAUTH_STATE_COOKIE_NAME]
+        header = response.headers["set-cookie"]
+        cookie.load(header)
+        name = "__Host-fgt_oauth_state" if prod or scheme == "https" else "fgc_oauth_state"
+        assert header.startswith(name + "=")
+        assert set(cookie) == {name}
+        challenge = cookie[name]
         assert re.fullmatch(r"[A-Za-z0-9_-]{43}", state)
         assert oauth.verify_oauth_state(challenge.value, state)
         assert challenge.value.split(".")[0] == state
@@ -229,7 +235,7 @@ def test_login_state_matches_authorize_url_and_cookie_flags(
         assert bool(challenge["secure"]) is (prod or scheme == "https")
         assert challenge["samesite"].lower() == "lax"
         assert challenge["max-age"] == "600"
-        assert challenge["path"] == ("/auth" if prod else "/")
+        assert challenge["path"] == "/"
         assert challenge["domain"] == ""
     assert query["redirect_uri"] == [module.OAUTH_REDIRECT_URI]
     assert query["scope"] == ["user.identity user.email tournament.manager"]
@@ -242,17 +248,18 @@ def test_valid_state_survives_callback_redirect_and_is_consumed_on_finalize(
 ):
     module, auth = load_application("dashboard")
     monkeypatch.setattr(module, "IS_PROD", prod)
+    cookie_name = "__Host-fgt_oauth_state"
     with TestClient(module.app, base_url="https://dashboard.example.invalid") as client:
         state = start_login(client)
         params = {"code": CODE, "state": state}
         callback = client.get("/auth/callback", params=params, follow_redirects=False)
         assert callback.status_code == 302 and callback.content == b""
-        assert client.cookies.get(oauth.OAUTH_STATE_COOKIE_NAME)
+        assert client.cookies.get(cookie_name)
         target = urlsplit(callback.headers["location"])
         # Direct TestClient requests stand in for nginx stripping the dev /admin prefix.
         response = client.get(target.path.removeprefix("/admin"), params=parse_qs(target.query))
         assert response.status_code == 200
-        assert client.cookies.get(oauth.OAUTH_STATE_COOKIE_NAME) is None
+        assert client.cookies.get(cookie_name) is None
         assert client.cookies.get(module.SESSION_COOKIE_NAME) == "synthetic-session"
         assert (
             CODE not in response.text and state not in response.text and TOKEN not in response.text
@@ -263,6 +270,58 @@ def test_valid_state_survives_callback_redirect_and_is_consumed_on_finalize(
             assert replay.json() == {"error": "Invalid authentication state"}
         module.create_session.assert_called_once()
         auth.exchange_code_for_token.assert_called_once_with(CODE, module.OAUTH_REDIRECT_URI)
+
+
+@pytest.mark.parametrize("prod", [False, True])
+@pytest.mark.parametrize("path", ["/auth/callback", "/auth/callback/finalize"])
+def test_secure_handlers_reject_parent_domain_legacy_state_cookie(
+    load_application, monkeypatch, prod, path
+):
+    module, auth = load_application("dashboard")
+    monkeypatch.setattr(module, "IS_PROD", prod)
+    state = "s" * 43
+    with TestClient(module.app, base_url="https://dashboard.example.invalid") as client:
+        # A sibling can plant the legacy name on the parent domain, even with a valid signature.
+        client.cookies.set(
+            "fgc_oauth_state", oauth.seal_oauth_state(state), domain=".example.invalid", path="/"
+        )
+        response = client.get(path, params={"code": CODE, "state": state}, follow_redirects=False)
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid authentication state"}
+    header = response.headers["set-cookie"]
+    assert header.startswith("__Host-fgt_oauth_state=")
+    cookie = SimpleCookie()
+    cookie.load(header)
+    deletion = cookie["__Host-fgt_oauth_state"]
+    assert deletion["max-age"] == "0" and deletion["path"] == "/"
+    assert deletion["secure"] is True and deletion["httponly"] is True
+    assert deletion["domain"] == "" and deletion["samesite"].lower() == "lax"
+    auth.exchange_code_for_token.assert_not_called()
+    module.create_session.assert_not_called()
+
+
+@pytest.mark.parametrize("prod", [False, True])
+def test_host_state_cookie_is_used_despite_parent_domain_legacy_cookie(
+    load_application, monkeypatch, prod
+):
+    module, auth = load_application("dashboard")
+    monkeypatch.setattr(module, "IS_PROD", prod)
+    with TestClient(module.app, base_url="https://dashboard.example.invalid") as client:
+        state = start_login(client)
+        assert client.cookies.get("__Host-fgt_oauth_state")
+        client.cookies.set(
+            "fgc_oauth_state", oauth.seal_oauth_state("a" * 43), domain=".example.invalid", path="/"
+        )
+        params = {"code": CODE, "state": state}
+        callback = client.get("/auth/callback", params=params, follow_redirects=False)
+        assert callback.status_code == 302
+        response = client.get("/auth/callback/finalize", params=params)
+        assert response.status_code == 200
+        assert client.cookies.get("__Host-fgt_oauth_state") is None
+        assert client.cookies.get("fgc_oauth_state")
+        assert client.cookies.get(module.SESSION_COOKIE_NAME) == "synthetic-session"
+    module.create_session.assert_called_once()
+    auth.exchange_code_for_token.assert_called_once_with(CODE, module.OAUTH_REDIRECT_URI)
 
 
 @pytest.mark.parametrize("path", ["/auth/callback", "/auth/callback/finalize"])
@@ -359,7 +418,7 @@ def test_state_issued_by_one_worker_finalizes_in_a_fresh_worker(load_application
                 "/auth/callback/finalize", params={"code": CODE, "state": state}
             )
             assert response.status_code == 200
-            assert finalizer.cookies.get(oauth.OAUTH_STATE_COOKIE_NAME) is None
+            assert finalizer.cookies.get("__Host-fgt_oauth_state") is None
             second.create_session.assert_called_once()
             second_auth.exchange_code_for_token.assert_called_once_with(
                 CODE, second.OAUTH_REDIRECT_URI
@@ -414,9 +473,13 @@ def test_oauth_token_exchange_preserves_hotfix_json_redirect_and_scope(
     assert body["grant_type"] == "authorization_code" and body["code"] == CODE
 
 
+@pytest.mark.parametrize("prod", [False, True])
 @pytest.mark.parametrize("failure", ["exchange", "missing_token", "user", "denied", "session"])
-def test_finalize_failure_also_consumes_browser_state(load_application, failure):
+def test_finalize_failure_also_consumes_browser_state(load_application, monkeypatch, prod, failure):
     module, auth = load_application("dashboard")
+    monkeypatch.setattr(module, "IS_PROD", prod)
+    scheme = "https" if prod else "http"
+    cookie_name = "__Host-fgt_oauth_state" if prod else "fgc_oauth_state"
     if failure == "exchange":
         auth.exchange_code_for_token.side_effect = RuntimeError("Synthetic provider failure")
     elif failure == "missing_token":
@@ -427,12 +490,12 @@ def test_finalize_failure_also_consumes_browser_state(load_application, failure)
         auth.is_event_admin.return_value = False
     else:
         module.create_session.return_value = None
-    with TestClient(module.app) as client:
+    with TestClient(module.app, base_url=f"{scheme}://dashboard.example.invalid") as client:
         state = start_login(client)
         params = {"code": CODE, "state": state}
         response = client.get("/auth/callback/finalize", params=params)
         assert response.status_code == (403 if failure == "denied" else 500)
-        assert client.cookies.get(oauth.OAUTH_STATE_COOKIE_NAME) is None
+        assert client.cookies.get(cookie_name) is None
         assert client.cookies.get(module.SESSION_COOKIE_NAME) is None
         replay = client.get("/auth/callback/finalize", params=params)
         assert replay.status_code == 400
