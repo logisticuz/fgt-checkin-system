@@ -1820,6 +1820,52 @@ def get_recorded_event_games(event_slug: str) -> List[str]:
     return sorted(games, key=lambda game: (game.casefold(), game))
 
 
+def get_recorded_event_game_counts(event_slug: str) -> Dict[str, int]:
+    """Count active check-ins and unmirrored archive facts, preferring active game values."""
+    if not event_slug or event_slug == "__ALL__":
+        return {}
+    with _get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(format('%I.event_edit_context', current_schema()))")
+        restore_map_filter = ""
+        if cur.fetchone()[0] is not None:
+            restore_map_filter = """
+                AND NOT EXISTS (
+                    SELECT 1 FROM event_edit_context AS context
+                    CROSS JOIN LATERAL jsonb_array_elements(context.restore_links) AS link
+                    JOIN active_event_data AS restored
+                      ON restored.record_id = link->>'active_id'
+                     AND restored.event_slug = archived.event_slug
+                    WHERE context.event_slug = archived.event_slug
+                      AND link->>'archive_id' = archived.id::text
+                )
+            """
+        cur.execute(
+            "SELECT tournament_games_registered FROM active_event_data WHERE event_slug = %s "
+            "UNION ALL "
+            """
+            SELECT archived.tournament_games_registered FROM event_archive AS archived
+            WHERE archived.event_slug = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM active_event_data AS live
+                  WHERE live.event_slug = archived.event_slug
+                    AND (
+                        live.record_id = NULLIF(archived.source_record_id, '')
+                        OR (NULLIF(archived.checkin_uuid, '') IS NOT NULL
+                            AND live.checkin_uuid = archived.checkin_uuid)
+                    )
+              )
+            """
+            + restore_map_filter,
+            (event_slug, event_slug),
+        )
+        counts: Dict[str, int] = {}
+        for (raw_games,) in cur.fetchall():
+            if isinstance(raw_games, (list, tuple)):
+                for game in {name for name in raw_games if isinstance(name, str) and name.strip()}:
+                    counts[game] = counts.get(game, 0) + 1
+    return counts
+
+
 def get_game_aliases() -> Dict[str, str]:
     """Read the exact, case-insensitive alias map without changing stored facts."""
     with _get_pool().connection() as conn, conn.cursor() as cur:

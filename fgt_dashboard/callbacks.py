@@ -259,7 +259,7 @@ def _fetch_confirmation_text(target_slug, target_name, settings):
     return "\n".join(lines)
 
 
-def _manual_game_choices(selected_slug):
+def _manual_game_choices(selected_slug, *, include_variants=False):
     """Resolve labels and raw allowed values from the same selected-event sources."""
     if (
         not isinstance(selected_slug, str)
@@ -282,17 +282,35 @@ def _manual_game_choices(selected_slug):
         else:
             sources.append(f"from start.gg event {selected_slug}")
     try:
+        counts_reader = getattr(storage_api, "get_recorded_event_game_counts", None)
         reader = getattr(storage_api, "get_recorded_event_games", None)
-        if not callable(reader):
-            raise RuntimeError("Recorded game reader unavailable")
-        recorded = reader(selected_slug)
-        if not isinstance(recorded, list):
-            raise RuntimeError("Recorded games unavailable")
-        recorded = [name for name in recorded if isinstance(name, str) and name.strip()]
+        if callable(counts_reader):
+            recorded_counts = counts_reader(selected_slug)
+            if not isinstance(recorded_counts, dict):
+                raise RuntimeError("Recorded games unavailable")
+            recorded_counts = {
+                name: count
+                for name, count in recorded_counts.items()
+                if isinstance(name, str) and name.strip() and type(count) is int and count > 0
+            }
+            recorded = reader(selected_slug) if callable(reader) else list(recorded_counts)
+            if not isinstance(recorded, list):
+                raise RuntimeError("Recorded games unavailable")
+            recorded = [name for name in recorded if isinstance(name, str) and name.strip()]
+            recorded = list(set(recorded) | set(recorded_counts))
+        else:
+            recorded = reader(selected_slug) if callable(reader) else None
+            if not isinstance(recorded, list):
+                raise RuntimeError("Recorded games unavailable")
+            recorded_counts = {
+                name: 1 for name in recorded if isinstance(name, str) and name.strip()
+            }
+            recorded = list(recorded_counts)
         if recorded:
             sources.append("from recorded check-ins")
     except Exception:
         recorded = []
+        recorded_counts = {}
         warnings.append("Recorded check-in games are unavailable.")
     try:
         reader = getattr(storage_api, "get_game_aliases", None)
@@ -305,9 +323,30 @@ def _manual_game_choices(selected_slug):
     except Exception:
         aliases = {}
     raw_names = set(names + recorded)
-    options = [
-        {"label": aliases.get(name.strip().lower(), name), "value": name} for name in raw_names
-    ]
+    if include_variants:
+        # Old form values and pending confirmations remain valid after display deduplication.
+        options = [
+            {"label": aliases.get(name.strip().lower(), name.strip()), "value": name}
+            for name in raw_names
+        ]
+    else:
+        groups = {}
+        for raw in sorted(raw_names, key=lambda name: (name.casefold(), name)):
+            canonical = aliases.get(raw.strip().lower(), raw.strip())
+            group = groups.setdefault(canonical.casefold(), {"label": canonical, "raw": []})
+            group["raw"].append(raw)
+        options = []
+        for group in groups.values():
+            provider_names = [raw for raw in group["raw"] if raw in names]
+            value = (
+                min(provider_names, key=lambda raw: (raw.casefold(), raw))
+                if provider_names
+                else min(
+                    group["raw"],
+                    key=lambda raw: (-recorded_counts.get(raw, 0), raw.casefold(), raw),
+                )
+            )
+            options.append({"label": group["label"], "value": value})
     options.sort(key=lambda option: (str(option["label"]).casefold(), option["value"]))
     help_text = f"Games for {selected_slug}: " + (
         "; ".join(sources) if sources else "no source available"
@@ -5744,7 +5783,7 @@ def register_callbacks(app):
 
         selected_games = list(dict.fromkeys(input_games or []))
         # Options and submission share the selected event's raw game values.
-        game_options, _game_help = _manual_game_choices(selected_slug)
+        game_options, _game_help = _manual_game_choices(selected_slug, include_variants=True)
         allowed_games = [option["value"] for option in game_options]
         unknown = [g for g in selected_games if g not in allowed_games]
         if unknown:
@@ -5960,7 +5999,7 @@ def register_callbacks(app):
         if not slug or settings.get("active_event_slug") != slug:
             return refuse(f"⚠️ {name}: the active event changed – nothing saved.")
         games = pending.get("games")
-        game_options, _game_help = _manual_game_choices(slug)
+        game_options, _game_help = _manual_game_choices(slug, include_variants=True)
         allowed = [option["value"] for option in game_options]
         if (
             not isinstance(games, list)
