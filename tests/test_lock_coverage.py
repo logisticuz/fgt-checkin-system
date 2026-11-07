@@ -1,11 +1,13 @@
 """Archive, restore and row writes serialize through real transaction event locks."""
 
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from threading import Barrier, Event, current_thread
-from time import monotonic, sleep
+from contextlib import contextmanager, nullcontext
+from threading import Barrier, Event, current_thread, local
+from time import monotonic
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 from psycopg.errors import LockNotAvailable
 
@@ -15,48 +17,149 @@ from tests.test_safe_archiving import archive, archive_db, event, merge_data, ta
 pytestmark = pytest.mark.db
 
 
-def _wait_for_lock(database, key, future, mode):
+_worker = local()
+
+
+def _submit(workers, function, *args, **kwargs):
+    backend = SimpleNamespace(pid=None, connected=Event())
+
+    def run():
+        _worker.backend = backend
+        try:
+            return function(*args, **kwargs)
+        finally:
+            del _worker.backend
+
+    future = workers.submit(run)
+    future.backend = backend
+    return future
+
+
+class _LockConnections:
+    """Keep real lock semantics, with advisory keys private to this test schema."""
+
+    def __init__(self, database):
+        self.raw_pool = database.pool
+        self.before = self.after = None
+
+    @contextmanager
+    def connection(self):
+        with self.raw_pool.connection() as conn:
+            backend = getattr(_worker, "backend", None)
+            if backend is not None:
+                backend.pid = conn.info.backend_pid
+                backend.connected.set()
+            yield _Connection(conn, self)
+
+
+class _Connection:
+    def __init__(self, connection, observer):
+        self.connection, self.observer = connection, observer
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def cursor(self, *args, **kwargs):
+        return _Cursor(self.connection.cursor(*args, **kwargs), self.observer)
+
+    def execute(self, query, *args, **kwargs):
+        return self.cursor().execute(query, *args, **kwargs)
+
+
+class _Cursor:
+    def __init__(self, cursor, observer):
+        self.cursor, self.observer = cursor, observer
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+    def __enter__(self):
+        self.cursor.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.cursor.__exit__(*args)
+
+    def execute(self, query, *args, **kwargs):
+        original = str(query)
+        if self.observer.before is not None:
+            self.observer.before(original)
+        if isinstance(query, str) and "pg_advisory_xact_lock" in query:
+            # Private tables alone do not isolate database-wide advisory locks.
+            # Preserve the application's key, lock mode, transaction and ordering.
+            query = query.replace("hashtext('fgt", "hashtext(current_schema() || ':fgt")
+        self.cursor.execute(query, *args, **kwargs)
+        if self.observer.after is not None:
+            self.observer.after(original)
+        return self
+
+
+@pytest.fixture
+def _private_lock_connections(archive_db, monkeypatch):
+    connections = _LockConnections(archive_db)
+    monkeypatch.setattr(archive_db, "pool", connections)
+    monkeypatch.setattr(postgres, "_get_pool", lambda: connections)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_advisory_locks(_private_lock_connections):
+    """Use the private lock namespace for every test in this module."""
+
+
+def _wait_for_query(database, future, query, parameters, description):
+    assert future.backend.connected.wait(timeout=5), "Writer did not acquire a connection"
     deadline = monotonic() + 5
+    pause = Event()
     with database.pool.connection() as probe:
         while monotonic() < deadline:
             if future.done():
                 future.result()
-                pytest.fail("Writer completed without waiting for the event lock")
-            row = probe.execute(
-                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' "
-                "AND mode = %s AND NOT granted "
-                "AND objid = ((hashtext(%s)::bigint & 4294967295)::oid)",
-                (mode, key),
-            ).fetchone()
-            if row:
-                return row[0]
-            sleep(0.01)
-    pytest.fail("Writer did not wait for the event advisory lock")
+                pytest.fail(f"Writer completed without waiting for {description}")
+            pid = future.backend.pid
+            if probe.execute(query, (pid, *parameters)).fetchone()[0]:
+                return pid
+            pause.wait(0.01)
+        locks = probe.execute(
+            "SELECT locktype, mode, granted FROM pg_locks WHERE pid = %s", (pid,)
+        ).fetchall()
+        blockers = probe.execute("SELECT pg_blocking_pids(%s)", (pid,)).fetchone()[0]
+    pytest.fail(f"Writer {pid} did not wait for {description}; locks={locks}, blockers={blockers}")
+
+
+def _wait_for_lock(database, key, future, mode):
+    return _wait_for_query(
+        database,
+        future,
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s "
+        "AND locktype = 'advisory' AND mode = %s AND NOT granted "
+        "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+        "AND classid = (((hashtext(%s)::bigint >> 32) & 4294967295)::oid) AND objsubid = 1 "
+        "AND objid = ((hashtext(%s)::bigint & 4294967295)::oid) "
+        "AND cardinality(pg_blocking_pids(pid)) > 0)",
+        (mode, database.schema + ":" + key, database.schema + ":" + key),
+        "the event advisory lock",
+    )
 
 
 def _wait_for_event_lock(database, slug, future, mode):
     return _wait_for_lock(database, "fgt-event:" + slug, future, mode)
 
 
-def _wait_for_row_lock(database, slug, future):
-    deadline = monotonic() + 5
-    with database.pool.connection() as probe:
-        while monotonic() < deadline:
-            if future.done():
-                future.result()
-                pytest.fail("Writer completed without waiting for the check-in row lock")
-            if probe.execute(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks waiting JOIN pg_locks event_lock "
-                "ON event_lock.pid = waiting.pid WHERE NOT waiting.granted "
-                "AND waiting.locktype IN ('transactionid', 'tuple') "
-                "AND event_lock.granted AND event_lock.locktype = 'advisory' "
-                "AND event_lock.objid = "
-                "((hashtext('fgt-event:' || %s)::bigint & 4294967295)::oid))",
-                (slug,),
-            ).fetchone()[0]:
-                return
-            sleep(0.01)
-    pytest.fail("Writer did not wait for the check-in row lock")
+def _wait_for_row_lock(database, future, blocker):
+    assert blocker.backend.connected.wait(timeout=5), "Row holder did not acquire a connection"
+    return _wait_for_query(
+        database,
+        future,
+        "SELECT EXISTS (SELECT 1 FROM pg_locks waiting "
+        "WHERE waiting.pid = %s AND NOT waiting.granted "
+        "AND waiting.locktype IN ('transactionid', 'tuple') "
+        "AND %s = ANY(pg_blocking_pids(waiting.pid)) "
+        "AND EXISTS (SELECT 1 FROM pg_locks relation_lock "
+        "WHERE relation_lock.pid = waiting.pid AND relation_lock.granted "
+        "AND relation_lock.relation = 'active_event_data'::regclass))",
+        (blocker.backend.pid,),
+        "the check-in row lock held by the expected transaction",
+    )
 
 
 def _pause_archive(monkeypatch):
@@ -72,45 +175,58 @@ def _pause_archive(monkeypatch):
     return barrier, release
 
 
-def _observe_commands(database, monkeypatch, *, before=None, after=None):
-    class Cursor:
-        def __init__(self, cursor):
-            self.cursor = cursor
+def _observe_commands(database, *, before=None, after=None):
+    database.pool.before, database.pool.after = before, after
 
-        def __getattr__(self, name):
-            return getattr(self.cursor, name)
 
-        def __enter__(self):
-            self.cursor.__enter__()
-            return self
+@contextmanager
+def _foreign_global_waiter(database):
+    """Model a foreign merge queue on a separate private control key."""
+    key = int.from_bytes(uuid.uuid4().bytes[:8], "big", signed=True)
+    query = "SELECT pg_advisory_xact_lock(%s)"
+    pending = []
+    connect_options = {
+        "autocommit": True,
+        "connect_timeout": 2,
+        "options": "-clock_timeout=10000 -cstatement_timeout=10000",
+    }
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with psycopg.connect(database.pool.raw_pool.conninfo, **connect_options) as holder:
+            with holder.transaction():
+                holder.execute(query.replace("xact_lock(", "xact_lock_shared("), (key,))
+                connected, pause = Event(), Event()
+                pid = []
 
-        def __exit__(self, *args):
-            return self.cursor.__exit__(*args)
+                def merge():
+                    with psycopg.connect(
+                        database.pool.raw_pool.conninfo, **connect_options
+                    ) as conn:
+                        pid.append(conn.info.backend_pid)
+                        connected.set()
+                        conn.execute(query, (key,))
 
-        def execute(self, query, *args, **kwargs):
-            if before is not None:
-                before(str(query))
-            self.cursor.execute(query, *args, **kwargs)
-            if after is not None:
-                after(str(query))
-            return self
+                def queue():
+                    future = workers.submit(merge)
+                    pending.append(future)
+                    assert connected.wait(timeout=5)
+                    deadline = monotonic() + 5
+                    while monotonic() < deadline:
+                        if future.done():
+                            future.result()
+                            pytest.fail("Foreign merge did not wait for its own holder")
+                        if (
+                            holder.info.backend_pid
+                            in holder.execute("SELECT pg_blocking_pids(%s)", (pid[0],)).fetchone()[
+                                0
+                            ]
+                        ):
+                            return
+                        pause.wait(0.01)
+                    pytest.fail("Foreign merge did not enter its advisory queue")
 
-    class Connection:
-        def __init__(self, connection):
-            self.connection = connection
-
-        def __getattr__(self, name):
-            return getattr(self.connection, name)
-
-        def cursor(self, *args, **kwargs):
-            return Cursor(self.connection.cursor(*args, **kwargs))
-
-    @contextmanager
-    def connection():
-        with database.pool.connection() as conn:
-            yield Connection(conn)
-
-    monkeypatch.setattr(postgres, "_get_pool", lambda: SimpleNamespace(connection=connection))
+                yield queue
+        for future in pending:
+            future.result(timeout=10)
 
 
 def test_reopen_waits_for_archive_then_restores_its_snapshot(archive_db, event, monkeypatch):
@@ -119,10 +235,10 @@ def test_reopen_waits_for_archive_then_restores_its_snapshot(archive_db, event, 
     barrier, release = _pause_archive(monkeypatch)
 
     with ThreadPoolExecutor(max_workers=2) as workers:
-        archiving = workers.submit(archive, event, clear_active=True)
+        archiving = _submit(workers, archive, event, clear_active=True)
         try:
             barrier.wait(timeout=5)
-            reopening = workers.submit(postgres.reopen_event, event)
+            reopening = _submit(workers, postgres.reopen_event, event)
             _wait_for_event_lock(archive_db, event, reopening, "ExclusiveLock")
         finally:
             release.set()
@@ -151,13 +267,13 @@ def test_archive_waits_until_reopen_has_restored_rows(archive_db, event, monkeyp
             barrier.wait(timeout=5)
             assert release.wait(timeout=10)
 
-    _observe_commands(archive_db, monkeypatch, after=pause_reopen)
+    _observe_commands(archive_db, after=pause_reopen)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-reopen") as restorer:
         with ThreadPoolExecutor(max_workers=1) as archiver:
-            reopening = restorer.submit(postgres.reopen_event, event)
+            reopening = _submit(restorer, postgres.reopen_event, event)
             try:
                 barrier.wait(timeout=5)
-                archiving = archiver.submit(archive, event, clear_active=True)
+                archiving = _submit(archiver, archive, event, clear_active=True)
                 _wait_for_event_lock(archive_db, event, archiving, "ExclusiveLock")
             finally:
                 release.set()
@@ -176,15 +292,15 @@ def test_row_writer_waits_for_archive_and_rechecks_the_deleted_row(
     barrier, release = _pause_archive(monkeypatch)
 
     with ThreadPoolExecutor(max_workers=2) as workers:
-        archiving = workers.submit(archive, event, clear_active=True)
+        archiving = _submit(workers, archive, event, clear_active=True)
         try:
             barrier.wait(timeout=5)
             if operation == "update":
-                writing = workers.submit(
-                    postgres.update_checkin, original["record_id"], {"member": True}
+                writing = _submit(
+                    workers, postgres.update_checkin, original["record_id"], {"member": True}
                 )
             else:
-                writing = workers.submit(postgres.delete_checkin, original["record_id"])
+                writing = _submit(workers, postgres.delete_checkin, original["record_id"])
             _wait_for_event_lock(archive_db, event, writing, "ShareLock")
         finally:
             release.set()
@@ -212,12 +328,12 @@ def test_archive_waits_for_update_and_copies_its_committed_value(archive_db, eve
     monkeypatch.setattr(postgres, "compute_checkin_status", paused)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-update") as updater:
         with ThreadPoolExecutor(max_workers=1) as archiver:
-            writing = updater.submit(
-                postgres.update_checkin, original["record_id"], {"member": True}
+            writing = _submit(
+                updater, postgres.update_checkin, original["record_id"], {"member": True}
             )
             try:
                 barrier.wait(timeout=5)
-                archiving = archiver.submit(archive, event, clear_active=True)
+                archiving = _submit(archiver, archive, event, clear_active=True)
                 _wait_for_event_lock(archive_db, event, archiving, "ExclusiveLock")
             finally:
                 release.set()
@@ -236,8 +352,8 @@ def test_row_move_locks_both_source_and_destination_events(archive_db, event):
             blocker.execute(
                 "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (destination,)
             )
-            writing = workers.submit(
-                postgres.update_checkin, original["record_id"], {"event_slug": destination}
+            writing = _submit(
+                workers, postgres.update_checkin, original["record_id"], {"event_slug": destination}
             )
             _wait_for_event_lock(archive_db, destination, writing, "ShareLock")
         assert writing.result(timeout=10)["fields"]["event_slug"] == destination
@@ -271,22 +387,22 @@ def test_player_merge_locks_sorted_events_before_the_global_lock(
                 "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", (blocked_slug,)
             )
             if operation == "merge":
-                writing = workers.submit(postgres.merge_players, keep, removed)
+                writing = _submit(workers, postgres.merge_players, keep, removed)
             else:
-                writing = workers.submit(postgres.undo_merge, merge_id)
+                writing = _submit(workers, postgres.undo_merge, merge_id)
             pid = _wait_for_event_lock(archive_db, blocked_slug, writing, "ExclusiveLock")
             with archive_db.pool.connection() as probe:
                 assert probe.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s AND granted "
                     "AND locktype = 'advisory' AND mode = 'ExclusiveLock' "
-                    "AND objid = ((hashtext('fgt-event:' || %s)::bigint & 4294967295)::oid))",
-                    (pid, first_slug),
+                    "AND objid = ((hashtext(%s)::bigint & 4294967295)::oid))",
+                    (pid, archive_db.schema + ':fgt-event:' + first_slug),
                 ).fetchone()[0]
                 assert not probe.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s AND granted "
                     "AND locktype = 'advisory' "
-                    "AND objid = ((hashtext('fgt:player-merges')::bigint & 4294967295)::oid))",
-                    (pid,),
+                    "AND objid = ((hashtext(%s)::bigint & 4294967295)::oid))",
+                    (pid, archive_db.schema + ':fgt:player-merges'),
                 ).fetchone()[0]
         result = writing.result(timeout=10)
 
@@ -312,12 +428,15 @@ def test_merge_covers_a_new_event_committed_while_waiting_for_player_lock(
     monkeypatch.setattr(postgres, "_find_player_uuid", paused)
     monkeypatch.setattr(postgres, "CANONICAL_PLAYER_ID_ENABLED", True)
     with ThreadPoolExecutor(max_workers=2) as workers:
-        incoming = workers.submit(
-            postgres.begin_checkin, new_slug, {"name": "Test Late Player", "tag": removed["tag"]}
+        incoming = _submit(
+            workers,
+            postgres.begin_checkin,
+            new_slug,
+            {"name": "Test Late Player", "tag": removed["tag"]},
         )
         try:
             barrier.wait(timeout=5)
-            merging = workers.submit(postgres.merge_players, keep["uuid"], removed["uuid"])
+            merging = _submit(workers, postgres.merge_players, keep["uuid"], removed["uuid"])
             _wait_for_lock(archive_db, "fgt:player-merges", merging, "ExclusiveLock")
         finally:
             release.set()
@@ -341,11 +460,11 @@ def test_shared_global_lock_allows_concurrent_checkins(archive_db, event, monkey
     monkeypatch.setattr(postgres, "_find_player_uuid", simultaneous_lookup)
     monkeypatch.setattr(postgres, "CANONICAL_PLAYER_ID_ENABLED", True)
     with ThreadPoolExecutor(max_workers=2) as workers:
-        first = workers.submit(
-            postgres.begin_checkin, event, {"name": "Test One", "tag": "test-one"}
+        first = _submit(
+            workers, postgres.begin_checkin, event, {"name": "Test One", "tag": "test-one"}
         )
-        second = workers.submit(
-            postgres.begin_checkin, event, {"name": "Test Two", "tag": "test-two"}
+        second = _submit(
+            workers, postgres.begin_checkin, event, {"name": "Test Two", "tag": "test-two"}
         )
         ids = {first.result(timeout=10)["checkin_id"], second.result(timeout=10)["checkin_id"]}
 
@@ -369,9 +488,9 @@ def test_stuck_admin_lock_times_out_without_partial_changes(archive_db, merge_da
                 "SELECT pg_advisory_xact_lock(hashtext('fgt-event:' || %s))", ("remove-active",)
             )
             if operation == "merge":
-                writing = workers.submit(postgres.merge_players, keep, removed)
+                writing = _submit(workers, postgres.merge_players, keep, removed)
             else:
-                writing = workers.submit(postgres.undo_merge, merge_id)
+                writing = _submit(workers, postgres.undo_merge, merge_id)
             _wait_for_event_lock(archive_db, "remove-active", writing, "ExclusiveLock")
             with pytest.raises(LockNotAvailable, match="lock timeout"):
                 writing.result(timeout=13)
@@ -404,7 +523,7 @@ def test_event_coverage_retry_is_bounded_and_does_not_partially_merge(
         )
 
     monkeypatch.setattr(postgres, "CANONICAL_PLAYER_ID_ENABLED", True)
-    _observe_commands(archive_db, monkeypatch, before=incoming_before_global_lock)
+    _observe_commands(archive_db, before=incoming_before_global_lock)
     with pytest.raises(ValueError, match=f"retry the {operation}"):
         if operation == "merge":
             postgres.merge_players(keep["uuid"], removed["uuid"])
@@ -447,21 +566,27 @@ def test_repeat_checkin_inserts_in_its_event_after_the_matched_row_moves_or_vani
     if operation == "move":
         monkeypatch.setattr(postgres, "compute_checkin_status", pause_move)
     else:
-        _observe_commands(archive_db, monkeypatch, after=pause_delete)
+        _observe_commands(archive_db, after=pause_delete)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-row-writer") as writer:
         with ThreadPoolExecutor(max_workers=1) as checkins:
             if operation == "move":
-                writing = writer.submit(
-                    postgres.update_checkin, original["record_id"], {"event_slug": destination}
+                writing = _submit(
+                    writer,
+                    postgres.update_checkin,
+                    original["record_id"],
+                    {"event_slug": destination},
                 )
             else:
-                writing = writer.submit(postgres.delete_checkin, original["record_id"])
+                writing = _submit(writer, postgres.delete_checkin, original["record_id"])
             try:
                 barrier.wait(timeout=5)
-                incoming = checkins.submit(
-                    postgres.begin_checkin, event, {"name": "Test Repeat", "tag": "test-repeat"}
+                incoming = _submit(
+                    checkins,
+                    postgres.begin_checkin,
+                    event,
+                    {"name": "Test Repeat", "tag": "test-repeat"},
                 )
-                _wait_for_row_lock(archive_db, event, incoming)
+                _wait_for_row_lock(archive_db, incoming, writing)
             finally:
                 release.set()
             assert writing.result(timeout=10)
@@ -480,8 +605,9 @@ def test_repeat_checkin_inserts_in_its_event_after_the_matched_row_moves_or_vani
         assert original["record_id"] not in rows
 
 
+@pytest.mark.parametrize("foreign_waiter", [False, True])
 def test_repeat_lookup_holds_the_event_qualified_row_lock_until_commit(
-    archive_db, event, monkeypatch
+    archive_db, event, monkeypatch, foreign_waiter
 ):
     original = archive_db.seed_checkin(event_slug=event, name="Test Original", tag="test-repeat")
     destination = event + "-other"
@@ -494,22 +620,31 @@ def test_repeat_lookup_holds_the_event_qualified_row_lock_until_commit(
             barrier.wait(timeout=5)
             assert release.wait(timeout=10)
 
-    _observe_commands(archive_db, monkeypatch, after=pause_lookup)
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-repeat") as checkins:
-        with ThreadPoolExecutor(max_workers=1) as writer:
-            incoming = checkins.submit(
-                postgres.begin_checkin, event, {"name": "Test Repeat", "tag": "test-repeat"}
-            )
-            try:
-                barrier.wait(timeout=5)
-                moving = writer.submit(
-                    postgres.update_checkin, original["record_id"], {"event_slug": destination}
+    _observe_commands(archive_db, after=pause_lookup)
+    foreign = _foreign_global_waiter(archive_db) if foreign_waiter else nullcontext(lambda: None)
+    with foreign as queue:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="t035-repeat") as checkins:
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                incoming = _submit(
+                    checkins,
+                    postgres.begin_checkin,
+                    event,
+                    {"name": "Test Repeat", "tag": "test-repeat"},
                 )
-                _wait_for_row_lock(archive_db, event, moving)
-            finally:
-                release.set()
-            result = incoming.result(timeout=10)
-            assert moving.result(timeout=10)
+                try:
+                    barrier.wait(timeout=5)
+                    queue()
+                    moving = _submit(
+                        writer,
+                        postgres.update_checkin,
+                        original["record_id"],
+                        {"event_slug": destination},
+                    )
+                    _wait_for_row_lock(archive_db, moving, incoming)
+                finally:
+                    release.set()
+                result = incoming.result(timeout=10)
+                assert moving.result(timeout=10)
 
     assert result["created"] is False
     assert result["checkin_id"] == original["record_id"]

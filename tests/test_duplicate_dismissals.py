@@ -14,7 +14,7 @@ from psycopg.errors import CheckViolation
 
 from shared import postgres_api as postgres
 from tests.test_dashboard_row_identity import dashboard  # noqa: F401  (pytest fixture)
-from tests.test_lock_coverage import _wait_for_lock
+from tests.test_lock_coverage import _private_lock_connections, _submit, _wait_for_lock
 from tests.test_safe_archiving import archive_db, seed_player  # noqa: F401  (pytest fixture)
 
 # --- storage (real test Postgres) -----------------------------------------------------------
@@ -131,13 +131,15 @@ def test_dismissal_survives_a_merge_and_its_undo(twins, archive_db):  # noqa: F8
 
 
 @pytest.mark.db
-def test_dismiss_waits_for_a_running_merge(twins, archive_db):  # noqa: F811
+def test_dismiss_waits_for_a_running_merge(
+    twins, archive_db, _private_lock_connections
+):  # noqa: F811
     a, b = twins
     with ThreadPoolExecutor(max_workers=1) as workers:
         with archive_db.pool.connection() as holder:
             with holder.transaction():  # stands in for merge_players' exclusive lock
                 holder.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
-                writing = workers.submit(postgres.dismiss_duplicate_pair, a["uuid"], b["uuid"])
+                writing = _submit(workers, postgres.dismiss_duplicate_pair, a["uuid"], b["uuid"])
                 _wait_for_lock(archive_db, "fgt:player-merges", writing, "ShareLock")
                 assert not writing.done()
         # The holder's transaction has ended (lock released) before the executor joins.

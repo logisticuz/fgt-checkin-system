@@ -4,6 +4,7 @@ import importlib
 import logging
 import runpy
 import shutil
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Barrier
@@ -19,6 +20,10 @@ from shared import migrate
 @pytest.fixture(autouse=True)
 def isolated_migration_directory(monkeypatch):
     monkeypatch.delenv("FGT_MIGRATIONS_DIR", raising=False)
+    # Keep the real session lock/unlock path, with a key private to this test run.
+    monkeypatch.setattr(
+        migrate, "LOCK_ID", int.from_bytes(uuid.uuid4().bytes[:8], "big", signed=True)
+    )
 
 
 def write_migration(directory, filename, source):
@@ -302,8 +307,19 @@ def test_failed_file_rolls_back_and_releases_lock(pg_db, tmp_path):
         assert probe.execute(
             "SELECT filename FROM fgt_schema_migrations ORDER BY version"
         ).fetchall() == [("001_prior.sql",)]
-        assert probe.execute("SELECT pg_try_advisory_lock(%s)", (migrate.LOCK_ID,)).fetchone()[0]
-        probe.execute("SELECT pg_advisory_unlock(%s)", (migrate.LOCK_ID,))
+        # Model an unrelated holder on a distinct key private to this test.
+        foreign_key = migrate.LOCK_ID ^ (1 << 32)
+        with pg_db.pool.connection() as foreign, foreign.transaction():
+            foreign.execute("SET LOCAL lock_timeout = '5s'")
+            foreign.execute("SET LOCAL statement_timeout = '5s'")
+            foreign.execute("SELECT pg_advisory_lock(%s)", (foreign_key,))
+            try:
+                assert probe.execute(
+                    "SELECT pg_try_advisory_lock(%s)", (migrate.LOCK_ID,)
+                ).fetchone()[0]
+                probe.execute("SELECT pg_advisory_unlock(%s)", (migrate.LOCK_ID,))
+            finally:
+                foreign.execute("SELECT pg_advisory_unlock(%s)", (foreign_key,))
 
 
 @pytest.mark.parametrize("edited_sql", ["SELECT 2;", "DROP TABLE example;"])
