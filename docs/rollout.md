@@ -186,7 +186,9 @@ Use `sudo bash scripts/rotate_nginx_logs.sh --container <nginx-container>` on th
 It renames the active files, pre-creates replacements without truncation, and sends
 `nginx -s reopen`; it does not restart workers. Pre-creation also handles Docker
 Desktop's host-bind rename behavior. A failed signal retains the archives and active
-files; resolve the reported failure and retry `nginx -s reopen` before pruning anything.
+files and a durable `.reopen.pending` marker. Every later run retries that signal
+before retention or size pruning, even when replacement files are empty. A failed
+retry keeps the marker and skips all archive deletion; resolve the reported failure.
 The script needs Bash and the host's GNU core utilities, not logrotate in the image.
 The log directory must be the same bind source used by the chosen container; pass
 `--log-dir` when it differs from this checkout's `logs/nginx`.

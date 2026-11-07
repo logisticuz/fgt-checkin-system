@@ -27,18 +27,41 @@ lock="$log_dir/.rotate.lock"
 mkdir "$lock" 2>/dev/null || { echo "Rotation already locked: $lock" >&2; exit 1; }
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 renamed=()
-reopened=0
-cleanup() {
-    if ((!reopened)); then
-        for file in "${renamed[@]}"; do
-            if [[ ! -e "$file" && -f "$file.$stamp" ]]; then mv -- "$file.$stamp" "$file"; fi
-        done
-    fi
-    rmdir "$lock"
-}
-trap cleanup EXIT
+pending="$log_dir/.reopen.pending"
+trap 'rmdir "$lock"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+recover_reopen() {
+    [[ ! -L "$pending" ]] || { echo 'Refusing pending-marker symlink' >&2; return 1; }
+    pending_stamp=$(cat "$pending")
+    [[ "$pending_stamp" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo 'Invalid pending marker; no archives pruned' >&2; return 1; }
+    [[ $(docker inspect --format '{{.State.Running}}' "$container") == true ]] || { echo 'nginx is not running; reopen still pending' >&2; return 1; }
+    for name in access error; do
+        file="$log_dir/$name.log"
+        [[ ! -L "$file" ]] || { echo "Refusing log symlink: $file" >&2; return 1; }
+        if [[ -f "$file.$pending_stamp" ]]; then : >> "$file" || return 1; fi
+    done
+    if ! docker exec "$container" nginx -s reopen; then
+        echo 'Reopen failed; pending marker retained and ALL archive pruning disabled' >&2
+        return 1
+    fi
+    for name in access error; do
+        file="$log_dir/$name.log"
+        archive="$file.$pending_stamp"
+        [[ -f "$archive" ]] || continue
+        chmod 640 "$file" "$archive" || return 1
+        # Expiry starts at the first request, rather than a later rename date.
+        first_time=$(awk -F '"' '/^\{"time":"/ {print $4; exit}' "$archive")
+        if [[ -n "$first_time" ]] && date -d "$first_time" >/dev/null 2>&1; then
+            touch -d "$first_time" "$archive" || return 1
+        fi
+    done
+    rm -f -- "$pending"
+}
+
+# Recovery is mandatory even when replacement files are empty/below the threshold.
+if [[ -e "$pending" || -L "$pending" ]]; then recover_reopen || exit 1; fi
 for name in access error; do
     file="$log_dir/$name.log"
     [[ ! -L "$file" ]] || { echo "Refusing log symlink: $file" >&2; exit 1; }
@@ -47,6 +70,11 @@ for name in access error; do
     if ((force || size >= max_bytes)); then
         if ((${#renamed[@]} == 0)); then
             [[ $(docker inspect --format '{{.State.Running}}' "$container") == true ]] || { echo 'nginx container is not running' >&2; exit 1; }
+        fi
+        if ((${#renamed[@]} == 0)); then
+            marker_tmp=$(mktemp "$log_dir/.reopen.pending.XXXXXX")
+            printf '%s\n' "$stamp" > "$marker_tmp"
+            mv -- "$marker_tmp" "$pending"
         fi
         archive="$file.$stamp"
         [[ ! -e "$archive" ]] || { echo "Archive collision: $archive" >&2; exit 1; }
@@ -57,31 +85,9 @@ for name in access error; do
         : >> "$file"
     fi
 done
-if ((${#renamed[@]})); then
-    if ! docker exec "$container" nginx -s reopen; then
-        # Keep both files if the master may already have opened the new one.
-        for file in "${renamed[@]}"; do
-            if [[ ! -e "$file" ]]; then mv -- "$file.$stamp" "$file"; fi
-        done
-        echo 'Reopen failed; retained archives and active files; retry reopen after resolving the failure' >&2
-        exit 1
-    fi
-    reopened=1
-    for file in "${renamed[@]}"; do
-        for ((attempt=0; attempt<50; attempt++)); do
-            [[ -f "$file" ]] && break
-            sleep 0.1
-        done
-        [[ -f "$file" ]] || { echo "nginx did not recreate $file; archives retained" >&2; exit 1; }
-        chmod 640 "$file" "$file.$stamp"
-        # Expire from the first retained request, not from a later rename date.
-        # With weekly rotation this avoids retaining the oldest rows for 21 days.
-        first_time=$(awk -F '"' '/^\{"time":"/ {print $4; exit}' "$file.$stamp")
-        if [[ -n "$first_time" ]] && date -d "$first_time" >/dev/null 2>&1; then
-            touch -d "$first_time" "$file.$stamp"
-        fi
-    done
-fi
+if ((${#renamed[@]})); then recover_reopen || exit 1; fi
+# A pending recovery must never fall through to retention or size pruning.
+[[ ! -e "$pending" ]] || { echo 'Reopen remains pending; pruning disabled' >&2; exit 1; }
 
 # Only regular, explicitly named nginx archives are eligible for deletion.
 archive_files() {

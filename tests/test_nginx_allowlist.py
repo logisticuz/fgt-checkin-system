@@ -690,7 +690,35 @@ def test_failed_reopen_retains_archive_without_overwriting_a_new_active_file(rot
     archives = list(directory.glob("access.log.*"))
     assert len(archives) == 1
     assert archives[0].read_text(encoding="utf-8") == "synthetic retained data"
+    assert (directory / ".reopen.pending").exists()
     assert not (directory / ".rotate.lock").exists()
+
+
+@pytest.mark.parametrize("recovery_succeeds", [False, True])
+def test_next_size_check_recovers_failed_reopen_before_any_pruning(
+    rotation_runner, recovery_succeeds
+):
+    directory, run = rotation_runner
+    original = "synthetic data larger than the archive cap"
+    (directory / "access.log").write_text(original, encoding="utf-8")
+    first = run("--max-archive-bytes", "10", fail=True)
+    assert first.returncode != 0
+    archive = next(directory.glob("access.log.*"))
+    assert archive.read_text(encoding="utf-8") == original
+    assert (directory / "access.log").stat().st_size == 0
+    second = run(
+        "--if-large", "--max-bytes", "100", "--max-archive-bytes", "10", fail=not recovery_succeeds
+    )
+    calls = (directory / "docker-calls").read_text()
+    assert calls.count("exec synthetic-nginx nginx -s reopen") == 2
+    if recovery_succeeds:
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert not (directory / ".reopen.pending").exists()
+        assert not archive.exists()  # Pruning is safe only after the second signal succeeded.
+    else:
+        assert second.returncode != 0
+        assert (directory / ".reopen.pending").exists()
+        assert archive.read_text(encoding="utf-8") == original
 
 
 def test_rotation_prunes_expired_then_oldest_archives_under_size_cap(rotation_runner):
