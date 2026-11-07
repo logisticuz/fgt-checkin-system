@@ -138,7 +138,7 @@ def test_private_routes_never_reach_backend(public, path):
 
 
 def test_template_and_javascript_routes_are_public(public):
-    sources = sorted((ROOT / "backend/templates").glob("*.html")) + sorted(
+    sources = sorted((ROOT / "backend/templates").rglob("*.html")) + sorted(
         (ROOT / "backend/static").rglob("*.js")
     )
     checked = set()
@@ -173,6 +173,7 @@ def test_venue_write_budgets_and_polling_are_separate(public):
     }
     assert zones == {
         "one": "rate=5r/s",
+        "pages": "rate=5r/s",
         "webhook": "rate=10r/m",
         "checkin": "rate=60r/m",
         "assets": "rate=50r/s",
@@ -182,13 +183,14 @@ def test_venue_write_budgets_and_polling_are_separate(public):
         "membership_resend": "rate=5r/m",
         "membership_confirm": "rate=20r/m",
         "polling": "rate=30r/s",
+        **({"dev_admin": "rate=50r/s"} if public[0] == "nginx.dev.conf" else {}),
     }
     assert all(args[0] == "$binary_remote_addr" for args in directives(config, "limit_req_zone"))
     assert directives(block, "limit_req_status") == [["429"]]
     assert directives(location(block, "/api/checkin/orchestrate"), "limit_req") == [
         ["zone=checkin", "burst=40", "nodelay"]
     ]
-    assert directives(block, "limit_req") == [["zone=one", "burst=100", "nodelay"]]
+    assert directives(block, "limit_req") == [["zone=pages", "burst=100", "nodelay"]]
     for path, zone, burst in (
         ("/static/logo.png", "assets", 300),
         ("/api/ebas/register", "webhook", 30),
@@ -222,7 +224,7 @@ def test_venue_write_budgets_and_polling_are_separate(public):
 
 
 def test_long_requests_have_margin_and_all_locations_inherit_headers(public):
-    _, _, block = public
+    _, config, block = public
     for path in (
         "/api/checkin/orchestrate",
         "/api/ebas/register",
@@ -236,11 +238,18 @@ def test_long_requests_have_margin_and_all_locations_inherit_headers(public):
             int(directives(location(block, path), "proxy_read_timeout")[0][0].removesuffix("s"))
             >= 90
         )
-    for words, children in block:
-        if words[0] == "location":
-            assert not directives(
-                children, "add_header"
-            ), "nginx 1.27.5 would discard inherited security headers"
+
+    def check_locations(nodes):
+        for words, children in nodes:
+            if words[0] == "location":
+                assert not directives(
+                    children, "add_header"
+                ), "nginx 1.27.5 would discard inherited security headers/cookies"
+            check_locations(children)
+
+    for words, children in config:
+        if words == ["server"]:
+            check_locations(children)
 
 
 def test_security_headers_and_tls_only_hsts(public):
@@ -459,3 +468,35 @@ def test_legacy_probe_at_one_hundred_per_minute_is_rejected_without_affecting_ga
     assert statuses.count(200) <= 41  # Initial burst plus at most ten new admissions per minute.
     games = [(60, "/api/player/games")] * 30
     assert model_venue_requests(config, block, probe + games)[-30:] == [200] * 30
+
+
+def test_sibling_budgets_stay_separate_from_checkin_pages():
+    config = parse((ROOT / "nginx.conf").read_text(encoding="utf-8"))
+    for hostname in ("meetup.fgctrollhattan.se", "membercard.fgctrollhattan.se"):
+        assert directives(server(config, hostname), "limit_req") == [
+            ["zone=one", "burst=30", "nodelay"]
+        ]
+
+
+def test_dev_dash_requests_have_independent_generous_capacity():
+    config = parse((ROOT / "nginx.dev.conf").read_text(encoding="utf-8"))
+    block = server(config, "localhost")
+    pages = [(0, "/kiosk")] * 200
+    callbacks = [(0, "/_dash-update-component")] * 200
+    assert 429 in model_venue_requests(config, block, pages)
+    assert model_venue_requests(config, block, pages + callbacks)[-200:] == [200] * 200
+    for path in (
+        "/admin/",
+        "/admin/auth/select-event",
+        "/admin/api/events/stream",
+        "/_dash-layout",
+        "/_dash-dependencies",
+        "/_dash-component-suites/dash.js",
+        "/_reload-hash",
+        "/_favicon.ico",
+        "/assets/style.css",
+        "/api/events/stream",
+    ):
+        assert directives(location(block, path), "limit_req") == [
+            ["zone=dev_admin", "burst=300", "nodelay"]
+        ]

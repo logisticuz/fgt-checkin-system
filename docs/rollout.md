@@ -51,20 +51,49 @@ The public allowlist is the union for off/legacy/v2, including legacy
 `/api/ebas/register`; off mode still permits ordinary `/api/checkin/orchestrate`.
 No application env files or provider credentials enter this test.
 
-For an already running gateway, after placing the reviewed template, render the
-configuration and require a successful syntax check **before** reloading workers:
+PROD binds `nginx.conf` as a **single file** at
+`/etc/nginx/templates/default.conf.template`. A Git update may replace the host
+file's inode while the running container keeps the old inode. A successful render,
+syntax test and reload can then silently keep the old public routes. After placing
+the reviewed template, compare these checksums **before rendering**:
 
 ```sh
-docker compose -f docker-compose.prod.yml exec -T nginx sh -ec \
+sha256sum nginx.conf
+docker compose -p fgt-checkin-system -f docker-compose.prod.yml exec -T nginx \
+  sha256sum /etc/nginx/templates/default.conf.template
+```
+
+If they differ, reloading cannot pick up the host file. Preserve the current logs
+first (below), obtain the user's OK for the brief interruption to all four hosts,
+then recreate **only nginx**, keeping the reviewed image, environment and mounts:
+
+```sh
+docker compose -p fgt-checkin-system -f docker-compose.prod.yml up -d --no-deps --force-recreate nginx
+```
+
+Never run `compose down`. Repeat both checksum commands after recreation and require
+an exact match. If the checksums already match, recreation is unnecessary. With a
+matching template, render and require a successful syntax check before reloading:
+
+```sh
+docker compose -p fgt-checkin-system -f docker-compose.prod.yml exec -T nginx sh -ec \
   '/docker-entrypoint.d/20-envsubst-on-templates.sh; nginx -t'
-docker compose -f docker-compose.prod.yml exec -T nginx nginx -s reload
+docker compose -p fgt-checkin-system -f docker-compose.prod.yml exec -T nginx nginx -s reload
 ```
 
 Run the second command only if the first exits 0. Existing workers continue serving
 the previous configuration on a syntax failure. Restore the previous reviewed template,
-render and test it, then reload if rollback is needed. Use the actual deployment's
-Compose project selection; never run `compose down` for a config change. Changes to
-the image, environment or mounts require a separately authorized container replacement.
+repeat the host/container checksum gate, render and test it, then reload if rollback
+is needed. Changes to the image, environment or mounts require separate authorization.
+
+After every authorized recreation or reload, check the actual public hosts. Require
+`https://www.checkin.fgctrollhattan.se/api/checkin/begin` and `/api/notify/update` to
+return 404, `/health` to return 200, and meetup/membercard `/` to return 200. On
+`https://admin.fgctrollhattan.se/auth/select-event`, require 401 without credentials
+and 401 with a deliberately wrong Basic password, with **no** `Set-Cookie:
+fgc_admin_auth` header in either response. Inspect only that header's presence;
+never print or copy real cookies or credentials. Do not declare the allowlist live
+until these checks pass; a successful `nginx -t` alone cannot prove the loaded routes.
 
 Before ANY recreate of nginx/backend on PROD: `docker logs <container> > ~/logs/<container>-<date>.log`
 (the json logs are deleted with the container). Preserve those logs before replacing
@@ -85,9 +114,11 @@ auth or htpasswd mount. PROD Basic/cookie authentication is tested in isolation.
 Venue limits use the connection IP, shared by players behind a NAT. The event has
 15-70 players arriving in waves of 20-30, so size burst capacity for a whole wave:
 
-- HTML pages retain the hotfix's general `one` zone at 5/second, with burst 100 on
-  the public check-in server. Thirty players can request three pages each without
-  consuming a static-asset or write budget. Sibling servers keep their prior burst.
+- HTML pages use their own `pages` zone at 5/second, burst 100. Thirty players can
+  request three pages each without consuming a static-asset, write or sibling budget.
+  Siblings keep the hotfix's `one` zone at 5/second and their prior burst 30.
+- DEV Dash, auth, assets, hot reload and SSE connections use a separate generous
+  `dev_admin` zone at 50/second, burst 300. Public page rushes cannot consume it.
 - Static assets have their own 50/second zone, burst 300. One cold page load needs
   about ten assets: 30 players mean 300 assets plus 30 HTML requests (330 total in
   about 20 seconds). Assets therefore cannot exhaust the HTML bucket.

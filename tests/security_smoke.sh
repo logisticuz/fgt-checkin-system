@@ -48,7 +48,7 @@ request() {
     local expected=$1 host=$2 path=$3 method=${4:-GET}
     shift 4
     if [[ "$target" == dev && "$method" != GET ]]; then echo "DEV smoke forbids writes" >&2; exit 1; fi
-    status=$(curl --noproxy '*' -ksS --connect-timeout 3 --max-time 8 \
+    status=$(curl --noproxy '*' --path-as-is -ksS --connect-timeout 3 --max-time 8 \
         -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' \
         -H "Host: $host" -X "$method" "$@" "$base$path")
     [[ "$status" == "$expected" ]] || {
@@ -59,7 +59,9 @@ request() {
 denied=(/api/checkin/begin /api/integration/result /api/checkin/synthetic/member-status
     /api/notify/update /n8n/webhook /n8n/webhook/callback /docs /redoc /openapi.json
     /api/ebas/validate /api/player/member /api/player/games/extra
-    /api/membership/internal /api/checkin/orchestrate/extra /auth/select-event /unknown)
+    /api/membership/internal /api/checkin/orchestrate/extra /auth/select-event /unknown
+    /static/../api/checkin/begin //api/checkin/begin
+    /api/checkin/x%2Fmember-status/status /auth/select%2Devent /auth/x/../select-event)
 
 if [[ "$target" == dev ]]; then
     base=$dev_base
@@ -91,6 +93,7 @@ backend="$network-backend"
 gateway="$network-nginx"
 meetup="$network-meetup"
 membercard="$network-membercard"
+dev_gateway="$network-dev-nginx"
 # An ordinary private bridge is needed for published loopback ports on Docker Desktop.
 # Every upstream is our stub; no application env files or provider credentials are loaded.
 docker network create "$network" >/dev/null
@@ -141,13 +144,21 @@ start_stub() {
         python:3.11.10-slim-bookworm python -B /upstream.py >/dev/null
 }
 start_stub "$backend" --network-alias backend --network-alias fgt_dashboard
+mkdir -p "$scratch/logs"
 containers+=("$gateway")
 docker run -d --name "$gateway" --network "$network" -p 127.0.0.1:18443:443 \
     -e ADMIN_AUTH_COOKIE_TOKEN=synthetic-cookie \
     --mount "type=bind,src=$(native_path "$root/nginx.conf"),dst=/etc/nginx/templates/default.conf.template,readonly" \
     --mount "type=bind,src=$(native_path "$scratch/certs"),dst=/etc/letsencrypt,readonly" \
     --mount "type=bind,src=$(native_path "$scratch/htpasswd"),dst=/etc/nginx/.htpasswd,readonly" \
+    --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
     nginx:1.27.5 >/dev/null
+containers+=("$dev_gateway")
+docker run -d --name "$dev_gateway" --network "$network" \
+    --mount "type=bind,src=$(native_path "$root/nginx.dev.conf"),dst=/etc/nginx/conf.d/default.conf,readonly" \
+    --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
+    nginx:1.27.5 >/dev/null
+docker exec "$dev_gateway" nginx -t
 for ((attempt=0; attempt<30; attempt++)); do
     if curl --noproxy '*' -ksSf --max-time 2 -H 'Host: www.checkin.fgctrollhattan.se' "$base/health" >/dev/null 2>&1; then break; fi
     sleep 0.2
@@ -174,13 +185,15 @@ request 429 "$public" '/api/membership/synthetic/status?backend_rate=1' GET
 check_header Retry-After 7
 [[ $(tr -d '\r' < "$scratch/headers" | grep -ic '^Retry-After:') == 1 ]]
 request 200 "$public" /api/player/games PATCH -H 'Content-Type: application/json' --data '{}'
-for path in / /auth/select-event /auth/select-event/child /auth/select-event-extra; do
+for path in / /auth/select-event /auth/select-event/child /auth/select-event-extra /auth/select%2Devent /auth/x/../select-event; do
     request 401 "$admin" "$path" GET; security_headers; check_header WWW-Authenticate '.+'
 done
-request 401 "$admin" /auth/select-event GET --user synthetic:wrong-password
-if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
-    echo 'Failed Basic authentication must not issue an admin bypass cookie' >&2; exit 1
-fi
+for path in /auth/select-event /auth/select%2Devent /auth/x/../select-event; do
+    request 401 "$admin" "$path" GET --user synthetic:wrong-password
+    if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+        echo 'Failed Basic authentication must not issue an admin bypass cookie' >&2; exit 1
+    fi
+done
 request 200 "$admin" /auth/select-event GET --user synthetic:synthetic-password
 security_headers
 check_header Set-Cookie 'fgc_admin_auth=synthetic-cookie;.*'
@@ -215,11 +228,15 @@ docker exec "$gateway" nginx -s reload
 sleep 0.5
 request 200 membercard.fgctrollhattan.se / GET
 request 200 "$public" /health GET
+meetup="$network-meetup-restored"
+start_stub "$meetup" --network-alias meetup
+docker exec "$gateway" nginx -s reload
+sleep 0.5
 
 # One client container supplies ONE source IP for all thirty concurrent players.
 # Run inside the disposable Python container so Windows curl process startup cannot
 # turn the intended rush into a slow trickle. All upstreams remain synthetic stubs.
-docker exec -i "$backend" python -B - "$gateway" <<'PY'
+docker exec -i "$backend" python -B - "$gateway" "$dev_gateway" <<'PY'
 import concurrent.futures
 import http.client
 import ssl
@@ -246,8 +263,8 @@ def connect():
     return http.client.HTTPSConnection(host, 443, timeout=8, context=context)
 
 
-def send(connection, path, method="GET", spoof=None):
-    headers = {"Host": public, "Content-Type": "application/json"}
+def send(connection, path, method="GET", spoof=None, host_header=None):
+    headers = {"Host": host_header or public, "Content-Type": "application/json"}
     if spoof is not None:
         headers["X-Forwarded-For"] = f"192.0.2.{spoof}"
     connection.request(method, path, body="{}" if method != "GET" else None, headers=headers)
@@ -309,7 +326,22 @@ try:
     for path in ("/api/membership/start", "/api/membership/verify", "/api/membership/resend", "/member/confirm/synthetic"):
         limited = [send(connection, path, "POST") for _ in range(100)]
         assert 429 in limited and set(limited) <= {200, 429}, (path, Counter(limited))
+    pages = [send(connection, "/kiosk") for _ in range(200)]
+    assert 429 in pages, Counter(pages)
+    for sibling in ("meetup.fgctrollhattan.se", "membercard.fgctrollhattan.se"):
+        assert send(connection, "/", host_header=sibling) == 200, sibling
+    print(f"PASS page isolation: {pages.count(429)} check-in page rejections, both siblings still 200", flush=True)
 finally:
     connection.close()
+
+dev_connection = http.client.HTTPConnection(sys.argv[2], 80, timeout=8)
+try:
+    pages = [send(dev_connection, "/kiosk", host_header="localhost") for _ in range(200)]
+    assert 429 in pages, Counter(pages)
+    callbacks = [send(dev_connection, "/_dash-update-component", "POST", host_header="localhost") for _ in range(200)]
+    assert callbacks == [200] * 200, Counter(callbacks)
+    print(f"PASS DEV Dash isolation: {pages.count(429)} page rejections, 200 callbacks at 200", flush=True)
+finally:
+    dev_connection.close()
 PY
 echo 'PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'
