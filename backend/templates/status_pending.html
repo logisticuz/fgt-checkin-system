@@ -216,6 +216,17 @@
       content: "";
     }
 
+    /* T-034: membership couldn't be verified (eBas outage) – neither ready nor missing. */
+    .unknown-note {
+      margin-top: 0.75rem;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid rgba(255, 152, 0, 0.5);
+      border-radius: 8px;
+      color: #ffb74d;
+      background: rgba(255, 152, 0, 0.1);
+    }
+    .unknown-note[hidden] { display: none; }
+
     /* Events list */
     .events-card {
       background: rgba(88, 170, 255, 0.05);
@@ -447,6 +458,7 @@
           <ul id="missing-list"></ul>
         </div>
       </div>
+      <p id="membership-unknown-note" class="unknown-note" role="status" hidden>? Membership: unknown – a TO will help</p>
     </div>
 
     <!-- Registered events -->
@@ -527,6 +539,9 @@
     const CHECKIN_ID = {{ checkin_id | default("") | tojson }};
     const STATUS_TOKEN = {{ status_token | default("") | tojson }};
     const BY_ID = Boolean(CHECKIN_ID && STATUS_TOKEN);
+    // T-034: eBas couldn't verify membership during check-in. Display only: until the poll
+    // says member=true, show membership as unknown (a TO helps) rather than as missing.
+    const MEMBERSHIP_UNKNOWN = new URLSearchParams(window.location.search).get("membership") === "unknown";
     const REQUIREMENTS = {
       require_startgg: {{ require_startgg | default(true) | tojson }},
       require_membership: {{ require_membership | default(true) | tojson }},
@@ -678,7 +693,10 @@
       if (data?.require_startgg !== false) {
         items.push({ name: "Start.gg", ok: !!data?.startgg });
       }
-      if (data?.require_membership !== false) {
+      const membershipUnknown = MEMBERSHIP_UNKNOWN && data?.require_membership !== false &&
+        data?.member !== true;
+      document.getElementById("membership-unknown-note").hidden = !membershipUnknown;
+      if (data?.require_membership !== false && !membershipUnknown) {
         items.push({ name: "Member", ok: !!data?.member });
       }
       if (data?.require_payment !== false) {

@@ -31,8 +31,10 @@ DEGRADED = {
 def site(browser, app_templates):  # noqa: F811
     contexts, errors = [], []
 
-    def open_site(orchestrate=None, games_reply=(200, {"success": True}), participant=None):
-        calls = {"games": [], "pages": [], "participant": []}
+    def open_site(
+        orchestrate=None, games_reply=(200, {"success": True}), participant=None, id_status=None
+    ):
+        calls = {"games": [], "pages": [], "participant": [], "id_status": []}
         base = {
             "membership_flow": "v2",
             "membership_year": 2026,
@@ -64,7 +66,12 @@ def site(browser, app_templates):  # noqa: F811
                     "/": "checkin.html",
                     "/register": "register.html",
                 }.get(url.path, "status_pending.html")
-                html = app_templates.get_template(name).render(base)
+                context = dict(base)
+                query = dict(parse_qsl(url.query))
+                if url.path.startswith("/status/") and query.get("checkin_id") and query.get("t"):
+                    # Stand-in for the server's verified capability context (T-024/T-032).
+                    context.update(checkin_id=query["checkin_id"], status_token=query["t"])
+                html = app_templates.get_template(name).render(context)
                 return route.fulfill(content_type="text/html", body=html)
             if url.path.startswith("/static/"):
                 file = BACKEND_DIR / url.path.lstrip("/")
@@ -78,6 +85,9 @@ def site(browser, app_templates):  # noqa: F811
                 calls["games"].append(route.request.post_data_json)
                 status, body = games_reply
                 return reply(route, body, status)
+            if url.path.startswith("/api/checkin/") and url.path.endswith("/status"):
+                calls["id_status"].append(route.request.url)
+                return reply(route, id_status or {"found": False, "ready": False})
             if url.path.startswith("/api/participant/"):
                 calls["participant"].append(route.request.url)
                 return reply(route, participant or {"member": False, "startgg": True})
@@ -97,6 +107,18 @@ def site(browser, app_templates):  # noqa: F811
         context.close()
     assert not errors, f"JavaScript errors on the page: {errors}"
 
+
+# The reviewer's exact destination response during an outage.
+ID_STATUS_UNVERIFIED = {
+    "found": True,
+    "ready": False,
+    "member": False,
+    "startgg": True,
+    "payment_ok": True,
+    "missing": ["Membership"],
+    "games": [],
+    "status": "Pending",
+}
 
 REGISTER = "/register?name=Synthetic%20Player&startgg=false&event=synthetic-event&tag=synthetic"
 
@@ -175,7 +197,10 @@ def check_in(page):
     ids=["ebas-outage", "engine-off"],
 )
 def test_degraded_ebas_keeps_membership_unknown_through_the_whole_chain(site, integrations):
-    page, calls = site(orchestrate={**DEGRADED, "integrations": integrations})
+    page, calls = site(
+        orchestrate={**DEGRADED, "integrations": integrations},
+        id_status=ID_STATUS_UNVERIFIED,
+    )
     check_in(page)
     page.wait_for_url("**/register?**")
     params = dict(parse_qsl(urlparse(page.url).query))
@@ -199,7 +224,23 @@ def test_degraded_ebas_keeps_membership_unknown_through_the_whole_chain(site, in
             break
         page.wait_for_timeout(25)
     status_url = next(url for url in calls["pages"] if "/status/" in url)
-    assert dict(parse_qsl(urlparse(status_url).query)) == {"checkin_id": "chk-a", "t": "tok-chk-a"}
+    assert dict(parse_qsl(urlparse(status_url).query)) == {
+        "checkin_id": "chk-a",
+        "t": "tok-chk-a",
+        "membership": "unknown",
+    }
+
+    # Destination: the id poll still reports the stored member=false / "Membership" missing,
+    # but the page shows membership as unknown (TO helps), not as missing.
+    page.wait_for_url("**/status/**")
+    for _ in range(100):
+        if calls["id_status"]:
+            break
+        page.wait_for_timeout(25)
+    page.wait_for_selector("#membership-unknown-note:not([hidden])")
+    assert page.inner_text("#membership-unknown-note") == "? Membership: unknown – a TO will help"
+    assert "Member" not in page.locator("#missing-list").inner_text()
+    assert "Member" not in page.locator("#ready-list").inner_text()
 
 
 def test_a_verified_non_member_still_gets_the_membership_step(site):
@@ -217,3 +258,18 @@ def test_a_verified_non_member_still_gets_the_membership_step(site):
     assert params["ebas"] == "true" and "membership" not in params
     assert page.is_visible("#section-ebas")
     assert page.inner_text("#status-member .status-icon") == "✗"
+
+
+def test_status_page_shows_membership_done_once_the_poll_confirms_it(site):
+    page, _ = site(id_status={**ID_STATUS_UNVERIFIED, "member": True, "missing": []})
+    page.goto(f"/status/{NAME}?checkin_id=chk-a&t=tok-chk-a&membership=unknown")
+    page.wait_for_function("document.getElementById('ready-list').textContent.includes('Member')")
+    assert page.locator("#membership-unknown-note").is_hidden()
+    assert "Member" not in page.locator("#missing-list").inner_text()
+
+
+def test_without_the_unknown_hint_a_non_member_is_shown_as_missing(site):
+    page, _ = site(id_status=ID_STATUS_UNVERIFIED)
+    page.goto(f"/status/{NAME}?checkin_id=chk-a&t=tok-chk-a")
+    page.wait_for_function("document.getElementById('missing-list').textContent.includes('Member')")
+    assert page.locator("#membership-unknown-note").is_hidden()

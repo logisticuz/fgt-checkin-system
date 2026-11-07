@@ -87,3 +87,12 @@ def test_register_saves_games_by_checkin_id_and_renders_messages_as_text(
     helper = html[html.index("function showMessage") :][:400]
     assert "message.textContent = text" in helper and "innerHTML" not in helper
     assert 'localStorage.setItem("selectedGames"' not in html
+
+
+def test_unknown_membership_reaches_the_status_page(app_templates):  # noqa: F811
+    register = render(app_templates, "register.html", membership_flow="v2")
+    helper = register[register.index("function statusQuery()") :][:900]
+    assert 'membershipUnknown ? "membership=unknown" : ""' in helper
+    pending = render(app_templates, "status_pending.html")
+    assert 'get("membership") === "unknown"' in pending
+    assert "? Membership: unknown – a TO will help" in pending

@@ -462,6 +462,8 @@
         KIOSK_MODE ? "kiosk=true" : "",
         checkinId ? `checkin_id=${encodeURIComponent(checkinId)}` : "",
         checkinId && statusToken ? `t=${encodeURIComponent(statusToken)}` : "",
+        // Display-only hint for the status page (the server still decides Ready).
+        membershipUnknown ? "membership=unknown" : "",
       ].filter(Boolean).join("&");
       return qs ? `?${qs}` : "";
     }
