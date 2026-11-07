@@ -62,11 +62,14 @@ def test_membership_mode_route_matrix(
         }
     response = app_client.request(method, route, json=payload if method == "POST" else None)
     is_legacy_endpoint = route == "/api/ebas/register"
-    expected_status = {"legacy": 200, "v2": 410, "off": 503}[flow] if is_legacy_endpoint else 404
+    expected_status = {"legacy": 202, "v2": 410, "off": 503}[flow] if is_legacy_endpoint else 404
     if flow == "v2" and route.startswith("/api/membership/"):
         expected_status = 400
     assert response.status_code == expected_status
     assert len(n8n_stub.calls) == int(is_legacy_endpoint and flow == "legacy")
+    if is_legacy_endpoint and flow == "legacy":
+        assert response.json()["state"] == "outcome_unknown"
+        assert response.json()["retry_allowed"] is False
     if is_legacy_endpoint and flow != "legacy":
         assert response.json() == {
             "error_code": f"flow_{flow}",

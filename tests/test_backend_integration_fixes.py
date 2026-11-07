@@ -147,7 +147,9 @@ def test_provider_error_logs_never_include_body_or_contact_sentinels(
                 "personnummer": "0" * 12,
             },
         )
-        assert response.status_code == 502
+        assert response.status_code == 202
+        assert response.json()["state"] == "outcome_unknown"
+        assert response.json()["retry_allowed"] is False
     assert len(n8n_stub.calls) == 1
     for sentinel in sentinels:
         assert sentinel not in caplog.text and sentinel not in response.text

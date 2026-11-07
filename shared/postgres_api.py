@@ -8,15 +8,15 @@ Connection uses DATABASE_URL from environment, with a connection pool
 managed by psycopg3.
 """
 
-import os
-import logging
-import json
-import uuid
 import hmac
+import json
+import logging
+import os
 import re
-from datetime import datetime, timezone, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +56,7 @@ def _get_pool():
         logger.info("✅ Postgres connection pool initialized")
         _run_migrations(_pool)
         from shared.migrate import apply_if_enabled
+
         try:
             apply_if_enabled(_pool)
         except Exception:
@@ -740,7 +741,10 @@ def update_checkin(
             if provenance not in ("to", "v2", "ebas_check"):
                 raise ValueError("Invalid membership source")
             fields = {**fields, "member_source": provenance}
-        return _update_checkin_with_status(conn, record_id, fields, event_slug=event_slug)
+        result = _update_checkin_with_status(conn, record_id, fields, event_slug=event_slug)
+        if result and "member" in (fields or {}) and fields.get("member_source") == "to":
+            _resolve_legacy_registration_by_to(conn, record_id, event_slug, fields["member"])
+        return result
 
 
 def recompute_active_statuses(event_slug: str) -> int:
@@ -1074,6 +1078,150 @@ def start_integration_attempt(checkin_id: str, sources=("ebas", "startgg")) -> s
     return attempt_id
 
 
+def _lock_legacy_registration_owner(conn, checkin_id):
+    """Event -> merge -> active/archive row -> attempt, including a late completion."""
+    found = conn.execute(
+        "SELECT event_slug FROM active_event_data WHERE record_id = %s", (checkin_id,)
+    ).fetchone()
+    table, key = "active_event_data", "record_id"
+    if found is None:
+        archived = conn.execute(
+            "SELECT event_slug FROM event_archive WHERE source_record_id = %s", (checkin_id,)
+        ).fetchall()
+        if len(archived) != 1:
+            return None
+        found = archived[0]
+        table, key = "event_archive", "source_record_id"
+    slug = found[0]
+    conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt-event:' || %s))", (slug,))
+    conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+    # Table/key are constants selected above, never request-controlled identifiers.
+    row = conn.execute(
+        f"SELECT member, member_source, event_slug, tag FROM {table} "
+        f"WHERE {key} = %s AND event_slug = %s FOR UPDATE",
+        (checkin_id, slug),
+    ).fetchone()
+    return (
+        dict(zip(("member", "member_source", "event_slug", "tag"), row), table=table)
+        if row
+        else None
+    )
+
+
+def _resolve_legacy_registration_by_to(conn, checkin_id, event_slug, member):
+    """Called only after a TO member edit, in that edit's existing transaction."""
+    changed = conn.execute(
+        """UPDATE legacy_register_attempts
+           SET state = 'resolved', resolved_by = 'to', updated_at = clock_timestamp()
+           WHERE checkin_id = %s RETURNING checkin_id""",
+        (checkin_id,),
+    ).fetchone()
+    if changed:
+        _integration_audit(
+            conn,
+            "legacy_registration_resolved",
+            "legacy_register_attempts",
+            event_slug,
+            checkin_id,
+            {"resolved_by": "to", "member": member is True},
+        )
+
+
+def claim_legacy_registration(checkin_id: str, event_slug: str, can_submit: bool = True) -> dict:
+    """Commit a durable, input-free tombstone before any external submission."""
+    with _get_pool().connection() as conn, conn.transaction():
+        owner = _lock_legacy_registration_owner(conn, checkin_id)
+        if (
+            owner is None
+            or owner["table"] != "active_event_data"
+            or owner["event_slug"] != event_slug
+        ):
+            return {"state": "missing"}
+        attempt = conn.execute(
+            "SELECT state, started_at, resolved_by FROM legacy_register_attempts "
+            "WHERE checkin_id = %s FOR UPDATE",
+            (checkin_id,),
+        ).fetchone()
+        if owner["member"] is True:
+            if attempt and not (attempt[0] == "resolved" and attempt[2] == "to"):
+                resolver = "to" if owner["member_source"] == "to" else "reconcile"
+                conn.execute(
+                    """UPDATE legacy_register_attempts SET state = 'accepted',
+                       resolved_by = %s, updated_at = clock_timestamp() WHERE checkin_id = %s""",
+                    (resolver, checkin_id),
+                )
+                if attempt[0] != "accepted" or attempt[2] != resolver:
+                    _integration_audit(
+                        conn,
+                        "legacy_registration_reconciled",
+                        "legacy_register_attempts",
+                        event_slug,
+                        checkin_id,
+                        {"state": "accepted", "resolved_by": resolver},
+                    )
+            return {"state": "accepted", "member": True, "already_member": True}
+        if attempt and (
+            attempt[0] in ("in_flight", "unknown", "accepted")
+            or (attempt[0] == "resolved" and attempt[2] != "to")
+        ):
+            return {"state": attempt[0], "started_at": attempt[1], "member": False}
+        if not can_submit:
+            return {"state": "invalid_input"}
+        started_at = conn.execute(
+            """INSERT INTO legacy_register_attempts (checkin_id, state)
+               VALUES (%s, 'in_flight')
+               ON CONFLICT (checkin_id) DO UPDATE SET state = 'in_flight',
+                   started_at = clock_timestamp(), updated_at = clock_timestamp(), resolved_by = NULL
+               RETURNING started_at""",
+            (checkin_id,),
+        ).fetchone()[0]
+        _integration_audit(
+            conn,
+            "legacy_registration_started",
+            "legacy_register_attempts",
+            event_slug,
+            checkin_id,
+            {"state": "in_flight"},
+        )
+        return {"state": "claimed", "started_at": started_at, "tag": owner["tag"]}
+
+
+def finish_legacy_registration(checkin_id: str, started_at, state: str) -> dict:
+    """Never let an old completion erase a TO resolution or a newer reviewed retry."""
+    if state not in ("accepted", "rejected", "unknown"):
+        raise ValueError("Invalid legacy registration outcome")
+    with _get_pool().connection() as conn, conn.transaction():
+        owner = _lock_legacy_registration_owner(conn, checkin_id)
+        if owner is None:
+            return {"state": "unknown", "member": False}
+        attempt = conn.execute(
+            "SELECT state, started_at FROM legacy_register_attempts WHERE checkin_id = %s FOR UPDATE",
+            (checkin_id,),
+        ).fetchone()
+        if not attempt or attempt[1] != started_at or attempt[0] not in ("in_flight", "unknown"):
+            return {
+                "state": attempt[0] if attempt else "unknown",
+                "member": owner["member"] is True,
+            }
+        resolver = None
+        if owner["member"] is True:
+            state, resolver = "accepted", "reconcile"
+        conn.execute(
+            """UPDATE legacy_register_attempts SET state = %s, resolved_by = %s,
+               updated_at = clock_timestamp() WHERE checkin_id = %s AND started_at = %s""",
+            (state, resolver, checkin_id, started_at),
+        )
+        _integration_audit(
+            conn,
+            "legacy_registration_outcome",
+            "legacy_register_attempts",
+            owner["event_slug"],
+            checkin_id,
+            {"state": state},
+        )
+        return {"state": state, "member": owner["member"] is True}
+
+
 def _membership_provenance(conn, current):
     """Protect known authority and pre-004 true values whose source cannot be reconstructed."""
     if current.get("member_source") is None and current.get("member") is True:
@@ -1235,6 +1383,23 @@ def apply_legacy_member_status(
         )
         if verdict["ok"] and not result:
             raise RuntimeError("Failed to update checkin from legacy member result")
+        if verdict["ok"] and result and result["fields"].get("member") is True:
+            completed = conn.execute(
+                """UPDATE legacy_register_attempts SET state = 'accepted',
+                   resolved_by = 'reconcile', updated_at = clock_timestamp()
+                   WHERE checkin_id = %s AND state IN ('in_flight', 'unknown')
+                   RETURNING checkin_id""",
+                (checkin_id,),
+            ).fetchone()
+            if completed:
+                _integration_audit(
+                    conn,
+                    "legacy_registration_reconciled",
+                    "legacy_register_attempts",
+                    current["event_slug"],
+                    checkin_id,
+                    {"state": "accepted", "resolved_by": "reconcile"},
+                )
         _integration_audit(
             conn,
             "legacy_member_result",
