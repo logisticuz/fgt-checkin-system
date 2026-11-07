@@ -8,7 +8,7 @@ import pytest
 from status_api import capability_token, verify_capability
 
 from shared import membership_flow, postgres_api as postgres
-from tests.fixtures import make_checkin
+from tests.fixtures import SYNTHETIC_PERSONNUMMER, make_checkin
 from tests.test_membership_endpoints import (
     isolated_membership,
     member_client,
@@ -49,7 +49,7 @@ def _legacy(row, token=None, **overrides):
         "status_token": token,
         "tag": row["tag"],
         "slug": row["event_slug"],
-        "personnummer": "000000000000",
+        "personnummer": SYNTHETIC_PERSONNUMMER,
         **overrides,
     }
 

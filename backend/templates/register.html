@@ -792,7 +792,8 @@
           signal: AbortSignal.timeout(90000)
         });
 
-        let data = await response.json();
+        let data = null;
+        try { data = await response.json(); } catch (parseError) { /* Classify using HTTP status. */ }
 
         if (data && data.state === "rejected" && data.retry_allowed === true) {
           processing = false;
@@ -807,6 +808,15 @@
             }
           }
           showRegistrationMessage(details.join(" ") || "Please check your details or ask a TO for help.", "error");
+          return;
+        }
+
+        if (response.status >= 400 || (data && data.error_code)) {
+          btn.textContent = "Ask a TO for help";
+          const message = data && typeof data.user_message === "string" && data.user_message.trim()
+            ? data.user_message.trim().slice(0, 500)
+            : "We couldn't complete this step. Please ask a TO for help.";
+          showRegistrationMessage(message, "error");
           return;
         }
 

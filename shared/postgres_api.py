@@ -1344,7 +1344,7 @@ def apply_legacy_member_status(
     checkin_id: str, member: Any, *, ok=None, state=None, error=None, attempt_id=None, envelope=None
 ):
     """Apply a legacy automated membership callback without erasing TO/v2 authority."""
-    # TODO(T-053): remove this exact-body shim once R sends typed ok/state after stored_member success.
+    # TODO(T-053): Keep until PROD n8n runs the typed R flow (T-053) — remove in a later release, never before the flow import.
     compatibility = (
         isinstance(envelope, dict)
         and set(envelope) == {"member"}

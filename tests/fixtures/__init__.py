@@ -4,6 +4,10 @@ from itertools import count
 
 _players = count(1)
 
+# Skatteverket's published testpersonnummer series; reserved for testing, not a real person.
+# https://skatteverket.entryscape.net/rowstore/dataset/b4de7df7-63c0-4e7e-bb59-1f156a591763/html
+SYNTHETIC_PERSONNUMMER = "189001019802"
+
 
 def make_settings(**overrides):
     settings = {
