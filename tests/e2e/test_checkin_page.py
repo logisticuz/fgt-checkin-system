@@ -18,6 +18,7 @@ NOT_READY = {
     "missing": ["Membership"],
     "slug": "synthetic-event",
     "checkin_id": "chk-a",
+    "status_token": "tok-a",
 }
 
 

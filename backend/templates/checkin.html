@@ -702,6 +702,23 @@
           (data.status_token ? `&t=${encodeURIComponent(String(data.status_token))}` : "")
         : "";
 
+      // T-040 (T-038 contract): a re-check-in that doesn't prove ownership gets no status
+      // token. Without it nothing that needs the token may start (games, membership, status
+      // by id), so stop here, clear the form and send the player to a TO.
+      if (data.ownership === "unverified" || (data.checkin_id && !data.status_token)) {
+        clearFields();
+        CheckinHygiene.purgePersonalStorage();
+        const help = document.createElement("p");
+        help.textContent = "Ask a TO to help you continue";
+        const why = document.createElement("p");
+        why.textContent = "We couldn't confirm that this check-in is yours.";
+        const container = document.getElementById("error-container");
+        container.replaceChildren(help, why);
+        container.classList.add("show");
+        restoreButton();
+        return;
+      }
+
       if (data.ready) {
         // Player is ready - go to success page
         const statusQs = [KIOSK_MODE ? "kiosk=true" : "", checkinIdQ].filter(Boolean).join("&");
