@@ -35,7 +35,7 @@ BASE = {
             "Webhook",
             "eBas Check",
         },
-        "invariant": "d5c4dd21d1fe5d87e8cebc9ca4a05aaac9844d010e6a6a497da5038d06830126",
+        "invariant": "e60c7d35274726d5e99182cdcbbf23f4ca3e418cab2a3adda3e9c08072b38708",
         "callbacks": 4,
     },
     "FGC THN - eBas Membership Check.json": {
@@ -1097,8 +1097,10 @@ def t054_ack(combined, *, ok=True, updated=True):
         {
             "checkin_id": combined["checkin_id"],
             "source": "startgg",
+            "success": True,
             "ok": ok,
             "updated": updated,
+            "state": combined["_startggState"],
         }
     )
 
@@ -1232,7 +1234,8 @@ def test_t054_a_typed_body_without_http_status_is_not_verified(published):
 @pytest.mark.parametrize("published", [False, True])
 @pytest.mark.parametrize("failure", [
     "stale", "not-updated", "http", "transport", "malformed", "error-envelope",
-    "wrong-id", "wrong-source", "unexpected-state", "missing",
+    "error-result", "wrong-id", "wrong-source", "unexpected-state", "missing-state",
+    "null-state", "wrong-verified-state", "missing-success", "null-success", "false-success", "missing",
 ])
 def test_t054_failed_local_ack_is_never_reported_as_completed_verification(
     published, failure
@@ -1262,6 +1265,18 @@ def test_t054_failed_local_ack_is_never_reported_as_completed_verification(
         ack["body"]["source"] = "ebas"
     elif failure == "unexpected-state":
         ack["body"]["state"] = "processing"
+    elif failure == "missing-state":
+        ack["body"].pop("state")
+    elif failure == "null-state":
+        ack["body"]["state"] = None
+    elif failure == "wrong-verified-state":
+        ack["body"]["state"] = "verified_false"
+    elif failure == "missing-success":
+        ack["body"].pop("success")
+    elif failure == "null-success":
+        ack["body"]["success"] = None
+    elif failure == "false-success":
+        ack["body"]["success"] = False
     named = {"Combine Results": combined}
     if failure != "missing":
         named["Report Start.gg Result"] = ack
@@ -1399,3 +1414,59 @@ def test_t054_existing_display_name_metadata_keeps_its_typed_shape(
     result = t054_startgg(published, [{"gamerTag": "Ax", "events": [], "user": user}])
     assert result["state"] == "verified_true" and result["name"] == expected
     assert result["events"] == []
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("acknowledgement,expected_sync", [
+    ("accepted", "ok"), ("stale", "stale"), ("http-error", "failed"),
+])
+def test_t054_skipped_provider_still_checks_every_executed_callback(
+    published, enabled, acknowledgement, expected_sync
+):
+    version = flow_version(ORCHESTRATOR, published)
+    parsed = run_node(
+        version,
+        "Parse Input",
+        named={
+            "Webhook": {
+                "body": {
+                    "checkin_id": "synthetic-checkin",
+                    "attempt_id": "synthetic-attempt",
+                    "tag": "Ax",
+                    **({"slug": "synthetic-event"} if enabled else {}),
+                }
+            }
+        },
+    )
+    assert parsed["_runStartgg"] is enabled
+    combined = run_node(
+        version,
+        "Combine Results",
+        named={
+            "Parse Input": parsed,
+            "Start.gg Check": t054_http(
+                {"ok": False, "state": "skipped", "skipped": True}
+            ),
+        },
+    )
+    assert combined["_startggState"] == "skipped" and combined["_startggData"] == {}
+    ack = t054_ack(combined, ok=False, updated=False)
+    if acknowledgement == "stale":
+        ack["body"]["state"] = "stale_rejected"
+    elif acknowledgement == "http-error":
+        ack["statusCode"] = 500
+    result = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": ack,
+        },
+    )
+    assert result["local_sync"] == expected_sync
+    assert result["local_sync_sources"]["startgg"] == expected_sync
+    assert result["integration_complete"] is False and result["startgg"] is None
+    assert result["results"]["startgg"] == (
+        "skipped" if expected_sync == "ok" else "unavailable"
+    )
