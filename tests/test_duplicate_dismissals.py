@@ -2,6 +2,8 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -12,10 +14,20 @@ from dash._validate import validate_multi_return
 from dash.exceptions import PreventUpdate
 from psycopg.errors import CheckViolation
 
-from shared import postgres_api as postgres
+from scripts import migration_preflight
+from shared import migrate, postgres_api as postgres
 from tests.test_dashboard_row_identity import dashboard  # noqa: F401  (pytest fixture)
-from tests.test_lock_coverage import _private_lock_connections, _submit, _wait_for_lock
-from tests.test_safe_archiving import archive_db, seed_player  # noqa: F401  (pytest fixture)
+from tests.test_lock_coverage import (
+    _observe_commands,
+    _private_lock_connections,
+    _submit,
+    _wait_for_lock,
+)
+from tests.test_safe_archiving import (  # noqa: F401  (pytest fixture)
+    archive_db,
+    seed_player,
+    table_rows,
+)
 
 # --- storage (real test Postgres) -----------------------------------------------------------
 
@@ -115,19 +127,115 @@ def test_dismissing_a_merged_away_player_saves_nothing(twins, archive_db):  # no
 
 
 @pytest.mark.db
-def test_dismissal_survives_a_merge_and_its_undo(twins, archive_db):  # noqa: F811
+def test_merge_cleans_removed_profile_dismissals_and_undo_still_works(twins, archive_db):
     a, b = twins
-    third = seed_player(archive_db, "test-third", name="Synthetic Third", telephone="0000000009")
-    postgres.dismiss_duplicate_pair(a["uuid"], b["uuid"])
+    keep = seed_player(archive_db, "test-keep")
+    low = seed_player(archive_db, "test-low", uuid="00-control")
+    high = seed_player(archive_db, "test-high", uuid="zz-control")
+    for left, right in ((b, low), (b, high), (a, b), (a, low), (keep, high)):
+        assert postgres.dismiss_duplicate_pair(left["uuid"], right["uuid"])
+    retained = {
+        tuple(sorted((a["uuid"], low["uuid"]))),
+        tuple(sorted((keep["uuid"], high["uuid"]))),
+    }
+    before_players = table_rows(archive_db, "players")
 
-    merge = postgres.merge_players(third["uuid"], b["uuid"], reason="synthetic test merge")
-    assert postgres.get_duplicate_dismissals() == []  # b is gone: the pair isn't listed
+    merge = postgres.merge_players(keep["uuid"], b["uuid"], reason="synthetic test merge")
+    rows = table_rows(archive_db, "player_duplicate_dismissals")
+    assert {(row["uuid_a"], row["uuid_b"]) for row in rows} == retained
+    assert all(b["uuid"] not in (row["uuid_a"], row["uuid_b"]) for row in rows)
 
-    history = postgres.get_merge_history(limit=1)
-    postgres.undo_merge(int(history[0]["id"]))
-    assert merge  # merge returned a summary
-    listed = postgres.get_duplicate_dismissals()
-    assert [(d["uuid_a"], d["uuid_b"]) for d in listed] == [tuple(sorted((a["uuid"], b["uuid"])))]
+    result = postgres.undo_merge(merge["merge_id"])
+    assert result["undone"] is True and result["restored_uuid"] == b["uuid"]
+    assert table_rows(archive_db, "players") == before_players
+    # Cleanup deliberately does not restore decisions about the removed profile.
+    assert table_rows(archive_db, "player_duplicate_dismissals") == rows
+
+
+@pytest.mark.db
+def test_merge_failure_rolls_back_dismissal_cleanup(twins, archive_db, _private_lock_connections):
+    a, b = twins
+    assert postgres.dismiss_duplicate_pair(a["uuid"], b["uuid"])
+    before_players = table_rows(archive_db, "players")
+    before_dismissals = table_rows(archive_db, "player_duplicate_dismissals")
+
+    def fail_merge_log(query):
+        if "INSERT INTO merge_log" in query:
+            raise RuntimeError("synthetic merge log failure")
+
+    _observe_commands(archive_db, before=fail_merge_log)
+    with pytest.raises(RuntimeError, match="synthetic merge log failure"):
+        postgres.merge_players(a["uuid"], b["uuid"])
+    assert table_rows(archive_db, "players") == before_players
+    assert table_rows(archive_db, "player_duplicate_dismissals") == before_dismissals
+    assert table_rows(archive_db, "merge_log") == []
+
+
+@pytest.mark.db
+def test_undo_audit_failure_rolls_back_the_dismissal_removal(
+    twins, archive_db, _private_lock_connections
+):
+    a, b = twins
+    assert postgres.dismiss_duplicate_pair(a["uuid"], b["uuid"])
+    before = table_rows(archive_db, "player_duplicate_dismissals")
+
+    def fail_audit(query):
+        if "INSERT INTO audit_log" in query:
+            raise RuntimeError("synthetic audit failure")
+
+    _observe_commands(archive_db, before=fail_audit)
+    with pytest.raises(RuntimeError, match="synthetic audit failure"):
+        postgres.undo_duplicate_dismissal(a["uuid"], b["uuid"], user=USER)
+    assert table_rows(archive_db, "player_duplicate_dismissals") == before
+    assert table_rows(archive_db, "audit_log") == []
+
+
+@pytest.mark.db
+def test_cleanup_migration_is_idempotent_and_runner_preflight_pass(pg_db, monkeypatch, capsys):
+    first = seed_player(pg_db, "test-live-a", uuid="live-a")
+    second = seed_player(pg_db, "test-live-b", uuid="live-b")
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "shared/migrations/008_duplicate_dismissal_cleanup.sql"
+    )
+    source = migration.read_text(encoding="utf-8")
+    migrate.lint(source, migration.name)
+    pairs = [
+        (first["uuid"], second["uuid"]),
+        ("gone-a", first["uuid"]),
+        (second["uuid"], "missing-z"),
+        ("missing-a", "missing-b"),
+    ]
+    with pg_db.pool.connection() as connection:
+        for pair in pairs:
+            connection.execute(
+                "INSERT INTO player_duplicate_dismissals (uuid_a, uuid_b, dismissed_by) "
+                "VALUES (%s, %s, 'Synthetic TO')",
+                tuple(sorted(pair)),
+            )
+        kept = connection.execute(
+            "SELECT * FROM player_duplicate_dismissals WHERE uuid_a = 'live-a' AND uuid_b = 'live-b'"
+        ).fetchall()
+        assert connection.execute(source, prepare=False).rowcount == 3
+        assert connection.execute(source, prepare=False).rowcount == 0
+        assert connection.execute("SELECT * FROM player_duplicate_dismissals").fetchall() == kept
+
+    assert migration.name in migrate.apply(pg_db.pool)
+    assert migrate.apply(pg_db.pool) == []
+    with pg_db.pool.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM fgt_schema_migrations WHERE version = '008'"
+            ).fetchone()[0]
+            == 1
+        )
+        monkeypatch.setattr(
+            migration_preflight.psycopg, "connect", lambda *args, **kwargs: nullcontext(connection)
+        )
+        assert migration_preflight.main([]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["read_only"] is True and report["ready_to_deploy"] is True
+    assert report["pending_migrations"] == report["required_unapplied"] == []
 
 
 @pytest.mark.db
@@ -399,10 +507,48 @@ def test_scan_cards_are_addressable_and_end_with_the_dismissed_section(dup):
 def test_undo_removes_the_dismissal_and_rebuilds_the_list(dup):
     click({"type": "btn-undo-dismiss", "a": "uuid-a", "b": "uuid-b"})
     feedback, cards, title = dup.callbacks["undo_not_same"]([1])
-    dup.storage.undo_duplicate_dismissal.assert_called_once_with("uuid-a", "uuid-b")
+    dup.storage.undo_duplicate_dismissal.assert_called_once_with(
+        "uuid-a", "uuid-b", user={"user_id": "42", "user_name": "Synthetic TO"}
+    )
     assert CARD_AB in ids_in(cards) and title == "Potential duplicates (2)"
-    assert dup.storage.log_action.call_args.args[1] == "duplicate_dismissal_undone"
+    dup.storage.log_action.assert_not_called()  # storage writes the single transactional audit
     assert "Undone" in text_of(feedback)
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "actor_name, expected_name",
+    [("Synthetic TO", "Synthetic TO"), ("to@example.invalid", "user-42")],
+)
+def test_undo_callback_writes_one_real_audit_without_contacts(
+    dup, archive_db, monkeypatch, actor_name, expected_name
+):
+    a = seed_player(archive_db, "test-undo-audit-a")
+    b = seed_player(archive_db, "test-undo-audit-b")
+    assert postgres.dismiss_duplicate_pair(a["uuid"], b["uuid"])
+    monkeypatch.setattr(dup.storage, "undo_duplicate_dismissal", postgres.undo_duplicate_dismissal)
+    module = dup.callbacks["undo_not_same"].__globals__
+    monkeypatch.setitem(module, "current_user", lambda: {**USER, "user_name": actor_name})
+    click({"type": "btn-undo-dismiss", "a": b["uuid"], "b": a["uuid"]})
+    feedback, _, _ = dup.callbacks["undo_not_same"]([1])
+    assert "Undone" in text_of(feedback)
+    rows = table_rows(archive_db, "audit_log")
+    assert len(rows) == 1
+    audit = rows[0]
+    assert (audit["action"], audit["user_id"], audit["user_name"]) == (
+        "duplicate_dismissal_undone",
+        "42",
+        expected_name,
+    )
+    assert audit["user_email"] is None
+    assert audit["target_table"] == "players"
+    assert audit["target_player"] == min(a["uuid"], b["uuid"])
+    assert json.loads(audit["details"]) == {"pair": sorted((a["uuid"], b["uuid"]))}
+    assert USER["email"] not in json.dumps(audit, default=str)
+    assert table_rows(archive_db, "player_duplicate_dismissals") == []
+    dup.storage.log_action.assert_not_called()
+    assert postgres.undo_duplicate_dismissal(a["uuid"], b["uuid"], user=USER) is False
+    assert table_rows(archive_db, "audit_log") == rows
 
 
 def test_merge_of_a_dismissed_pair_from_a_stale_list_is_refused(dup):

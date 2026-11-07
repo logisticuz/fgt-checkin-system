@@ -4406,9 +4406,16 @@ def dismiss_duplicate_pair(uuid_a: str, uuid_b: str, dismissed_by: str = "") -> 
     return True
 
 
-def undo_duplicate_dismissal(uuid_a: str, uuid_b: str) -> bool:
-    """Remove a dismissal so the pair shows up in the next scan. True if a row was removed."""
+def undo_duplicate_dismissal(
+    uuid_a: str, uuid_b: str, *, user: Optional[Dict[str, Any]] = None
+) -> bool:
+    """Remove and audit a dismissal atomically. False when no row was removed."""
     a, b = ordered_duplicate_pair(uuid_a, uuid_b)
+    actor = user or {}
+    actor_id = str(actor.get("user_id") or "")
+    actor_name = str(actor.get("user_name") or "").strip()
+    if not actor_name or "@" in actor_name:
+        actor_name = f"user-{actor_id}" if actor_id else "system"
     with _get_pool().connection() as conn:
         with conn.transaction():
             with conn.cursor() as cur:
@@ -4417,7 +4424,24 @@ def undo_duplicate_dismissal(uuid_a: str, uuid_b: str) -> bool:
                     "DELETE FROM player_duplicate_dismissals WHERE uuid_a = %s AND uuid_b = %s",
                     (a, b),
                 )
-                return cur.rowcount > 0
+                if not cur.rowcount:
+                    return False
+                # Record only the trusted actor's id/name and the two profile identifiers.
+                cur.execute(
+                    "INSERT INTO audit_log "
+                    "(user_id, user_name, action, target_table, target_player, reason, details) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        actor_id,
+                        actor_name,
+                        "duplicate_dismissal_undone",
+                        "players",
+                        a,
+                        "TO undid 'not same player'",
+                        json.dumps({"pair": [a, b]}),
+                    ),
+                )
+                return True
 
 
 def is_duplicate_pair_dismissed(uuid_a: str, uuid_b: str) -> bool:
@@ -4717,6 +4741,13 @@ def merge_players(
                         keep_uuid,
                     ),
                 )
+
+                # A "not same" decision belongs to these profiles, not a different survivor.
+                if _dismissals_table_exists(cur):
+                    cur.execute(
+                        "DELETE FROM player_duplicate_dismissals WHERE uuid_a = %s OR uuid_b = %s",
+                        (remove_uuid, remove_uuid),
+                    )
 
                 # 6. Delete the removed player
                 cur.execute("DELETE FROM players WHERE uuid = %s", (remove_uuid,))

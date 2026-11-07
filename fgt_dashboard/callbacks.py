@@ -4978,7 +4978,12 @@ def register_callbacks(app):
             undo_fn = getattr(storage_api, "undo_duplicate_dismissal", None)
             if not undo_fn:
                 raise RuntimeError("dismissals are not available on this storage backend")
-            removed = undo_fn(a_uuid, b_uuid)
+            audit_user = _dashboard_actor()[0]
+            undo_fn(
+                a_uuid,
+                b_uuid,
+                user={key: audit_user[key] for key in ("user_id", "user_name")},
+            )
         except Exception:
             logger.exception("Undoing duplicate dismissal failed")
             feedback = html.Div(
@@ -4987,20 +4992,6 @@ def register_callbacks(app):
             )
             return feedback, no_update, no_update
 
-        if removed:
-            try:
-                log_fn = getattr(storage_api, "log_action", None)
-                if log_fn:
-                    log_fn(
-                        _dashboard_actor()[0],
-                        "duplicate_dismissal_undone",
-                        "players",
-                        target_player=a_uuid,
-                        details=json.dumps({"pair": [a_uuid, b_uuid]}),
-                        reason="TO undid 'not same player'",
-                    )
-            except Exception:
-                pass
         feedback = html.Div(
             "Undone: the pair can show up as a possible duplicate again.",
             style={"color": COLORS["text_secondary"], "fontSize": "0.8rem"},
