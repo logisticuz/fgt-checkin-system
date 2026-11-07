@@ -117,6 +117,7 @@ class Stub(BaseHTTPRequestHandler):
         pass
 
 
+ThreadingHTTPServer.request_queue_size = 256
 for port in (8000, 8002, 8050):
     threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", port), Stub).serve_forever, daemon=True).start()
 threading.Event().wait()
@@ -215,28 +216,98 @@ sleep 0.5
 request 200 membercard.fgctrollhattan.se / GET
 request 200 "$public" /health GET
 
-# Flood only disposable stubs. Spoofed forwarding headers cannot evade the venue key.
-rejected=0
-for ((attempt=0; attempt<45; attempt++)); do
-    status=$(curl --noproxy '*' -ksS --max-time 5 -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' \
-        -H "Host: $public" -H "X-Forwarded-For: 192.0.2.$attempt" -X POST "$base/api/checkin/orchestrate")
-    if [[ "$status" == 429 ]]; then
-        rejected=$((rejected+1)); check_header Retry-After 60; security_headers
-    elif [[ "$status" != 200 ]]; then echo "Unexpected flood status: $status" >&2; exit 1; fi
-done
-((rejected > 0)) || { echo 'Check-in flood was not rate limited' >&2; exit 1; }
-request 200 "$public" /api/membership/start POST
-request 200 "$public" /api/membership/verify POST
-request 200 "$public" /api/membership/resend POST
-for ((attempt=0; attempt<50; attempt++)); do request 200 "$public" /api/membership/synthetic/status GET; done
-for path in /api/membership/start /api/membership/verify /api/membership/resend /member/confirm/synthetic /api/ebas/register; do
-    limited=0
-    for ((attempt=0; attempt<28; attempt++)); do
-        status=$(curl --noproxy '*' -ksS --max-time 5 -D "$(native_path "$scratch/headers")" -o "$(native_path "$scratch/body")" -w '%{http_code}' \
-            -H "Host: $public" -X POST "$base$path")
-        if [[ "$status" == 429 ]]; then limited=$((limited+1)); check_header Retry-After 60; security_headers
-        elif [[ "$status" != 200 ]]; then echo "Unexpected $path flood status: $status" >&2; exit 1; fi
-    done
-    ((limited > 0)) || { echo "$path flood was not rate limited" >&2; exit 1; }
-done
-echo "PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, 429/Retry-After ($rejected check-in rejections)"
+# One client container supplies ONE source IP for all thirty concurrent players.
+# Run inside the disposable Python container so Windows curl process startup cannot
+# turn the intended rush into a slow trickle. All upstreams remain synthetic stubs.
+docker exec -i "$backend" python -B - "$gateway" <<'PY'
+import concurrent.futures
+import http.client
+import ssl
+import sys
+import threading
+import time
+from collections import Counter
+
+host = sys.argv[1]
+context = ssl._create_unverified_context()
+public = "www.checkin.fgctrollhattan.se"
+barrier = threading.Barrier(30)
+started = time.monotonic()
+assets = [
+    "/static/logo.png", "/static/logo-transp.png", "/static/logo-cropped.png",
+    "/static/swish-QR.png", "/static/js/validation.js",
+    "/static/js/checkin_hygiene.js", "/static/js/membership_v2.js",
+    "/static/logo.png?v=2", "/static/js/validation.js?v=2",
+    "/static/js/checkin_hygiene.js?v=2",
+]
+
+
+def connect():
+    return http.client.HTTPSConnection(host, 443, timeout=8, context=context)
+
+
+def send(connection, path, method="GET", spoof=None):
+    headers = {"Host": public, "Content-Type": "application/json"}
+    if spoof is not None:
+        headers["X-Forwarded-For"] = f"192.0.2.{spoof}"
+    connection.request(method, path, body="{}" if method != "GET" else None, headers=headers)
+    response = connection.getresponse()
+    response.read()
+    if response.status == 429:
+        assert response.getheader("Retry-After") == "60"
+        assert response.getheader("X-Content-Type-Options") == "nosniff"
+        assert response.getheader("X-Frame-Options") == "DENY"
+    return response.status
+
+
+def player(index):
+    connection = connect()
+    statuses = []
+    barrier.wait(timeout=8)
+    try:
+        statuses.append(send(connection, "/kiosk"))
+        statuses.extend(send(connection, path) for path in assets)
+        statuses.append(send(connection, "/api/checkin/orchestrate", "POST"))
+        statuses.append(send(connection, "/register"))
+        statuses.append(send(connection, "/api/player/games", "PATCH"))
+        statuses.append(send(connection, f"/status/Synthetic{index}"))
+        for tick in (0, 10, 20):
+            time.sleep(max(0, started + tick - time.monotonic()))
+            for path in (f"/api/checkin/id{index}/status", f"/api/participant/Synthetic{index}/status", f"/api/membership/id{index}/status"):
+                statuses.append(send(connection, path))
+        return statuses
+    finally:
+        connection.close()
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+    results = list(executor.map(player, range(30)))
+statuses = [status for result in results for status in result]
+elapsed = time.monotonic() - started
+assert len(statuses) == 720, len(statuses)
+assert set(statuses) == {200}, Counter(statuses)
+assert elapsed < 30, elapsed
+print(f"PASS venue rush: 30 players, ONE source IP, 720 requests in {elapsed:.2f}s, ZERO 429s", flush=True)
+
+connection = connect()
+try:
+    probe_started = time.monotonic()
+    legacy = [send(connection, "/api/ebas/register", "POST") for _ in range(100)]
+    probe_elapsed = time.monotonic() - probe_started
+    assert probe_elapsed < 60
+    assert set(legacy) == {200, 429}, Counter(legacy)
+    # Exhausted eBas quota cannot starve a second group of thirty game saves.
+    assert [send(connection, "/api/player/games", "PATCH") for _ in range(30)] == [200] * 30
+    print(f"PASS probe: 100 legacy registrations in {probe_elapsed:.2f}s, {legacy.count(429)} rejections; games quota independent", flush=True)
+    checkin = [send(connection, "/api/checkin/orchestrate", "POST", spoof=index) for index in range(100)]
+    assert 429 in checkin, Counter(checkin)
+    for path in ("/api/membership/start", "/api/membership/verify", "/api/membership/resend"):
+        assert send(connection, path, "POST") == 200, path
+    assert [send(connection, "/api/membership/synthetic/status") for _ in range(30)] == [200] * 30
+    for path in ("/api/membership/start", "/api/membership/verify", "/api/membership/resend", "/member/confirm/synthetic"):
+        limited = [send(connection, path, "POST") for _ in range(100)]
+        assert 429 in limited and set(limited) <= {200, 429}, (path, Counter(limited))
+finally:
+    connection.close()
+PY
+echo 'PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'

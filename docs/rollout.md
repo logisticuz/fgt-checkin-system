@@ -66,6 +66,10 @@ render and test it, then reload if rollback is needed. Use the actual deployment
 Compose project selection; never run `compose down` for a config change. Changes to
 the image, environment or mounts require a separately authorized container replacement.
 
+Before ANY recreate of nginx/backend on PROD: `docker logs <container> > ~/logs/<container>-<date>.log`
+(the json logs are deleted with the container). Preserve those logs before replacing
+either container; persistent access logging is a separate follow-up task.
+
 For DEV, `nginx.dev.conf` is mounted as the already rendered config: run `nginx -t`
 then `nginx -s reload` in that gateway. `bash tests/security_smoke.sh --target dev`
 uses only GETs on 127.0.0.1:8088. The conductor's shadow gateway is supported with
@@ -78,13 +82,34 @@ check-in host denies those paths. Do not copy DEV exceptions to PROD.
 DEV event selection keeps its application OAuth gate and requires no nginx Basic
 auth or htpasswd mount. PROD Basic/cookie authentication is tested in isolation.
 
-Venue limits use the connection IP, shared by players behind a NAT. Check-in allows
-60/minute with burst 20; membership start 10/minute, verify/confirm 20/minute (burst 20),
-resend 5/minute (burst 5), and legacy eBas/game writes 10/minute (burst 20). Polling has
-its own 30/second budget (burst 120). The hotfix's general `one` zone stays 5/second.
-nginx rejects excess public requests with 429 and `Retry-After: 60`; backend-provided
-Retry-After headers pass through. Long check-in/membership calls have a 90-second read
-timeout. Confirm these venue budgets against observed event traffic before tightening.
+Venue limits use the connection IP, shared by players behind a NAT. The event has
+15-70 players arriving in waves of 20-30, so size burst capacity for a whole wave:
+
+- HTML pages retain the hotfix's general `one` zone at 5/second, with burst 100 on
+  the public check-in server. Thirty players can request three pages each without
+  consuming a static-asset or write budget. Sibling servers keep their prior burst.
+- Static assets have their own 50/second zone, burst 300. One cold page load needs
+  about ten assets: 30 players mean 300 assets plus 30 HTML requests (330 total in
+  about 20 seconds). Assets therefore cannot exhaust the HTML bucket.
+- Orchestrate allows 60/minute with burst 40. Game saves have a separate zone at
+  60/minute, burst 40: a legacy-registration probe cannot consume their quota.
+- Legacy eBas registration stays strict at 10/minute, burst 30. It accommodates
+  a wave of 30, while 100 registration attempts across a minute exceed the budget.
+- Membership start stays 10/minute, verify/confirm 20/minute (burst 20), and resend
+  5/minute (burst 5). Polling keeps its own 30/second budget, burst 120; 30 players
+  polling one URL every ten seconds need about 3/second (three URLs need 9/second).
+
+`tests/test_nginx_allowlist.py` models one source IP doing 720 requests: three HTML
+pages, ten assets, orchestrate, a game save and three polling URLs at 0/10/20 seconds
+for each of 30 players. It requires zero rejections. A second model spaces 100 legacy
+registrations evenly across 60 seconds and requires rejections while game saves work.
+The isolated smoke also runs the 30 players concurrently from one container/IP,
+requires all 720 responses to be 200 within 30 seconds, then probes legacy registration
+and verifies independent game capacity. This proves gateway admission against stubs;
+it does not measure backend/provider throughput or authorize requests to live providers.
+nginx excess public requests return 429 and `Retry-After: 60`; backend Retry-After
+headers pass through. Long check-in/membership calls have a 90-second read timeout.
+Confirm steady-state budgets against observed venue traffic before tightening.
 
 Check security headers on 200, 401, 404 and 429 responses. HSTS is TLS-only and CSP
 starts in Report-Only mode (browser-console observation, no report collector). Review
