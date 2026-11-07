@@ -498,7 +498,26 @@ class EbasClient:
 class StubEbasTransport(httpx.BaseTransport):
     """Deterministic local eBas responses; never retain or forward request data."""
 
+    def __init__(self):
+        self._scenario = None
+        scenario_path = os.getenv("EBAS_STUB_SCENARIO", "").strip()
+        if scenario_path:
+            if _production_environment():
+                raise ValueError("eBas scenario stub is unavailable in production")
+            from shared.ebas_stub_scenario import load_scenario
+
+            self._scenario = load_scenario(scenario_path)
+
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if self._scenario is not None:
+            if _production_environment():
+                return httpx.Response(
+                    503,
+                    json={"error": "stub_transport"},
+                    request=request,
+                    extensions={"ebas_stub_unavailable": True},
+                )
+            return self._scenario.handle_request(request)
         action = request.url.path.rsplit("/", 1)[-1]
         if action == "validate_members.json":
             data = {"response": {"request_result": "success", "member_errors": []}}
