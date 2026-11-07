@@ -120,9 +120,8 @@ async def admin_recheck_startgg(request: Request):
     n8n_headers = {"Content-Type": "application/json"}
     if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
         import base64
-        b64 = base64.b64encode(
-            f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
-        ).decode()
+
+        b64 = base64.b64encode(f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()).decode()
         n8n_headers["authorization"] = f"Basic {b64}"
 
     try:
@@ -136,36 +135,26 @@ async def admin_recheck_startgg(request: Request):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"n8n Start.gg check failed: {e}")
 
-    if n8n_resp.status_code >= 400:
+    if not 200 <= n8n_resp.status_code < 300:
         raise HTTPException(
             status_code=502,
-            detail=f"n8n returned {n8n_resp.status_code}: {n8n_resp.text[:200]}",
+            detail="Start.gg verification unavailable",
         )
 
     try:
         n8n_data = n8n_resp.json()
     except ValueError:
         raise HTTPException(status_code=502, detail="Start.gg verification unavailable")
-    if (
-        not isinstance(n8n_data, dict)
-        or n8n_data.get("ok", True) is not True
-        or n8n_data.get("state") in ("unavailable", "skipped")
-        or n8n_data.get("error")
-        or not isinstance(n8n_data.get("isRegistered"), bool)
-    ):
+    verdict = storage_api.validate_provider_verdict("startgg", n8n_data)
+    if not verdict["ok"]:
         raise HTTPException(status_code=502, detail="Start.gg verification unavailable")
     # A successful negative lookup is a verified result, independent of registration.
-    is_registered = n8n_data["isRegistered"]
-    result_state = "verified_true" if is_registered else "verified_false"
-    events = n8n_data.get("events") or []
-    startgg_email = n8n_data.get("email") or None
+    result_data = verdict["data"]
+    result_state = verdict["state"]
 
     # 3. Apply result via existing integration mechanism
     apply_fn = getattr(storage_api, "apply_integration_result", None)
     if apply_fn:
-        result_data = {"registered": is_registered, "events": events}
-        if startgg_email:
-            result_data["email"] = startgg_email
         applied = apply_fn(
             checkin_id=record_id,
             source="startgg",
@@ -174,6 +163,7 @@ async def admin_recheck_startgg(request: Request):
             state=result_state,
             attempt_id=attempt_id,
             recompute_payment_expected=True,
+            envelope=n8n_data,
         )
 
         if applied.get("state") == "stale_rejected":
@@ -188,15 +178,18 @@ async def admin_recheck_startgg(request: Request):
     is_registered = bool(uf.get("startgg"))
 
     # 6. Broadcast SSE
-    await sse_manager.broadcast("update", {
-        "type": "recheck_startgg",
-        "record_id": record_id,
-        "name": player_name,
-        "tag": tag,
-        "startgg": is_registered,
-        "status": final_status,
-        "timestamp": time.time(),
-    })
+    await sse_manager.broadcast(
+        "update",
+        {
+            "type": "recheck_startgg",
+            "record_id": record_id,
+            "name": player_name,
+            "tag": tag,
+            "startgg": is_registered,
+            "status": final_status,
+            "timestamp": time.time(),
+        },
+    )
 
     return {
         "success": True,
@@ -243,9 +236,8 @@ async def admin_bulk_recheck_startgg():
     n8n_headers = {"Content-Type": "application/json"}
     if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
         import base64
-        b64 = base64.b64encode(
-            f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
-        ).decode()
+
+        b64 = base64.b64encode(f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()).decode()
         n8n_headers["authorization"] = f"Basic {b64}"
 
     total = 0
@@ -273,28 +265,18 @@ async def admin_bulk_recheck_startgg():
                 timeout=httpx.Timeout(15.0, connect=5.0),
             )
 
-            if n8n_resp.status_code >= 400:
+            if not 200 <= n8n_resp.status_code < 300:
                 errors.append(f"{tag}: n8n {n8n_resp.status_code}")
                 continue
 
             n8n_data = n8n_resp.json()
-            if (
-                not isinstance(n8n_data, dict)
-                or n8n_data.get("ok", True) is not True
-                or n8n_data.get("state") in ("unavailable", "skipped")
-                or n8n_data.get("error")
-                or not isinstance(n8n_data.get("isRegistered"), bool)
-            ):
+            verdict = storage_api.validate_provider_verdict("startgg", n8n_data)
+            if not verdict["ok"]:
                 errors.append(f"{tag}: Start.gg verification unavailable")
                 continue
-            is_registered = n8n_data["isRegistered"]
-            result_state = "verified_true" if is_registered else "verified_false"
-            events = n8n_data.get("events") or []
-            startgg_email = n8n_data.get("email") or None
-
-            result_data = {"registered": is_registered, "events": events}
-            if startgg_email:
-                result_data["email"] = startgg_email
+            result_data = verdict["data"]
+            result_state = verdict["state"]
+            if result_data.get("email"):
                 emails_found += 1
 
             applied = apply_fn(
@@ -305,6 +287,7 @@ async def admin_bulk_recheck_startgg():
                 state=result_state,
                 attempt_id=attempt_id,
                 recompute_payment_expected=True,
+                envelope=n8n_data,
             )
 
             if applied.get("state") == "stale_rejected":
@@ -331,13 +314,16 @@ async def admin_bulk_recheck_startgg():
         await asyncio.sleep(0.3)
 
     # Broadcast single SSE update when done
-    await sse_manager.broadcast("update", {
-        "type": "bulk_recheck_startgg",
-        "total": total,
-        "checked": checked,
-        "emails_found": emails_found,
-        "timestamp": time.time(),
-    })
+    await sse_manager.broadcast(
+        "update",
+        {
+            "type": "bulk_recheck_startgg",
+            "total": total,
+            "checked": checked,
+            "emails_found": emails_found,
+            "timestamp": time.time(),
+        },
+    )
 
     return {
         "success": True,

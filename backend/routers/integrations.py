@@ -82,21 +82,36 @@ async def integration_result_endpoint(request: Request):
     """Apply integration result from n8n/external checks to a checkin."""
     apply_fn = getattr(storage_api, "apply_integration_result", None)
     if not apply_fn:
-        raise HTTPException(status_code=501, detail="integration_result is not available for current backend")
+        raise HTTPException(
+            status_code=501, detail="integration_result is not available for current backend"
+        )
 
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_json"}
+        )
 
-    checkin_id = (body.get("checkin_id") or "").strip()
-    source = (body.get("source") or "").strip()
-    if not checkin_id or not source:
-        raise HTTPException(status_code=400, detail="checkin_id and source are required")
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_payload"}
+        )
+    checkin_id, source = body.get("checkin_id"), body.get("source")
+    if (
+        not isinstance(checkin_id, str)
+        or not checkin_id.strip()
+        or not isinstance(source, str)
+        or not source.strip()
+    ):
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_target"}
+        )
+    checkin_id, source = checkin_id.strip(), source.strip()
 
-    ok = bool(body.get("ok", False))
-    data = body.get("data") if isinstance(body.get("data"), dict) else {}
-    error = body.get("error") if isinstance(body.get("error"), dict) else None
+    ok = body.get("ok")
+    data = body.get("data")
+    error = body.get("error")
     fetched_at = body.get("fetched_at")
 
     try:
@@ -109,14 +124,23 @@ async def integration_result_endpoint(request: Request):
             fetched_at=fetched_at,
             state=body.get("state"),
             attempt_id=body.get("attempt_id"),
+            envelope=body,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception(f"integration result failed for '{checkin_id}': {e}")
-        raise HTTPException(status_code=500, detail=f"integration result failed: {e}")
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_target"}
+        )
+    except Exception:
+        logger.error("Integration result persistence failed")
+        raise HTTPException(
+            status_code=500, detail={"state": "unavailable", "error_code": "storage_update_failed"}
+        )
 
-    return {"success": True, **result}
+    if result.pop("verdict_valid", True) is False:
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": result["error_code"]}
+        )
+    return {"success": result.get("updated") is True, **result}
 
 
 @router.post(
@@ -129,16 +153,42 @@ async def checkin_member_status_endpoint(checkin_id: str, request: Request):
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_json"}
+        )
 
-    member = bool(body.get("member", False))
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": "invalid_payload"}
+        )
 
-    result = storage_api.apply_legacy_member_status(checkin_id, member)
+    result = storage_api.apply_legacy_member_status(
+        checkin_id,
+        body.get("member"),
+        ok=body.get("ok"),
+        state=body.get("state"),
+        error=body.get("error"),
+        attempt_id=body.get("attempt_id"),
+        envelope=body,
+    )
     if not result:
         raise HTTPException(status_code=500, detail="Storage update failed")
+    if not result["verdict_valid"]:
+        raise HTTPException(
+            status_code=400, detail={"state": "unavailable", "error_code": result["error_code"]}
+        )
+    if not result["ok"]:
+        return {
+            "success": False,
+            "checkin_id": checkin_id,
+            "ok": False,
+            "updated": False,
+            "state": result["state"],
+            "error_code": result["error_code"],
+        }
 
     return {
-        "success": True,
+        "success": result["updated"] is True,
         "checkin_id": checkin_id,
         "member": result["fields"].get("member", False),
         "status": result["fields"]["status"],

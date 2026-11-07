@@ -55,10 +55,11 @@ def test_bulk_recheck_does_not_price_from_a_rejected_stale_provider_result(
             {"registered": True, "events": ["New game A", "New game B"]},
             attempt_id=newer,
             recompute_payment_expected=True,
+            state="verified_true",
         )["updated"]
 
     n8n_stub.on_call = newer_result_during_provider_call
-    n8n_stub.response = {"ok": True, "isRegistered": False, "events": []}
+    n8n_stub.response = {"ok": True, "state": "verified_false", "isRegistered": False, "events": []}
     response = app_client.post("/api/admin/bulk-recheck-startgg")
     assert response.status_code == 200 and response.json()["checked"] == 0
     stored = pg_db.checkins()[0]

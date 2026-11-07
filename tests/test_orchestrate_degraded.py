@@ -58,6 +58,7 @@ def _callback_results(n8n_stub, backend_app, results, python_check):
                         "attempt_id": n8n_stub.calls[-1]["json"].get("attempt_id"),
                         "source": source,
                         "ok": True,
+                        "state": "verified_true" if value else "verified_false",
                         "data": {key: value},
                     },
                 )

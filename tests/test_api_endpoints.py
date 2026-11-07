@@ -46,6 +46,7 @@ def test_integration_result_updates_the_existing_row(app_client, pg_db):
             "checkin_id": checkin["checkin_id"],
             "source": "ebas",
             "ok": True,
+            "state": "verified_true",
             "data": {"member": True},
         },
     )
@@ -65,6 +66,7 @@ def test_integration_callback_recomputes_stored_status(app_client, pg_db):
             "checkin_id": row["record_id"],
             "source": "ebas",
             "ok": True,
+            "state": "verified_true",
             "data": {"member": True},
         },
     )
@@ -90,15 +92,14 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
             transport=httpx.ASGITransport(app=backend_app.app),
             base_url="http://testserver",
         ) as callback_client:
-            for source, data in (
-                ("startgg", {"registered": True, "events": ["Test Game"]}),
-            ):
+            for source, data in (("startgg", {"registered": True, "events": ["Test Game"]}),):
                 callback = await callback_client.post(
                     "/api/integration/result",
                     json={
                         "checkin_id": checkin_id,
                         "source": source,
                         "ok": True,
+                        "state": "verified_true",
                         "data": data,
                         "attempt_id": n8n_stub.calls[-1]["json"]["attempt_id"],
                     },

@@ -23,12 +23,13 @@ def internal_call(client, pg_db, kind, headers=None):
             "checkin_id": row["record_id"],
             "source": "ebas",
             "ok": True,
+            "state": "verified_true",
             "data": {"member": True},
         }
     elif kind == "member":
         row = pg_db.seed_checkin()
         path = f"/api/checkin/{row['record_id']}/member-status"
-        payload = {"member": True}
+        payload = {"member": True, "ok": True, "state": "verified_true"}
     else:
         path = "/api/notify/" + ("checkin" if kind == "notify-checkin" else "update")
         payload = {"name": "Synthetic Test Player"}
