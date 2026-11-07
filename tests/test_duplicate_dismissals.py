@@ -24,6 +24,7 @@ from tests.test_lock_coverage import (
     _wait_for_lock,
 )
 from tests.test_safe_archiving import (  # noqa: F401  (pytest fixture)
+    isolated_stats_locks,
     archive_db,
     seed_player,
     table_rows,
@@ -135,7 +136,9 @@ def test_dismissing_a_merged_away_player_saves_nothing(twins, archive_db):  # no
 
 
 @pytest.mark.db
-def test_merge_cleans_removed_profile_dismissals_and_undo_still_works(twins, archive_db):
+def test_merge_cleans_removed_profile_dismissals_and_undo_still_works(
+    twins, archive_db, isolated_stats_locks
+):
     a, b = twins
     keep = seed_player(archive_db, "test-keep")
     low = seed_player(archive_db, "test-low", uuid="00-control")
@@ -147,7 +150,7 @@ def test_merge_cleans_removed_profile_dismissals_and_undo_still_works(twins, arc
         tuple(sorted((keep["uuid"], high["uuid"]))),
     }
     # T067 refreshes derived fields on merge/undo; compare the canonical baseline.
-    postgres.refresh_archive_stats()
+    assert postgres.refresh_archive_stats()["stale"] is False
     before_players = table_rows(archive_db, "players")
 
     merge = postgres.merge_players(keep["uuid"], b["uuid"], reason="synthetic test merge")

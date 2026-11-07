@@ -339,6 +339,150 @@ def get_active_settings_with_id() -> Optional[Dict[str, Any]]:
     return {"record_id": str(record_id) if record_id is not None else None, "fields": data}
 
 
+def _legacy_price_projection(policy):
+    """The old integer control is only a projection; exact tariffs remain in the event policy."""
+    if policy.get("require_payment") is not True:
+        return 0
+    amount = Decimal(str((policy.get("event_price") or {}).get("amount", 0)))
+    return int(amount) if amount == amount.to_integral_value() else 0
+
+
+def _stage_event_policy_locked(conn, settings, *, user=None, edited_fields=()):
+    """Only compare a draft against the settings baseline for that same active slug."""
+    from psycopg.types.json import Json
+
+    settings = json.loads(json.dumps(settings, default=str))
+    slug = settings.get("active_event_slug")
+    if not slug:
+        return
+    row = conn.execute(
+        "SELECT to_jsonb(c) FROM event_edit_context c WHERE event_slug=%s FOR UPDATE", (slug,)
+    ).fetchone()
+    if not row:
+        return
+    before = row[0]
+    policy = dict(before["policy"] or {})
+    baseline = before["settings_baseline"] or {}
+    for key in ("require_payment", "require_membership", "require_startgg"):
+        if settings.get(key) != baseline.get(key) or key in edited_fields:
+            policy[key] = settings.get(key) is True
+    if policy.get("require_payment") is False:
+        policy.pop("event_price", None)
+    elif settings.get("swish_expected_per_game") != baseline.get("swish_expected_per_game"):
+        # Saving an unchanged integer projection cannot replace an exact historical tariff.
+        tariff = dict(policy.get("event_price") or {})
+        if tariff.get("basis") not in {"game", "person", "per_game", "per_person"}:
+            raise ValueError(
+                "Historical tariff basis is unknown; verify it before changing the price"
+            )
+        tariff["amount"] = str(settings.get("swish_expected_per_game") or 0)
+        policy["event_price"] = tariff
+    draft_changed = any(
+        settings.get(key) != baseline.get(key)
+        for key in (
+            "event_date",
+            "event_display_name",
+            "tournament_name",
+            "events_json",
+            "startgg_event_url",
+        )
+    )
+    if policy != before["policy"] or draft_changed:
+        conn.execute(
+            "UPDATE event_edit_context SET policy=%s, settings_baseline=%s WHERE event_slug=%s",
+            (
+                Json(policy),
+                Json(settings, dumps=lambda value: json.dumps(value, default=str)),
+                slug,
+            ),
+        )
+        after = conn.execute(
+            "SELECT to_jsonb(c) FROM event_edit_context c WHERE event_slug=%s", (slug,)
+        ).fetchone()[0]
+        _stats_audit(
+            conn,
+            "draft_policy_updated",
+            "event_edit_context",
+            {"before": before, "after": after},
+            user=user,
+            event_slug=slug,
+        )
+
+
+def _activate_event_policy_locked(conn, settings_id, slug):
+    """Loading an existing draft always restores that draft's policy, including its price basis."""
+    from psycopg.types.json import Json
+
+    row = conn.execute(
+        "SELECT policy,settings_baseline FROM event_edit_context WHERE event_slug=%s FOR UPDATE",
+        (slug,),
+    ).fetchone()
+    if not row:
+        archived = conn.execute(
+            "SELECT requirements_snapshot,event_date,event_display_name FROM event_stats WHERE event_slug=%s",
+            (slug,),
+        ).fetchone()
+        if not archived:
+            return
+        policy = archived[0] or {}
+        draft = {
+            "event_date": archived[1],
+            "event_display_name": archived[2],
+            "tournament_name": archived[2],
+            "events_json": None,
+            "startgg_event_url": None,
+        }
+    else:
+        policy = row[0] or {}
+        draft = row[1] or {}
+    tariff = policy.get("event_price") or {}
+    conn.execute(
+        "UPDATE settings SET require_payment=%s, require_membership=%s, require_startgg=%s, "
+        "swish_expected_per_game=%s WHERE id=%s",
+        (
+            policy.get("require_payment") is True,
+            policy.get("require_membership") is True,
+            policy.get("require_startgg") is True,
+            _legacy_price_projection(policy),
+            settings_id,
+        ),
+    )
+    for key in (
+        "event_date",
+        "event_display_name",
+        "tournament_name",
+        "events_json",
+        "startgg_event_url",
+    ):
+        if key in draft:
+            conn.execute(
+                f"UPDATE settings SET {key}=%s WHERE id=%s",
+                (_settings_value(key, draft[key]), settings_id),
+            )
+    settings = conn.execute(
+        "SELECT to_jsonb(s) FROM settings s WHERE id=%s", (settings_id,)
+    ).fetchone()[0]
+    if row:
+        conn.execute(
+            "UPDATE event_edit_context SET settings_baseline=%s WHERE event_slug=%s",
+            (Json(settings), slug),
+        )
+
+
+def get_event_payment_policy(event_slug):
+    """Read verified event-specific tariff facts for payment/game-edit consumers."""
+    with _get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT policy FROM event_edit_context WHERE event_slug=%s", (event_slug,)
+        ).fetchone()
+        if row:
+            return {"historical": True, **(row[0] or {})}
+        row = conn.execute(
+            "SELECT requirements_snapshot FROM event_stats WHERE event_slug=%s", (event_slug,)
+        ).fetchone()
+        return {"historical": row is not None, **((row[0] or {}) if row else {})}
+
+
 def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update fields on a settings record."""
     if not record_id:
@@ -373,7 +517,15 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
     columns_out = None
     row = None
     with _get_pool().connection() as conn:
+        if "active_event_slug" in (fields or {}):
+            # Serialize opening admission before row locks, without blocking an already-live reader.
+            conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
         with conn.cursor() as cur:
+            previous = conn.execute(
+                "SELECT to_jsonb(s) FROM settings s WHERE id=%s FOR UPDATE", (record_id_int,)
+            ).fetchone()
+            if previous:
+                _stage_event_policy_locked(conn, previous[0])
             cur.execute(
                 f"UPDATE settings SET {', '.join(columns)} WHERE id = %s RETURNING *",
                 values,
@@ -381,6 +533,17 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
             row = cur.fetchone()
             if row:
                 columns_out = [desc[0] for desc in cur.description]
+                updated = _row_to_dict(columns_out, row)
+                if previous and previous[0].get("active_event_slug") != updated.get(
+                    "active_event_slug"
+                ):
+                    _activate_event_policy_locked(
+                        conn, record_id_int, updated.get("active_event_slug")
+                    )
+                else:
+                    _stage_event_policy_locked(conn, updated, edited_fields=fields)
+                cur.execute("SELECT * FROM settings WHERE id=%s", (record_id_int,))
+                row = cur.fetchone()
 
     if not row or not columns_out:
         return None
@@ -2120,6 +2283,11 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         context = _stats_context(conn)
         for row in result:
             slug = row["event_slug"]
+            row["summary_only"] = (
+                slug not in context["events"]
+                and context["metadata"].get(slug, {}).get("attendance_recorded") is not True
+            )
+            row["coverage_note"] = "Summary only (no rows)" if row["summary_only"] else ""
             projected = (
                 recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)["after"]
                 if slug in context["events"]
@@ -3017,7 +3185,9 @@ def recompute_event_stats(
     resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
     with resource as conn, conn.transaction():
         if _conn is None and not dry_run:
-            conn.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+            deferred = _admit_stats_refresh(conn, user=user, event_slug=event_slug)
+            if deferred:
+                return {"event_slug": event_slug, **deferred}
         context = _context or _stats_context(conn)
         checkins = context["events"].get(event_slug)
         if not checkins:
@@ -3222,7 +3392,8 @@ def recompute_player_aggregates(
     differences = []
     with resource as conn, conn.transaction():
         if _conn is None and not dry_run:
-            conn.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+            if _admit_stats_refresh(conn):
+                return []
         context = _context or _stats_context(conn)
         with conn.cursor() as cur:
             fields = [
@@ -3871,12 +4042,56 @@ def _merge_refresh_baseline(conn):
     return merge_id, keep, before
 
 
-def _refresh_stats_locked(conn, *, user=None, reason="manual", event_slug=None):
+def _live_event_slugs(conn):
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT active_event_slug FROM settings WHERE is_active=true AND active_event_slug IS NOT NULL"
+        ).fetchall()
+    ]
+
+
+def _mark_stats_stale(conn, *, user=None, reason="manual", event_slug=None, code="active_event"):
+    """Metadata-only admission/failure marker; never acquire the global statistics lock."""
+    from psycopg.types.json import Json
+
+    actor = {key: (user or {}).get(key) for key in ("user_id", "user_name")}
+    conn.execute(
+        "INSERT INTO event_stats_refresh(event_slug,reason,requested_by,last_error_code) VALUES(%s,%s,%s,%s) "
+        "ON CONFLICT(event_slug) DO UPDATE SET reason=EXCLUDED.reason,requested_by=EXCLUDED.requested_by,requested_at=now(),generation=event_stats_refresh.generation+1,last_error_code=EXCLUDED.last_error_code",
+        (event_slug or "*", reason, Json(actor), code),
+    )
+    return {"stale": True, "deferred": True, "error_code": code}
+
+
+def get_stats_refresh_admission():
+    with _get_pool().connection() as conn:
+        blocked = bool(_live_event_slugs(conn))
+    return {"blocked": blocked, "tooltip": "Runs after the event is archived" if blocked else ""}
+
+
+def _admit_stats_refresh(conn, *, user=None, event_slug=None):
+    if _live_event_slugs(conn):
+        return _mark_stats_stale(conn, user=user, event_slug=event_slug)
+    if not conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtext('fgt:player-merges'))"
+    ).fetchone()[0]:
+        return _mark_stats_stale(conn, user=user, event_slug=event_slug, code="statistics_busy")
+    if _live_event_slugs(conn):
+        return _mark_stats_stale(conn, user=user, event_slug=event_slug)
+    return None
+
+
+def _refresh_stats_locked(
+    conn, *, user=None, reason="manual", event_slug=None, allow_active_event=None
+):
     """Caller holds global EXCLUSIVE. Savepoint failure preserves the user's facts."""
     from psycopg.types.json import Json
 
     try:
         with conn.transaction():
+            if any(slug != allow_active_event for slug in _live_event_slugs(conn)):
+                return _mark_stats_stale(conn, user=user, reason=reason, event_slug=event_slug)
             undo_baseline = _merge_refresh_baseline(conn)
             context = _stats_context(conn)
             events = []
@@ -3895,6 +4110,8 @@ def _refresh_stats_locked(conn, *, user=None, reason="manual", event_slug=None):
                     )
             for slug in sorted(set(context["metadata"]) - set(context["events"])):
                 previous = context["metadata"][slug]
+                if previous.get("attendance_recorded") is not True:
+                    continue
                 after = {
                     **compute_event_stats([]),
                     "new_players": 0,
@@ -4013,7 +4230,9 @@ def _refresh_stats_locked(conn, *, user=None, reason="manual", event_slug=None):
 def refresh_archive_stats(*, user=None):
     """Explicit recovery uses the same engine and global lock as fact-changing triggers."""
     with _get_pool().connection() as conn, conn.transaction():
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+        deferred = _admit_stats_refresh(conn, user=user)
+        if deferred:
+            return deferred
         return _refresh_stats_locked(conn, user=user)
 
 
@@ -4036,6 +4255,7 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
         "missing_player_profile": "Player profile missing: reopen the event to correct it",
         "suspected_duplicate": "Possible duplicate profiles: review the global Duplicates queue",
         "stats_stale": "Statistics need an update",
+        "stats_without_attendance": "Summary only (no rows)",
     }
     resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
     with resource as conn, conn.transaction():
@@ -4071,6 +4291,12 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
         for item in deviations:
             kind = item["kind"]
             if kind not in labels:
+                continue
+            if (
+                kind == "stats_without_attendance"
+                and context["metadata"].get(item.get("event_slug"), {}).get("attendance_recorded")
+                is True
+            ):
                 continue
             if kind == "suspected_duplicate":
                 pairs = list(combinations(sorted(item["player_uuids"]), 2))
@@ -4114,6 +4340,19 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
                 {
                     "issue": item,
                     "facts": facts,
+                    "summary": (
+                        {
+                            key: context["metadata"].get(slug, {}).get(key)
+                            for key in (
+                                "event_date",
+                                "total_participants",
+                                "total_revenue",
+                                "games_breakdown",
+                            )
+                        }
+                        if kind == "stats_without_attendance"
+                        else None
+                    ),
                     "policy": context["metadata"].get(slug, {}).get("requirements_snapshot"),
                 }
             )
@@ -4140,10 +4379,16 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
                     "action": action,
                 }
             )
+        refresh_blocked = bool(_live_event_slugs(conn))
     issues.sort(
         key=lambda item: (item["kind"] != "stats_stale", item.get("event_slug") or "", item["key"])
     )
-    return {"count": len(issues), "issues": issues}
+    return {
+        "count": len(issues),
+        "issues": issues,
+        "refresh_blocked": refresh_blocked,
+        "refresh_tooltip": "Runs after the event is archived" if refresh_blocked else "",
+    }
 
 
 def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", user=None):
@@ -4153,7 +4398,8 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
     if not user or not user.get("is_dev") or not user.get("user_id"):
         raise PermissionError("Statistics actions are owner-only")
     with _get_pool().connection() as conn, conn.transaction():
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))")
+        if action == "retry" and _live_event_slugs(conn):
+            return _mark_stats_stale(conn, user=user, reason="attention_retry")
         items = get_stats_attention(_conn=conn, _include_acknowledged=True)["issues"]
         issue = next((item for item in items if item["key"] == issue_key), None)
         if issue is None or not hmac.compare_digest(issue["fingerprint"], str(fingerprint)):
@@ -4161,11 +4407,33 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
         if action != issue["action"] or action == "duplicates":
             raise ValueError("Unsupported resolution")
         if action == "retry":
+            if _live_event_slugs(conn):
+                return _mark_stats_stale(
+                    conn, user=user, reason="attention_retry", event_slug=issue["event_slug"]
+                )
+            if not conn.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtext('fgt:player-merges'))"
+            ).fetchone()[0]:
+                return _mark_stats_stale(
+                    conn,
+                    user=user,
+                    reason="attention_retry",
+                    event_slug=issue["event_slug"],
+                    code="statistics_busy",
+                )
             return _refresh_stats_locked(
                 conn, user=user, reason="attention_retry", event_slug=issue["event_slug"]
             )
         slug = issue["event_slug"]
+        refresh_result = {}
         if action == "not_recorded":
+            live = bool(_live_event_slugs(conn))
+            admitted = (
+                not live
+                and conn.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtext('fgt:player-merges'))"
+                ).fetchone()[0]
+            )
             row = conn.execute(
                 "SELECT requirements_snapshot FROM event_stats WHERE event_slug=%s FOR UPDATE",
                 (slug,),
@@ -4176,10 +4444,26 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
                 "UPDATE event_stats SET requirements_snapshot=%s WHERE event_slug=%s",
                 (Json(after), slug),
             )
+            draft_before = conn.execute(
+                "SELECT to_jsonb(c) FROM event_edit_context c WHERE event_slug=%s FOR UPDATE",
+                (slug,),
+            ).fetchone()
             conn.execute(
                 "UPDATE event_edit_context SET policy=policy || %s::jsonb WHERE event_slug=%s",
                 (Json({"member_data_recorded": False}), slug),
             )
+            if draft_before:
+                draft_after = conn.execute(
+                    "SELECT to_jsonb(c) FROM event_edit_context c WHERE event_slug=%s", (slug,)
+                ).fetchone()[0]
+                _stats_audit(
+                    conn,
+                    "draft_membership_marked_not_recorded",
+                    "event_edit_context",
+                    {"before": draft_before[0], "after": draft_after},
+                    user=user,
+                    event_slug=slug,
+                )
             _stats_audit(
                 conn,
                 "membership_marked_not_recorded",
@@ -4188,8 +4472,18 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
                 user=user,
                 event_slug=slug,
             )
-            _refresh_stats_locked(
-                conn, user=user, reason="membership_not_recorded", event_slug=slug
+            refresh_result = (
+                _refresh_stats_locked(
+                    conn, user=user, reason="membership_not_recorded", event_slug=slug
+                )
+                if admitted
+                else _mark_stats_stale(
+                    conn,
+                    user=user,
+                    reason="membership_not_recorded",
+                    event_slug=slug,
+                    code="active_event" if live else "statistics_busy",
+                )
             )
             items = get_stats_attention(_conn=conn, _include_acknowledged=True)["issues"]
             items = [
@@ -4201,8 +4495,14 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
         else:
             items = [issue]
         for item in items:
+            inserted = conn.execute(
+                "INSERT INTO event_stats_issue_ack(issue_key,fingerprint,acknowledged_by,resolution) VALUES(%s,'',%s,'pending') "
+                "ON CONFLICT(issue_key) DO NOTHING RETURNING issue_key",
+                (item["key"], user["user_id"]),
+            ).fetchone()
             before = conn.execute(
-                "SELECT to_jsonb(a) FROM event_stats_issue_ack a WHERE issue_key=%s", (item["key"],)
+                "SELECT to_jsonb(a) FROM event_stats_issue_ack a WHERE issue_key=%s FOR UPDATE",
+                (item["key"],),
             ).fetchone()
             conn.execute(
                 "INSERT INTO event_stats_issue_ack (issue_key,fingerprint,acknowledged_by,acknowledged_name,resolution) "
@@ -4218,11 +4518,11 @@ def resolve_stats_attention(issue_key, fingerprint, *, action="acknowledge", use
                 conn,
                 "stats_issue_acknowledged",
                 "event_stats_issue_ack",
-                {"before": before[0] if before else None, "after": after},
+                {"before": before[0] if before and not inserted else None, "after": after},
                 user=user,
                 event_slug=slug,
             )
-    return {"resolved": True}
+    return {"resolved": True, **refresh_result}
 
 
 def _archive_fact_rows(conn, slug):
@@ -4234,87 +4534,118 @@ def _archive_fact_rows(conn, slug):
     ]
 
 
-def _finish_archive_edit(conn, slug, before, *, user=None, baseline=None):
-    """Commit the reopened draft mirror only after the normal archive copy is complete."""
+def _finish_archive_edit(conn, slug, before, *, user=None, baseline=None, clear_active=True):
+    """Commit the draft mirror and verified expectation facts without calling the stats engine."""
     from psycopg import sql
     from psycopg.types.json import Json
 
-    entry = conn.execute(
-        "SELECT policy, settings_baseline, restore_links, complete_mirror "
-        "FROM event_edit_context WHERE event_slug = %s FOR UPDATE",
+    settings_row = conn.execute(
+        "SELECT to_jsonb(s) FROM settings s WHERE is_active=true AND active_event_slug=%s ORDER BY id DESC LIMIT 1",
         (slug,),
     ).fetchone()
-    policy = None
-    if entry:
-        policy, settings_baseline, links, complete = entry
-        policy = dict(policy or {})
-        settings = conn.execute(
-            "SELECT to_jsonb(s) FROM settings s WHERE is_active = true AND active_event_slug = %s "
-            "ORDER BY id DESC LIMIT 1",
-            (slug,),
-        ).fetchone()
-        settings = settings[0] if settings else {}
-        for key in ("require_payment", "require_membership", "require_startgg"):
-            if settings.get(key) != settings_baseline.get(key):
-                policy[key] = settings.get(key) is True
-        price = settings.get("swish_expected_per_game")
+    settings = settings_row[0] if settings_row else None
+    if settings:
+        _stage_event_policy_locked(conn, settings, user=user)
+    entry = conn.execute(
+        "SELECT policy, settings_baseline, restore_links, complete_mirror FROM event_edit_context WHERE event_slug=%s FOR UPDATE",
+        (slug,),
+    ).fetchone()
+    stored = conn.execute(
+        "SELECT requirements_snapshot FROM event_stats WHERE event_slug=%s", (slug,)
+    ).fetchone()
+    policy = dict((entry[0] if entry else stored[0] if stored else None) or {})
+    links = entry[2] if entry else []
+    live_ids = {
+        row[0]
+        for row in conn.execute(
+            "SELECT record_id FROM active_event_data WHERE event_slug=%s", (slug,)
+        ).fetchall()
+    }
+    originals = {row["id"]: row for row in before}
+    for link in links:
+        original = originals.get(link["archive_id"])
+        if original is None:
+            continue
+        record_id = link["active_id"]
+        if record_id not in live_ids:
+            conn.execute("DELETE FROM event_archive WHERE id=%s", (original["id"],))
+        elif original.get("source_record_id") is None:
+            copied = conn.execute(
+                "SELECT to_jsonb(a) FROM event_archive a WHERE event_slug=%s AND source_record_id=%s",
+                (slug, record_id),
+            ).fetchone()
+            if copied:
+                values = copied[0]
+                conn.execute("DELETE FROM event_archive WHERE id=%s", (values["id"],))
+                fields = [key for key in values if key != "id"]
+                conn.execute(
+                    sql.SQL(
+                        "UPDATE event_archive SET ({})=(SELECT {} FROM jsonb_populate_record(NULL::event_archive,%s::jsonb)) WHERE id=%s"
+                    ).format(
+                        sql.SQL(", ").join(map(sql.Identifier, fields)),
+                        sql.SQL(", ").join(map(sql.Identifier, fields)),
+                    ),
+                    (Json(values), original["id"]),
+                )
+    conn.execute(
+        "UPDATE event_stats SET requirements_snapshot=%s, attendance_recorded=true WHERE event_slug=%s",
+        (Json(policy) if policy else None, slug),
+    )
+    rows = _archive_fact_rows(conn, slug)
+    tariff = policy.get("event_price") or {}
+    basis = tariff.get("basis")
+    aliases = {}
+    if basis in {"game", "per_game"}:
+        aliases = dict(conn.execute("SELECT alias,canonical FROM game_aliases").fetchall())
+    counts = {}
+    for row in rows:
+        if row["player_uuid"]:
+            counts[row["player_uuid"]] = counts.get(row["player_uuid"], 0) + 1
+    for row in rows:
+        expected = None
         if policy.get("require_payment") is False:
-            policy.pop("event_price", None)
-        elif price != settings_baseline.get("swish_expected_per_game"):
-            policy["event_price"] = {"amount": str(price or 0), "basis": "game"}
-        live_ids = {
-            row[0]
-            for row in conn.execute(
-                "SELECT record_id FROM active_event_data WHERE event_slug = %s", (slug,)
-            ).fetchall()
-        }
-        originals = {row["id"]: row for row in before}
-        for link in links:
-            original = originals.get(link["archive_id"])
-            if original is None:
-                continue
-            record_id = link["active_id"]
-            if complete and record_id not in live_ids:
-                conn.execute("DELETE FROM event_archive WHERE id = %s", (original["id"],))
-            elif original.get("source_record_id") is None and record_id in live_ids:
-                copied = conn.execute(
-                    "SELECT to_jsonb(a) FROM event_archive a "
-                    "WHERE event_slug = %s AND source_record_id = %s",
-                    (slug, record_id),
-                ).fetchone()
-                if copied:
-                    values = copied[0]
-                    conn.execute("DELETE FROM event_archive WHERE id = %s", (values["id"],))
-                    fields = [key for key in values if key != "id"]
-                    conn.execute(
-                        sql.SQL(
-                            "UPDATE event_archive SET ({}) = "
-                            "(SELECT {} FROM jsonb_populate_record(NULL::event_archive, %s::jsonb)) WHERE id = %s"
-                        ).format(
-                            sql.SQL(", ").join(map(sql.Identifier, fields)),
-                            sql.SQL(", ").join(map(sql.Identifier, fields)),
-                        ),
-                        (Json(values), original["id"]),
-                    )
-        conn.execute(
-            "UPDATE event_stats SET requirements_snapshot = %s WHERE event_slug = %s",
-            (Json(policy), slug),
-        )
-        # The historical price governs expectations only, never recorded money.
-        tariff = policy.get("event_price") or {}
-        free = (slug,) if policy.get("require_payment") is False else ()
-        prices = (
-            {slug: (Decimal(str(tariff["amount"])), tariff["basis"] == "game")}
-            if tariff.get("basis") in {"game", "person"} and not free
-            else {}
-        )
-        context = _stats_context(conn, free_events=free, event_prices=prices)
-        for correction in context["corrections"]:
+            expected = Decimal("0")
+        elif (
+            basis in {"person", "per_person", "game", "per_game"}
+            and counts.get(row["player_uuid"], 0) <= 1
+        ):
+            games = {
+                _canonical_game_name(game, aliases)
+                for game in row["tournament_games_registered"] or []
+            } - {""}
+            if basis in {"person", "per_person"} or games:
+                expected = Decimal(str(tariff["amount"])) * (
+                    len(games) if basis in {"game", "per_game"} else 1
+                )
+        if expected is not None and row["payment_expected"] != expected:
             conn.execute(
-                "UPDATE event_archive SET payment_expected = %s WHERE id = %s",
-                (correction["after"]["payment_expected"], correction["archive_id"]),
+                "UPDATE event_archive SET payment_expected=%s WHERE id=%s", (expected, row["id"])
             )
-        conn.execute("DELETE FROM event_edit_context WHERE event_slug = %s", (slug,))
+    if clear_active:
+        conn.execute("DELETE FROM event_edit_context WHERE event_slug=%s", (slug,))
+    else:
+        remaining = _archive_fact_rows(conn, slug)
+        mirror = [
+            {"archive_id": row["id"], "active_id": row["source_record_id"]}
+            for row in remaining
+            if row["source_record_id"] in live_ids
+        ]
+        complete = len(mirror) == len(remaining)
+        actor = {key: (user or {}).get(key) for key in ("user_id", "user_name")}
+        baseline_settings = settings or (entry[1] if entry else {})
+        conn.execute(
+            "INSERT INTO event_edit_context(event_slug,policy,baseline_policy,settings_baseline,restore_links,complete_mirror,opened_by) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(event_slug) DO UPDATE SET policy=EXCLUDED.policy, baseline_policy=EXCLUDED.baseline_policy, settings_baseline=EXCLUDED.settings_baseline, restore_links=EXCLUDED.restore_links, complete_mirror=EXCLUDED.complete_mirror",
+            (
+                slug,
+                Json(policy),
+                Json(policy),
+                Json(baseline_settings),
+                Json(mirror),
+                complete,
+                Json(actor),
+            ),
+        )
     after = _archive_fact_rows(conn, slug)
     table_changes = {}
     if baseline:
@@ -4613,14 +4944,14 @@ def archive_event(
                 raw_rows = cur.fetchall()
 
                 mirrored = conn.execute(
-                    "SELECT complete_mirror FROM event_edit_context WHERE event_slug = %s",
+                    "SELECT complete_mirror, jsonb_array_length(restore_links)>0 FROM event_edit_context WHERE event_slug = %s",
                     (event_slug,),
                 ).fetchone()
                 if date_guessed and mirrored is not None:
                     raise ArchiveError(
                         "Historical event date is unknown; set its date before rearchiving"
                     )
-                if not raw_rows and not (mirrored and mirrored[0]):
+                if not raw_rows and not (mirrored and any(mirrored)):
                     raise ArchiveError("no active rows")
 
                 checkins = [_row_to_dict(columns, row) for row in raw_rows]
@@ -4745,10 +5076,19 @@ def archive_event(
                     ),
                 )
                 _finish_archive_edit(
-                    conn, event_slug, facts_before, user=user, baseline=archive_baseline
+                    conn,
+                    event_slug,
+                    facts_before,
+                    user=user,
+                    baseline=archive_baseline,
+                    clear_active=clear_active,
                 )
                 refresh = _refresh_stats_locked(
-                    conn, user=user, reason="archive", event_slug=event_slug
+                    conn,
+                    user=user,
+                    reason="archive",
+                    event_slug=event_slug,
+                    allow_active_event=event_slug,
                 )
                 cur.execute("SELECT * FROM event_stats WHERE event_slug = %s", (event_slug,))
                 stats = _row_to_dict([item[0] for item in cur.description], cur.fetchone())
@@ -4967,6 +5307,13 @@ def reopen_event(
                     if settings_existed
                     else None
                 )
+                if settings_before:
+                    _stage_event_policy_locked(conn, settings_before, user=user)
+                saved_policy = conn.execute(
+                    "SELECT policy FROM event_edit_context WHERE event_slug=%s", (event_slug,)
+                ).fetchone()
+                if saved_policy:
+                    policy = dict(saved_policy[0] or {})
 
                 event_date_value = (
                     event_date.isoformat()
@@ -4996,19 +5343,18 @@ def reopen_event(
                     ),
                 )
 
-                if not existing_context:
-                    tariff = policy.get("event_price") or {}
-                    conn.execute(
-                        "UPDATE settings SET require_payment = %s, require_membership = %s, "
-                        "require_startgg = %s, swish_expected_per_game = %s WHERE id = %s",
-                        (
-                            policy.get("require_payment") is True,
-                            policy.get("require_membership") is True,
-                            policy.get("require_startgg") is True,
-                            tariff.get("amount", 0) if policy.get("require_payment") is True else 0,
-                            settings_id,
-                        ),
-                    )
+                tariff = policy.get("event_price") or {}
+                conn.execute(
+                    "UPDATE settings SET require_payment = %s, require_membership = %s, "
+                    "require_startgg = %s, swish_expected_per_game = %s WHERE id = %s",
+                    (
+                        policy.get("require_payment") is True,
+                        policy.get("require_membership") is True,
+                        policy.get("require_startgg") is True,
+                        _legacy_price_projection(policy),
+                        settings_id,
+                    ),
+                )
                 baseline = conn.execute(
                     "SELECT to_jsonb(s) FROM settings s WHERE id = %s", (settings_id,)
                 ).fetchone()[0]
@@ -5102,6 +5448,11 @@ def reopen_event(
                     conn.execute(
                         "UPDATE event_edit_context SET restore_links=%s, complete_mirror=true WHERE event_slug=%s",
                         (Json(links), event_slug),
+                    )
+                if existing_context:
+                    conn.execute(
+                        "UPDATE event_edit_context SET settings_baseline=%s WHERE event_slug=%s",
+                        (Json(baseline), event_slug),
                     )
                 _stats_audit(
                     conn,

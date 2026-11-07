@@ -353,7 +353,7 @@ def test_archive_twice_preserves_stats_and_requirement_snapshot(pg_db):
         before = conn.execute(
             "SELECT to_jsonb(s) FROM event_stats s WHERE event_slug='repeat'"
         ).fetchone()[0]
-        conn.execute("UPDATE settings SET require_membership=False, require_payment=True")
+        conn.execute("UPDATE settings SET active_event_slug='unrelated-event', require_membership=False, require_payment=True")
     postgres.archive_event(**parameters)
     with pg_db.pool.connection() as conn:
         after = conn.execute(
@@ -455,7 +455,7 @@ def test_pre010_dry_run_works_and_apply_refuses(history):
         for _ in range(8):
             conn.execute("SELECT * FROM event_stats ORDER BY event_slug").fetchall()
         conn.execute(
-            "ALTER TABLE event_stats DROP COLUMN requirements_snapshot, DROP COLUMN same_series_return_rate, DROP COLUMN same_series_base_count, DROP COLUMN same_series_returned_players"
+            "ALTER TABLE event_stats DROP COLUMN requirements_snapshot, DROP COLUMN same_series_return_rate, DROP COLUMN same_series_base_count, DROP COLUMN same_series_returned_players, DROP COLUMN IF EXISTS attendance_recorded"
         )
         try:
             assert len(cli.repair(_conn=conn)["events"]) == 4
@@ -463,6 +463,7 @@ def test_pre010_dry_run_works_and_apply_refuses(history):
                 cli.repair(_conn=conn, apply=True)
         finally:
             conn.execute((cli.ROOT / "shared/migrations/010_stats_requirements.sql").read_text())
+            conn.execute((cli.ROOT / "shared/migrations/011_stats_refresh_and_attention.sql").read_text())
 
 
 @pytest.mark.parametrize(

@@ -418,7 +418,7 @@ def test_attention_box_is_compact_readable_by_to_with_owner_actions_only(dashboa
 
 
 @pytest.mark.parametrize(
-    "correction,expected", [("unchanged_person_price", 25), ("new_game_price", 80), ("free", 0)]
+    "correction,expected", [("unchanged_person_price", 25), ("new_game_price", 40), ("free", 0)]
 )
 def test_reopened_verified_tariff_and_explicit_settings_changes_only_change_expected_money(
     pg_db, correction, expected
@@ -458,7 +458,7 @@ def test_reopened_verified_tariff_and_explicit_settings_changes_only_change_expe
     if correction == "unchanged_person_price":
         assert policy["event_price"] == {"amount": "25", "basis": "person"}
     elif correction == "new_game_price":
-        assert policy["event_price"] == {"amount": "40", "basis": "game"}
+        assert policy["event_price"] == {"amount": "40", "basis": "person"}
         assert policy["require_membership"] is False
     else:
         assert "event_price" not in policy

@@ -23,6 +23,18 @@ def archive_db(pg_db):
 
 
 @pytest.fixture
+def isolated_stats_locks(archive_db, monkeypatch):
+    """Canonical baseline refresh must not defer because another worker owns a global test key."""
+    from tests import test_lock_coverage as locks
+    from tests.test_stats_recompute import _StatsLockCursor
+
+    connections = locks._LockConnections(archive_db)
+    monkeypatch.setattr(locks, "_Cursor", _StatsLockCursor)
+    monkeypatch.setattr(archive_db, "pool", connections)
+    monkeypatch.setattr(postgres, "_get_pool", lambda: connections)
+
+
+@pytest.fixture
 def event(archive_db):
     slug = "test-archive-" + uuid.uuid4().hex
     archive_db.seed_settings(active_event_slug=slug, event_date="2026-11-07")
@@ -336,9 +348,9 @@ def merge_data(archive_db):
 
 
 def test_undo_latest_unchanged_merge_restores_exact_rows_profiles_and_totals(
-    archive_db, merge_data
+    archive_db, merge_data, isolated_stats_locks
 ):
-    postgres.refresh_archive_stats()
+    assert postgres.refresh_archive_stats()["stale"] is False
     before = {
         table: table_rows(archive_db, table)
         for table in ("players", "event_archive", "active_event_data")

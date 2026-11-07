@@ -1,4 +1,6 @@
 -- Only failed refreshes leave a row. It is a visible degraded state, not a job queue.
+ALTER TABLE event_stats ADD COLUMN IF NOT EXISTS attendance_recorded BOOLEAN NOT NULL DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS event_stats_refresh (
     event_slug TEXT PRIMARY KEY,
     reason TEXT NOT NULL,
