@@ -16,8 +16,6 @@ import pytest
 
 from shared import migrate
 
-_PRODUCTION_LOCK_ID = migrate.LOCK_ID
-
 
 @pytest.fixture(autouse=True)
 def isolated_migration_directory(monkeypatch):
@@ -309,16 +307,19 @@ def test_failed_file_rolls_back_and_releases_lock(pg_db, tmp_path):
         assert probe.execute(
             "SELECT filename FROM fgt_schema_migrations ORDER BY version"
         ).fetchall() == [("001_prior.sql",)]
-        # Another suite may acquire the production key between apply() and this probe.
-        with pg_db.pool.connection() as foreign:
-            foreign.execute("SELECT pg_advisory_lock(%s)", (_PRODUCTION_LOCK_ID,))
+        # Model an unrelated holder on a distinct key private to this test.
+        foreign_key = migrate.LOCK_ID ^ (1 << 32)
+        with pg_db.pool.connection() as foreign, foreign.transaction():
+            foreign.execute("SET LOCAL lock_timeout = '5s'")
+            foreign.execute("SET LOCAL statement_timeout = '5s'")
+            foreign.execute("SELECT pg_advisory_lock(%s)", (foreign_key,))
             try:
                 assert probe.execute(
                     "SELECT pg_try_advisory_lock(%s)", (migrate.LOCK_ID,)
                 ).fetchone()[0]
                 probe.execute("SELECT pg_advisory_unlock(%s)", (migrate.LOCK_ID,))
             finally:
-                foreign.execute("SELECT pg_advisory_unlock(%s)", (_PRODUCTION_LOCK_ID,))
+                foreign.execute("SELECT pg_advisory_unlock(%s)", (foreign_key,))
 
 
 @pytest.mark.parametrize("edited_sql", ["SELECT 2;", "DROP TABLE example;"])

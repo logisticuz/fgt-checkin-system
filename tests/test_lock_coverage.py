@@ -1,5 +1,6 @@
 """Archive, restore and row writes serialize through real transaction event locks."""
 
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from threading import Barrier, Event, current_thread, local
@@ -180,14 +181,19 @@ def _observe_commands(database, *, before=None, after=None):
 
 @contextmanager
 def _foreign_global_waiter(database):
-    """Model another suite's global merge queue, outside our private namespace."""
-    query = "SELECT pg_advisory_xact_lock(hashtext('fgt:player-merges'))"
+    """Model a foreign merge queue on a separate private control key."""
+    key = int.from_bytes(uuid.uuid4().bytes[:8], "big", signed=True)
+    query = "SELECT pg_advisory_xact_lock(%s)"
     pending = []
-    connect_options = {"autocommit": True, "connect_timeout": 2, "options": "-clock_timeout=10000"}
+    connect_options = {
+        "autocommit": True,
+        "connect_timeout": 2,
+        "options": "-clock_timeout=10000 -cstatement_timeout=10000",
+    }
     with ThreadPoolExecutor(max_workers=1) as workers:
         with psycopg.connect(database.pool.raw_pool.conninfo, **connect_options) as holder:
             with holder.transaction():
-                holder.execute(query.replace("xact_lock(", "xact_lock_shared("))
+                holder.execute(query.replace("xact_lock(", "xact_lock_shared("), (key,))
                 connected, pause = Event(), Event()
                 pid = []
 
@@ -197,7 +203,7 @@ def _foreign_global_waiter(database):
                     ) as conn:
                         pid.append(conn.info.backend_pid)
                         connected.set()
-                        conn.execute(query)
+                        conn.execute(query, (key,))
 
                 def queue():
                     future = workers.submit(merge)
