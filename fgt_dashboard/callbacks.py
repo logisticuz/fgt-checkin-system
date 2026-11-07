@@ -1,6 +1,7 @@
 # callbacks.py
 from dash.dependencies import Input, Output, State, ALL
 from dash import no_update, html, ctx, dcc
+from dash.exceptions import PreventUpdate
 try:
     from auth_helpers import current_user
 except ImportError:
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 # Storage backend + Start.gg API config
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
+
+# Dismissed duplicate pairs shown per "Show more" step (T-056).
+DISMISSED_PAGE = 25
 
 # Local color tokens used by duplicates UI callbacks.
 COLORS = {
@@ -4721,11 +4725,16 @@ def register_callbacks(app):
     def _dismissed_container():
         return html.Div(id="duplicates-dismissed", children=_build_dismissed_section())
 
-    def _build_dismissed_section():
-        """Small "Dismissed pairs (N)" list with Undo per pair; empty when there are none."""
+    def _build_dismissed_section(shown=DISMISSED_PAGE, open_list=None):
+        """ "Dismissed pairs (N)" with Undo per pair, `shown` rows at a time + "Show more".
+
+        N is the true total, so every stored decision stays reachable (no silent cap).
+        """
         try:
             list_fn = getattr(storage_api, "get_duplicate_dismissals", None)
-            pairs = (list_fn(limit=100) or []) if list_fn else []
+            count_fn = getattr(storage_api, "count_duplicate_dismissals", None)
+            pairs = (list_fn(limit=shown) or []) if list_fn else []
+            total = count_fn() if count_fn else len(pairs)
         except Exception:
             logger.exception("Loading duplicate dismissals failed")
             return [
@@ -4736,6 +4745,7 @@ def register_callbacks(app):
             ]
         if not pairs:
             return []
+        total = max(total, len(pairs))
 
         def label(player):
             tag = player.get("tag") or "?"
@@ -4792,7 +4802,7 @@ def register_callbacks(app):
             html.Details(
                 [
                     html.Summary(
-                        f"Dismissed pairs ({len(pairs)})",
+                        f"Dismissed pairs ({total})",
                         style={
                             "color": COLORS["text_secondary"],
                             "fontSize": "0.78rem",
@@ -4800,9 +4810,31 @@ def register_callbacks(app):
                         },
                     ),
                     html.Div(rows, style={"marginTop": "0.4rem"}),
+                    *_show_more_button(len(pairs), total),
                 ],
                 id="duplicates-dismissed-details",
                 style={"marginTop": "0.8rem"},
+                **({"open": open_list} if open_list is not None else {}),
+            )
+        ]
+
+    def _show_more_button(shown, total):
+        if shown >= total:
+            return []
+        return [
+            html.Button(
+                f"Show more ({total - shown} more)",
+                id={"type": "btn-dismissed-more", "shown": shown},
+                style={
+                    "backgroundColor": "transparent",
+                    "color": COLORS["text_secondary"],
+                    "border": f"1px solid {COLORS['border']}",
+                    "padding": "0.2rem 0.6rem",
+                    "borderRadius": "4px",
+                    "cursor": "pointer",
+                    "fontSize": "0.7rem",
+                    "marginTop": "0.5rem",
+                },
             )
         ]
 
@@ -4828,8 +4860,7 @@ def register_callbacks(app):
     @app.callback(
         Output("duplicates-feedback", "children", allow_duplicate=True),
         Output({"type": "dup-card", "a": ALL, "b": ALL}, "style"),
-        Output("duplicates-title", "children", allow_duplicate=True),
-        Output("duplicates-dismissed", "children"),
+        Output("duplicates-dismissed", "children", allow_duplicate=True),
         Input({"type": "btn-not-same", "a": ALL, "b": ALL}, "n_clicks"),
         State({"type": "dup-card", "a": ALL, "b": ALL}, "style"),
         prevent_initial_call=True,
@@ -4837,7 +4868,8 @@ def register_callbacks(app):
     def dismiss_not_same(n_clicks_list, card_styles):
         triggered = _triggered_click()
         if not triggered:
-            return no_update, no_update, no_update, no_update
+            raise PreventUpdate  # new buttons rendered; nobody clicked
+        untouched_cards = [no_update] * len(ctx.outputs_list[1])
 
         a_uuid = triggered.get("a", "")
         b_uuid = triggered.get("b", "")
@@ -4854,7 +4886,7 @@ def register_callbacks(app):
                 'Couldn\'t save "Not same" \u2013 nothing changed. Try again.',
                 style={"color": COLORS["accent_red"], "fontSize": "0.8rem"},
             )
-            return feedback, no_update, no_update, no_update
+            return feedback, untouched_cards, no_update
 
         if players_exist:
             try:
@@ -4880,24 +4912,53 @@ def register_callbacks(app):
                 style={"color": COLORS["accent_yellow"], "fontSize": "0.8rem"},
             )
 
-        # Hide just this card; the other cards keep their place (no re-scan).
+        # Only ever HIDE cards: the clicked one, plus any whose pair is already stored as
+        # dismissed (e.g. by an overlapping click). Every other card gets no_update, so a
+        # late response can never re-show a card from its stale request-time State.
+        try:
+            stored = getattr(storage_api, "get_dismissed_pair_keys", lambda: set())()
+        except Exception:
+            stored = set()
         styles = []
-        visible = 0
         for output, style in zip(ctx.outputs_list[1], card_styles):
-            style = dict(style or {})
             card = output["id"]
-            if card.get("a") == a_uuid and card.get("b") == b_uuid:
-                style["display"] = "none"
-            if style.get("display") != "none":
-                visible += 1
-            styles.append(style)
+            pair = tuple(sorted((card.get("a", ""), card.get("b", ""))))
+            clicked = card.get("a") == a_uuid and card.get("b") == b_uuid
+            if clicked or pair in stored:
+                styles.append({**(style or {}), "display": "none"})
+            else:
+                styles.append(no_update)
 
-        return (
-            feedback,
-            styles,
-            f"Potential duplicates ({visible})",
-            _build_dismissed_section(),
-        )
+        # The title is counted in the browser from the cards actually shown (see below).
+        return feedback, styles, _build_dismissed_section()
+
+    # "Potential duplicates (N)" after Not same: counted client-side from the visible cards,
+    # so overlapping responses can't leave a stale server-side count behind.
+    app.clientside_callback(
+        """
+        function(styles) {
+            var visible = (styles || []).filter(function(s) {
+                return !(s && s.display === "none");
+            }).length;
+            return "Potential duplicates (" + visible + ")";
+        }
+        """,
+        Output("duplicates-title", "children", allow_duplicate=True),
+        Input({"type": "dup-card", "a": ALL, "b": ALL}, "style"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("duplicates-dismissed", "children", allow_duplicate=True),
+        Input({"type": "btn-dismissed-more", "shown": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def show_more_dismissed(n_clicks_list):
+        triggered = _triggered_click()
+        if not triggered:
+            raise PreventUpdate
+        shown = int(triggered.get("shown") or 0)
+        return _build_dismissed_section(shown=shown + DISMISSED_PAGE, open_list=True)
 
     @app.callback(
         Output("duplicates-feedback", "children", allow_duplicate=True),

@@ -4272,7 +4272,31 @@ def _dismissal_player(player_uuid, name, tag) -> Dict[str, str]:
     return {"uuid": player_uuid, "name": (name or "").strip(), "tag": (tag or "").strip()}
 
 
-def get_duplicate_dismissals(limit: int = 100) -> List[Dict[str, Any]]:
+_LIVE_DISMISSALS = """
+    FROM player_duplicate_dismissals d
+    JOIN players pa ON pa.uuid = d.uuid_a
+    JOIN players pb ON pb.uuid = d.uuid_b
+"""
+
+
+def count_duplicate_dismissals() -> int:
+    """How many dismissed pairs still have both players (the true "Dismissed pairs (N)")."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if not _dismissals_table_exists(cur):
+                return 0
+            cur.execute("SELECT count(*) " + _LIVE_DISMISSALS)
+            return int(cur.fetchone()[0])
+
+
+def get_dismissed_pair_keys() -> set:
+    """Every stored (uuid_a, uuid_b) pair, for reconciling the cards on screen."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            return _dismissed_pair_keys(cur)
+
+
+def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """Dismissed pairs whose players both still exist, newest first (names/tags only)."""
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
@@ -4282,13 +4306,13 @@ def get_duplicate_dismissals(limit: int = 100) -> List[Dict[str, Any]]:
                 """
                 SELECT d.uuid_a, d.uuid_b, d.dismissed_at, d.dismissed_by,
                        pa.name, pa.tag, pb.name, pb.tag
-                FROM player_duplicate_dismissals d
-                JOIN players pa ON pa.uuid = d.uuid_a
-                JOIN players pb ON pb.uuid = d.uuid_b
+                """
+                + _LIVE_DISMISSALS
+                + """
                 ORDER BY d.dismissed_at DESC, d.id DESC
-                LIMIT %s
+                LIMIT %s OFFSET %s
                 """,
-                (limit,),
+                (limit, max(0, offset)),
             )
             rows = cur.fetchall()
     return [

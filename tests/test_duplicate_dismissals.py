@@ -8,6 +8,8 @@ import pytest
 from dash import no_update
 from dash._callback_context import context_value
 from dash._utils import AttributeDict
+from dash._validate import validate_multi_return
+from dash.exceptions import PreventUpdate
 from psycopg.errors import CheckViolation
 
 from shared import postgres_api as postgres
@@ -143,11 +145,27 @@ def test_dismiss_waits_for_a_running_merge(twins, archive_db):  # noqa: F811
 
 
 @pytest.mark.db
+def test_count_and_paging_reach_every_live_dismissal(archive_db):  # noqa: F811
+    players = [
+        seed_player(archive_db, f"test-page-{i:03d}", name=f"Synthetic Page {i}") for i in range(12)
+    ]
+    for i in range(0, 12, 2):
+        postgres.dismiss_duplicate_pair(players[i]["uuid"], players[i + 1]["uuid"])
+    assert postgres.count_duplicate_dismissals() == 6
+    first = postgres.get_duplicate_dismissals(limit=4)
+    rest = postgres.get_duplicate_dismissals(limit=4, offset=4)
+    assert len(first) == 4 and len(rest) == 2
+    keys = {(d["uuid_a"], d["uuid_b"]) for d in first + rest}
+    assert keys == postgres.get_dismissed_pair_keys()
+
+
+@pytest.mark.db
 def test_scan_still_works_without_the_table(twins, monkeypatch):
     monkeypatch.setattr(postgres, "DISMISSALS_TABLE", "missing_dismissals_table")
     a, b = twins
     assert tuple(sorted((a["uuid"], b["uuid"]))) in pair_keys(postgres.find_duplicate_candidates())
     assert postgres.get_duplicate_dismissals() == []
+    assert postgres.count_duplicate_dismissals() == 0
     assert postgres.is_duplicate_pair_dismissed(a["uuid"], b["uuid"]) is False
 
 
@@ -202,9 +220,24 @@ def card_outputs():
     return [
         {"id": "duplicates-feedback", "property": "children"},
         [{"id": CARD_AB, "property": "style"}, {"id": CARD_AC, "property": "style"}],
-        {"id": "duplicates-title", "property": "children"},
         {"id": "duplicates-dismissed", "property": "children"},
     ]
+
+
+def assert_dash_accepts(result):
+    """Run a return value through Dash's own multi-output validator (wildcards need lists)."""
+    validate_multi_return(card_outputs(), list(result), "dismiss_not_same")
+
+
+def dismissal(a, b, number=0):
+    return {
+        "uuid_a": a,
+        "uuid_b": b,
+        "dismissed_at": f"2026-11-07T12:{number % 60:02d}:00+00:00",
+        "dismissed_by": "Synthetic TO",
+        "player_a": {"uuid": a, "name": f"Synthetic {a}", "tag": f"tag-{a}"},
+        "player_b": {"uuid": b, "name": f"Synthetic {b}", "tag": f"tag-{b}"},
+    }
 
 
 @pytest.fixture
@@ -215,6 +248,8 @@ def dup(dashboard, monkeypatch):  # noqa: F811
     store.undo_duplicate_dismissal = Mock(return_value=True)
     store.is_duplicate_pair_dismissed = Mock(return_value=False)
     store.get_duplicate_dismissals = Mock(return_value=[])
+    store.count_duplicate_dismissals = Mock(return_value=0)
+    store.get_dismissed_pair_keys = Mock(return_value=set())
     store.merge_players = Mock(return_value={"keep_player_tag": "syn_a"})
     store.get_merge_history = Mock(return_value=[])
     callbacks_module = dashboard.callbacks["dismiss_not_same"].__globals__
@@ -243,25 +278,19 @@ def ids_in(component, found=None):
 
 
 def test_not_same_saves_hides_only_that_card_and_names_the_real_user(dup):
-    dup.storage.get_duplicate_dismissals.return_value = [
-        {
-            "uuid_a": "uuid-a",
-            "uuid_b": "uuid-b",
-            "dismissed_at": "2026-11-07T12:40:00+00:00",
-            "dismissed_by": "Synthetic TO",
-            "player_a": {"uuid": "uuid-a", "name": "Synthetic A", "tag": "syn_a"},
-            "player_b": {"uuid": "uuid-b", "name": "Synthetic B", "tag": "syn_b"},
-        }
-    ]
+    dup.storage.get_duplicate_dismissals.return_value = [dismissal("uuid-a", "uuid-b")]
+    dup.storage.count_duplicate_dismissals.return_value = 1
+    dup.storage.get_dismissed_pair_keys.return_value = {("uuid-a", "uuid-b")}
     click({"type": "btn-not-same", "a": "uuid-a", "b": "uuid-b"}, card_outputs())
-    feedback, styles, title, dismissed = dup.callbacks["dismiss_not_same"]([1, None], [{}, {}])
+    result = dup.callbacks["dismiss_not_same"]([1, None], [{"padding": "1px"}, {}])
+    assert_dash_accepts(result)
+    feedback, styles, dismissed = result
 
     dup.storage.dismiss_duplicate_pair.assert_called_once_with(
         "uuid-a", "uuid-b", dismissed_by="Synthetic TO"
     )
     dup.storage.find_duplicate_candidates.assert_not_called()  # no full re-scan
-    assert styles[0]["display"] == "none" and styles[1].get("display") != "none"
-    assert title == "Potential duplicates (1)"
+    assert styles == [{"padding": "1px", "display": "none"}, no_update]
     assert text_of(feedback) == "Marked as different players."
     assert "Dismissed pairs (1)" in text_of(dismissed)
     assert {"type": "btn-undo-dismiss", "a": "uuid-a", "b": "uuid-b"} in ids_in(dismissed)
@@ -269,6 +298,25 @@ def test_not_same_saves_hides_only_that_card_and_names_the_real_user(dup):
     audit_user = dup.storage.log_action.call_args.args[0]
     assert audit_user["user_name"] == "Synthetic TO" and audit_user["user_id"] == "42"
     assert dup.storage.log_action.call_args.args[1] == "duplicate_dismissed"
+
+
+def test_overlapping_clicks_never_reshow_a_dismissed_card(dup):
+    """Review P2: a late response must not restore another card from stale State."""
+    # The second click's request still believes card A-B is visible (stale State), but
+    # A-B was saved by the first, overlapping click.
+    dup.storage.get_dismissed_pair_keys.return_value = {("uuid-a", "uuid-b"), ("uuid-a", "uuid-c")}
+    click({"type": "btn-not-same", "a": "uuid-a", "b": "uuid-c"}, card_outputs())
+    _, styles, _ = dup.callbacks["dismiss_not_same"]([1, 1], [{}, {}])
+    assert styles == [{"display": "none"}, {"display": "none"}]
+
+    # Without a stored decision for the other card, it is left alone - never set visible.
+    dup.storage.get_dismissed_pair_keys.return_value = {("uuid-a", "uuid-c")}
+    _, styles, _ = dup.callbacks["dismiss_not_same"]([1, 1], [{"display": "none"}, {}])
+    assert styles[0] is no_update and styles[1] == {"display": "none"}
+
+
+def test_the_title_is_not_a_server_output_of_not_same(dup):
+    assert "duplicates-title" not in str(dup.definitions["dismiss_not_same"]["output"])
 
 
 def test_an_email_is_never_stored_as_the_dismisser(dup, monkeypatch):
@@ -280,18 +328,58 @@ def test_an_email_is_never_stored_as_the_dismisser(dup, monkeypatch):
 
 
 def test_new_buttons_appearing_do_not_count_as_a_click(dup):
+    """Review P2: no scalar no_update for the wildcard output; nothing to do = PreventUpdate."""
     click({"type": "btn-not-same", "a": "uuid-a", "b": "uuid-b"}, card_outputs(), value=None)
-    assert dup.callbacks["dismiss_not_same"]([None, None], [{}, {}]) == (no_update,) * 4
+    with pytest.raises(PreventUpdate):
+        dup.callbacks["dismiss_not_same"]([None, None], [{}, {}])
     dup.storage.dismiss_duplicate_pair.assert_not_called()
 
 
-def test_a_failed_save_keeps_the_card_and_says_so(dup):
+def test_a_failed_save_keeps_the_cards_and_says_so_in_a_valid_shape(dup):
+    """Review P2: the error feedback must survive Dash's validator (was HTTP 500)."""
     dup.storage.dismiss_duplicate_pair.side_effect = RuntimeError("db down")
     click({"type": "btn-not-same", "a": "uuid-a", "b": "uuid-b"}, card_outputs())
-    feedback, styles, title, dismissed = dup.callbacks["dismiss_not_same"]([1, None], [{}, {}])
+    result = dup.callbacks["dismiss_not_same"]([1, None], [{}, {}])
+    assert_dash_accepts(result)
+    feedback, styles, dismissed = result
     assert "nothing changed" in text_of(feedback)
-    assert styles is no_update and title is no_update and dismissed is no_update
+    assert styles == [no_update, no_update] and dismissed is no_update
     dup.storage.log_action.assert_not_called()
+
+
+def test_dismissed_list_shows_the_true_total_and_pages_through_all(dup):
+    """Review P2: 101 stored pairs -> "(101)", a page of rows, and Show more until the end."""
+    every = [dismissal(f"a{i:03d}", f"b{i:03d}", i) for i in range(101)]
+    dup.storage.count_duplicate_dismissals.return_value = 101
+    dup.storage.get_duplicate_dismissals.side_effect = lambda limit=100, offset=0: every[
+        offset : offset + limit
+    ]
+    module = dup.callbacks["dismiss_not_same"].__globals__
+    page = module["DISMISSED_PAGE"]
+
+    cards, _, _ = dup.callbacks["scan_duplicates"](1)
+    assert "Dismissed pairs (101)" in text_of(cards)
+    undo_ids = [i for i in ids_in(cards) if isinstance(i, dict) and i["type"] == "btn-undo-dismiss"]
+    assert len(undo_ids) == page
+    assert {"type": "btn-dismissed-more", "shown": page} in ids_in(cards)
+    assert f"Show more ({101 - page} more)" in text_of(cards)
+
+    shown = page
+    while True:
+        click({"type": "btn-dismissed-more", "shown": shown})
+        section = dup.callbacks["show_more_dismissed"]([1])
+        undo_ids = [
+            i for i in ids_in(section) if isinstance(i, dict) and i["type"] == "btn-undo-dismiss"
+        ]
+        assert section[0].open is True  # the list stays open while paging
+        more = [
+            i for i in ids_in(section) if isinstance(i, dict) and i["type"] == "btn-dismissed-more"
+        ]
+        if not more:
+            break
+        shown = more[0]["shown"]
+    assert len(undo_ids) == 101
+    assert {"type": "btn-undo-dismiss", "a": "a100", "b": "b100"} in undo_ids  # the oldest
 
 
 def test_scan_cards_are_addressable_and_end_with_the_dismissed_section(dup):

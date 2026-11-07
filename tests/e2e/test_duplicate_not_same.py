@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import expect
 from werkzeug.serving import make_server
 
 from tests.test_safe_archiving import archive_db, seed_player  # noqa: F401  (pytest fixture)
@@ -84,6 +85,30 @@ def card(page, a, b):
     )
 
 
+def open_page(browser, dashboard_url):
+    """A page that records JS errors and failed Dash callback requests (HTTP >= 400)."""
+    context = browser.new_context(viewport=DESKTOP)
+    page = context.new_page()
+    problems = []
+    page.on("pageerror", lambda error: problems.append(f"js: {error}"))
+    page.on(
+        "response",
+        lambda r: (
+            problems.append(f"http {r.status}: {r.url}")
+            if "_dash-update-component" in r.url and r.status >= 400
+            else None
+        ),
+    )
+    page.goto(dashboard_url)
+    return context, page, problems
+
+
+def title_is(page, text):
+    page.wait_for_function(
+        "t => document.getElementById('duplicates-title').textContent === t", arg=text
+    )
+
+
 def test_not_same_sticks_across_scans_and_can_be_undone(
     browser, dashboard_url, archive_db
 ):  # noqa: F811
@@ -92,12 +117,8 @@ def test_not_same_sticks_across_scans_and_can_be_undone(
     other_a = seed_player(archive_db, "syn-mira", name="Synthetic Mira", telephone="0000000002")
     other_b = seed_player(archive_db, "syn-mila", name="Synthetic Mila", telephone="0000000003")
 
-    context = browser.new_context(viewport=DESKTOP)
-    errors = []
-    page = context.new_page()
-    page.on("pageerror", lambda error: errors.append(str(error)))
+    context, page, errors = open_page(browser, dashboard_url)
     try:
-        page.goto(dashboard_url)
         page.click("#btn-scan-duplicates")
         page.wait_for_function(
             "document.getElementById('duplicates-title').textContent.includes('(2)')"
@@ -118,12 +139,11 @@ def test_not_same_sticks_across_scans_and_can_be_undone(
         shot(page, "T-056-2-after-not-same")
 
         page.click("#btn-scan-duplicates")  # a full re-scan: the decision is persisted
-        page.wait_for_function(
-            "document.getElementById('duplicates-title').textContent.includes('(1)')"
-        )
-        page.wait_for_timeout(300)
-        cards_text = page.inner_text("#duplicates-list").split("Dismissed pairs")[0]
-        assert "syn-kenjj" not in cards_text and "syn-mila" in cards_text
+        # The hidden card is still in the DOM until the re-scan response replaces the list,
+        # so wait for its removal (not for the title, which already says (1)).
+        expect(card(page, one, two)).to_have_count(0)
+        expect(card(page, other_a, other_b)).to_have_count(1)
+        title_is(page, "Potential duplicates (1)")
         shot(page, "T-056-3-rescan")
 
         open_dismissed(page)
@@ -137,3 +157,63 @@ def test_not_same_sticks_across_scans_and_can_be_undone(
     finally:
         context.close()
     assert not errors, errors
+
+
+def test_overlapping_not_same_clicks_keep_both_cards_hidden(
+    browser, dashboard_url, archive_db, monkeypatch
+):  # noqa: F811
+    """Review P2: the first response is delayed until the second click has been saved."""
+    import shared.storage as storage
+
+    players = []
+    for i, (tag, near) in enumerate(
+        [("syn-ayla", "syn-ayle"), ("syn-bodo", "syn-bodi"), ("syn-cleo", "syn-clea")]
+    ):
+        phone = f"00000001{i}0"
+        players.append(
+            (
+                seed_player(archive_db, tag, name=f"Synthetic {tag}", telephone=phone),
+                seed_player(archive_db, near, name=f"Synthetic {near}", telephone=phone),
+            )
+        )
+
+    real_dismiss = storage.dismiss_duplicate_pair
+    second_saved = threading.Event()
+    calls = []
+
+    def gated_dismiss(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:  # hold the first save's response until the second is saved
+            assert second_saved.wait(timeout=10), "second click never reached the server"
+            return real_dismiss(*args, **kwargs)
+        result = real_dismiss(*args, **kwargs)
+        second_saved.set()
+        return result
+
+    monkeypatch.setattr(storage, "dismiss_duplicate_pair", gated_dismiss)
+
+    context, page, problems = open_page(browser, dashboard_url)
+    try:
+        page.click("#btn-scan-duplicates")
+        title_is(page, "Potential duplicates (3)")
+        first, second, third = (card(page, a, b) for a, b in players)
+        first.get_by_role("button", name="Not same").click()
+        second.get_by_role("button", name="Not same").click()
+
+        title_is(page, "Potential duplicates (1)")
+        expect(first).to_be_hidden()
+        expect(second).to_be_hidden()
+        expect(third).to_be_visible()
+        page.wait_for_function(
+            "document.getElementById('duplicates-dismissed').textContent"
+            ".includes('Dismissed pairs (2)')"
+        )
+        page.wait_for_timeout(300)  # let any late response land; nothing may re-appear
+        expect(first).to_be_hidden()
+        expect(second).to_be_hidden()
+        title_is(page, "Potential duplicates (1)")
+        assert len(calls) == 2
+        shot(page, "T-056-5-overlapping-clicks")
+    finally:
+        context.close()
+    assert not problems, problems
