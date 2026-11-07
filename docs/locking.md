@@ -40,7 +40,9 @@ while any event is active. Plain acknowledgement never takes the global lock: on
 own acknowledgement row is locked. The disabled owner button says "Recompute now" and
 has the tooltip "Runs after the event is archived" while live admission is closed.
 Opening/switching the active slug takes shared global mode before its settings row
-lock. This serializes admission with a refresh that was admitted while idle: the new
+lock, inside the same explicit transaction as the settings UPDATE and policy changes.
+The lock survives pauses before UPDATE and is released only at commit/rollback, even
+with an autocommit pool. This serializes admission with an idle refresh: the new
 event cannot become live halfway through that refresh. Reopen already holds exclusive
 global mode before changing settings. Ordinary policy edits do not take this lock.
 Reopen takes exclusive global mode initially, before row locks; never upgrade a shared
@@ -64,10 +66,20 @@ Rearchive replaces the tracked mirror, including deliberate
 deletions, then refreshes all later cohorts. Legacy NULL-source rows retain their fact
 IDs through the separate restore map. Prices govern expected amounts only.
 The mirror is persisted/rebuilt even when active rows are retained (clear_active=false).
+For pre-011 retained drafts without a context, reopen and END recover links only from
+exact active record IDs matching archived source IDs. Unmapped NULL-source facts stay
+untouched when verified links exist. Missing/nonunique source links are ambiguous and
+refuse END (and reopen with existing rows) without changing facts; the message directs
+the TO to clear the draft, re-open the archive, and reapply corrections. An explicitly
+additive draft can instead be opened with restore_active=false before adding new rows.
 Deleting the last mapped row is allowed at END. Explicitly emptied archives are marked
 attendance_recorded and derive zero counts; summary-only history without recorded rows
 is preserved byte-for-byte and labelled "Summary only (no rows)". It is never zeroed by
-refresh. Mark-not-recorded audits both the historical snapshot and full draft-policy row.
+refresh or its own no-edit reopen/END. Adding rows to a summary sets summary_only,
+stores those facts, and keeps the summary authoritative until a future explicit owner
+conversion. Insights and Things to check show "summary-only event got N rows: summary kept";
+neither attendance_recorded nor participant/revenue/game totals are implicitly replaced.
+Mark-not-recorded audits both the historical snapshot and full draft-policy row.
 Reopen uses the event's date or its unambiguous archived-date fallback and clears an
 unrelated settings date. An entirely unknown historical date requires an explicit TO
 correction before rearchive; it never silently becomes today's date.

@@ -516,7 +516,7 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
 
     columns_out = None
     row = None
-    with _get_pool().connection() as conn:
+    with _get_pool().connection() as conn, conn.transaction():
         if "active_event_slug" in (fields or {}):
             # Serialize opening admission before row locks, without blocking an already-live reader.
             conn.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
@@ -2283,15 +2283,30 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         context = _stats_context(conn)
         for row in result:
             slug = row["event_slug"]
-            row["summary_only"] = (
-                slug not in context["events"]
-                and context["metadata"].get(slug, {}).get("attendance_recorded") is not True
+            metadata = context["metadata"].get(slug, {})
+            attendance = context["events"].get(slug, [])
+            row["summary_only"] = _is_summary_only(metadata, attendance)
+            row["coverage_note"] = (
+                f"summary-only event got {len(attendance)} rows: summary kept"
+                if row["summary_only"] and attendance
+                else "Summary only (no rows)" if row["summary_only"] else ""
             )
-            row["coverage_note"] = "Summary only (no rows)" if row["summary_only"] else ""
+            if row["summary_only"]:
+                row["games_breakdown"] = _canonical_game_breakdown(
+                    metadata.get("games_breakdown"), aliases
+                )
+                row["most_popular_game"] = (
+                    min(
+                        row["games_breakdown"],
+                        key=lambda game: (-row["games_breakdown"][game], game.lower()),
+                    )
+                    if row["games_breakdown"]
+                    else _canonical_game_name(metadata.get("most_popular_game"), aliases) or None
+                )
             projected = (
                 recompute_event_stats(slug, dry_run=True, _conn=conn, _context=context)["after"]
-                if slug in context["events"]
-                else context["metadata"].get(slug, {})
+                if attendance and not row["summary_only"]
+                else metadata
             )
             for key in (
                 "event_date",
@@ -3190,9 +3205,21 @@ def recompute_event_stats(
                 return {"event_slug": event_slug, **deferred}
         context = _context or _stats_context(conn)
         checkins = context["events"].get(event_slug)
+        previous = context["metadata"].get(event_slug, {})
+        if previous.get("summary_only") is True:
+            return {
+                **previous,
+                "event_slug": event_slug,
+                "participants": previous.get("total_participants"),
+                "archive_rows": len(checkins or []),
+                "before": previous,
+                "after": dict(previous),
+                "changes": {},
+                "new_player_uuids": [],
+                "integrity_warnings": [],
+            }
         if not checkins:
             raise ValueError("No archive attendance facts for selected event")
-        previous = context["metadata"].get(event_slug, {})
         event_date, archived_at = context["order"][event_slug]
         players = {row["player_uuid"] for row in checkins if row["player_uuid"]}
         new_ids = sorted(player for player in players if context["first"].get(player) == event_slug)
@@ -3498,6 +3525,10 @@ def scan_event_stats_integrity(
             if slug not in selected:
                 continue
             rows = context["events"].get(slug, [])
+            if rows and context["metadata"].get(slug, {}).get("summary_only") is True:
+                deviations.append(
+                    {"kind": "summary_only_with_rows", "event_slug": slug, "row_count": len(rows)}
+                )
             if not rows:
                 deviations.append({"kind": "stats_without_attendance", "event_slug": slug})
                 continue
@@ -4110,7 +4141,7 @@ def _refresh_stats_locked(
                     )
             for slug in sorted(set(context["metadata"]) - set(context["events"])):
                 previous = context["metadata"][slug]
-                if previous.get("attendance_recorded") is not True:
+                if _is_summary_only(previous, []):
                     continue
                 after = {
                     **compute_event_stats([]),
@@ -4256,6 +4287,7 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
         "suspected_duplicate": "Possible duplicate profiles: review the global Duplicates queue",
         "stats_stale": "Statistics need an update",
         "stats_without_attendance": "Summary only (no rows)",
+        "summary_only_with_rows": "Summary kept",
     }
     resource = nullcontext(_conn) if _conn is not None else _get_pool().connection()
     with resource as conn, conn.transaction():
@@ -4350,7 +4382,7 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
                                 "games_breakdown",
                             )
                         }
-                        if kind == "stats_without_attendance"
+                        if kind in {"stats_without_attendance", "summary_only_with_rows"}
                         else None
                     ),
                     "policy": context["metadata"].get(slug, {}).get("requirements_snapshot"),
@@ -4375,7 +4407,11 @@ def get_stats_attention(*, _conn=None, _include_acknowledged=False):
                     "event_slug": slug,
                     "event_name": context["metadata"].get(slug, {}).get("event_display_name")
                     or slug,
-                    "label": labels[kind],
+                    "label": (
+                        f"summary-only event got {item['row_count']} rows: summary kept"
+                        if kind == "summary_only_with_rows"
+                        else labels[kind]
+                    ),
                     "action": action,
                 }
             )
@@ -4534,6 +4570,73 @@ def _archive_fact_rows(conn, slug):
     ]
 
 
+def _is_summary_only(metadata, rows):
+    """Missing historical attendance cannot become a complete ledger implicitly."""
+    return bool(metadata) and (
+        metadata.get("summary_only") is True
+        or (not rows and metadata.get("attendance_recorded") is not True)
+    )
+
+
+def _legacy_mirror_links(archive_rows, active_ids):
+    """Recover only exact source-ID provenance; unknown ownership must be resolved by the TO."""
+    links = [
+        {"archive_id": row["id"], "active_id": row["source_record_id"]}
+        for row in archive_rows
+        if row.get("source_record_id") in active_ids
+    ]
+    if archive_rows and (
+        not links
+        or any(
+            row.get("source_record_id") is not None and row["source_record_id"] not in active_ids
+            for row in archive_rows
+        )
+        or len({link["active_id"] for link in links}) != len(links)
+    ):
+        raise ArchiveError(
+            "This event was reopened before the update; clear its active draft and re-open "
+            "it from the archive, then reapply corrections before END"
+        )
+    return links
+
+
+def _recover_legacy_archive_context(conn, slug, archive_rows, active_ids, *, user=None):
+    """END also accepts verified retained copies made before edit contexts existed."""
+    from psycopg.types.json import Json
+
+    if (
+        not archive_rows
+        or conn.execute("SELECT 1 FROM event_edit_context WHERE event_slug=%s", (slug,)).fetchone()
+    ):
+        return
+    stored = conn.execute(
+        "SELECT requirements_snapshot, attendance_recorded FROM event_stats WHERE event_slug=%s",
+        (slug,),
+    ).fetchone()
+    if not active_ids and stored and stored[1] is True:
+        raise ArchiveError("no active rows; re-open the event before END")
+    links = _legacy_mirror_links(archive_rows, active_ids)
+    policy = (stored[0] if stored else None) or {}
+    settings = conn.execute(
+        "SELECT to_jsonb(s) FROM settings s WHERE is_active=true AND active_event_slug=%s ORDER BY id DESC LIMIT 1",
+        (slug,),
+    ).fetchone()
+    actor = {key: (user or {}).get(key) for key in ("user_id", "user_name")}
+    conn.execute(
+        "INSERT INTO event_edit_context(event_slug,policy,baseline_policy,settings_baseline,restore_links,complete_mirror,opened_by) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+        (
+            slug,
+            Json(policy),
+            Json(policy),
+            Json(settings[0] if settings else {}),
+            Json(links),
+            len(links) == len(archive_rows),
+            Json(actor),
+        ),
+    )
+
+
 def _finish_archive_edit(conn, slug, before, *, user=None, baseline=None, clear_active=True):
     """Commit the draft mirror and verified expectation facts without calling the stats engine."""
     from psycopg import sql
@@ -4587,11 +4690,22 @@ def _finish_archive_edit(conn, slug, before, *, user=None, baseline=None, clear_
                     ),
                     (Json(values), original["id"]),
                 )
-    conn.execute(
-        "UPDATE event_stats SET requirements_snapshot=%s, attendance_recorded=true WHERE event_slug=%s",
-        (Json(policy) if policy else None, slug),
-    )
     rows = _archive_fact_rows(conn, slug)
+    previous = (baseline or {}).get("event_stats", {}).get(slug, {})
+    summary_only = _is_summary_only(previous, before)
+    if summary_only:
+        if policy != ((stored[0] if stored else None) or {}):
+            conn.execute(
+                "UPDATE event_stats SET requirements_snapshot=%s WHERE event_slug=%s",
+                (Json(policy) if policy else None, slug),
+            )
+        if rows and previous.get("summary_only") is not True:
+            conn.execute("UPDATE event_stats SET summary_only=true WHERE event_slug=%s", (slug,))
+    else:
+        conn.execute(
+            "UPDATE event_stats SET requirements_snapshot=%s, attendance_recorded=true WHERE event_slug=%s",
+            (Json(policy) if policy else None, slug),
+        )
     tariff = policy.get("event_price") or {}
     basis = tariff.get("basis")
     aliases = {}
@@ -4943,6 +5057,13 @@ def archive_event(
                 columns = [desc[0] for desc in cur.description]
                 raw_rows = cur.fetchall()
 
+                _recover_legacy_archive_context(
+                    conn,
+                    event_slug,
+                    facts_before,
+                    {row["record_id"] for row in active_before},
+                    user=user,
+                )
                 mirrored = conn.execute(
                     "SELECT complete_mirror, jsonb_array_length(restore_links)>0 FROM event_edit_context WHERE event_slug = %s",
                     (event_slug,),
@@ -4951,7 +5072,10 @@ def archive_event(
                     raise ArchiveError(
                         "Historical event date is unknown; set its date before rearchiving"
                     )
-                if not raw_rows and not (mirrored and any(mirrored)):
+                summary_only = _is_summary_only(
+                    archive_baseline["event_stats"].get(event_slug, {}), facts_before
+                )
+                if not raw_rows and not (mirrored and any(mirrored)) and not summary_only:
                     raise ArchiveError("no active rows")
 
                 checkins = [_row_to_dict(columns, row) for row in raw_rows]
@@ -5065,7 +5189,8 @@ def archive_event(
                     "INSERT INTO event_stats (event_slug, event_date, event_display_name, archived_at, "
                     "startgg_snapshot, requirements_snapshot) VALUES (%s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (event_slug) DO UPDATE SET event_date = EXCLUDED.event_date, "
-                    "event_display_name = EXCLUDED.event_display_name, startgg_snapshot = EXCLUDED.startgg_snapshot",
+                    "event_display_name = EXCLUDED.event_display_name, startgg_snapshot = EXCLUDED.startgg_snapshot "
+                    "WHERE NOT %s",
                     (
                         event_slug,
                         event_date,
@@ -5073,6 +5198,7 @@ def archive_event(
                         now,
                         Json(startgg_snapshot) if startgg_snapshot is not None else None,
                         Json(requirements) if requirements is not None else None,
+                        summary_only,
                     ),
                 )
                 _finish_archive_edit(
@@ -5377,7 +5503,13 @@ def reopen_event(
                                 (event_slug,),
                             ).fetchall()
                         ]
-                        complete_mirror = True
+                        metadata = conn.execute(
+                            "SELECT to_jsonb(s) FROM event_stats s WHERE event_slug=%s",
+                            (event_slug,),
+                        ).fetchone()
+                        complete_mirror = bool(links) or not _is_summary_only(
+                            metadata[0] if metadata else {}, []
+                        )
                         cur.execute(
                             "SELECT count(*) FROM event_archive WHERE event_slug = %s",
                             (event_slug,),
@@ -5427,6 +5559,12 @@ def reopen_event(
                         restored_rows = cur.rowcount or 0
                         if restored_rows != expected_rows:
                             raise ValueError("Cannot restore check-in IDs already in use")
+                if not existing_context and active_before:
+                    archived_rows = _archive_fact_rows(conn, event_slug)
+                    links = _legacy_mirror_links(
+                        archived_rows, {row["record_id"] for row in active_before}
+                    )
+                    complete_mirror = bool(archived_rows) and len(links) == len(archived_rows)
 
                 if not existing_context:
                     actor = {key: (user or {}).get(key) for key in ("user_id", "user_name")}

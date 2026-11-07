@@ -100,6 +100,8 @@ def test_rearchiving_the_same_active_ids_upserts_without_duplicate_rows(archive_
 def test_legacy_archive_rows_without_source_ids_are_never_replaced(archive_db, event):
     legacy_id = seed_archive(archive_db, event_slug=event, tag="legacy-test", payment_amount=99)
     legacy = table_rows(archive_db, "event_archive")[0]
+    # Declare an additive draft while the unmapped historical rows are untouched.
+    postgres.reopen_event(event, restore_active=False)
     archive_db.seed_checkin(event_slug=event)
     archive(event)
     archive(event)
@@ -112,8 +114,9 @@ def test_legacy_archive_rows_without_source_ids_are_never_replaced(archive_db, e
 def test_archive_failure_rolls_back_players_archive_and_active_changes(
     archive_db, event, monkeypatch
 ):
-    archive_db.seed_checkin(event_slug=event)
     seed_archive(archive_db, event_slug=event, tag="legacy-test")
+    postgres.reopen_event(event, restore_active=False)
+    archive_db.seed_checkin(event_slug=event)
     before = {
         table: table_rows(archive_db, table)
         for table in ("active_event_data", "event_archive", "players", "event_stats")

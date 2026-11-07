@@ -357,8 +357,8 @@ def test_live_manual_recompute_is_disabled_with_tooltip_and_server_retry_defers(
 
 def test_partial_legacy_mirror_deletes_last_mapped_row_but_preserves_unmapped_facts(pg_db):
     seed_history(pg_db)
-    settings = postgres.get_active_settings_with_id()
-    postgres.update_settings(settings["record_id"], {"active_event_slug": "fightbox"})
+    # Explicitly start an additive draft before adding rows to unknown legacy facts.
+    postgres.reopen_event("fightbox", restore_active=False, user=ACTOR)
     pg_db.seed_checkin(
         record_id="mapped-new",
         event_slug="fightbox",

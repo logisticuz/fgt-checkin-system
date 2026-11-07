@@ -455,7 +455,7 @@ def test_pre010_dry_run_works_and_apply_refuses(history):
         for _ in range(8):
             conn.execute("SELECT * FROM event_stats ORDER BY event_slug").fetchall()
         conn.execute(
-            "ALTER TABLE event_stats DROP COLUMN requirements_snapshot, DROP COLUMN same_series_return_rate, DROP COLUMN same_series_base_count, DROP COLUMN same_series_returned_players, DROP COLUMN IF EXISTS attendance_recorded"
+            "ALTER TABLE event_stats DROP COLUMN requirements_snapshot, DROP COLUMN same_series_return_rate, DROP COLUMN same_series_base_count, DROP COLUMN same_series_returned_players, DROP COLUMN IF EXISTS attendance_recorded, DROP COLUMN IF EXISTS summary_only"
         )
         try:
             assert len(cli.repair(_conn=conn)["events"]) == 4
