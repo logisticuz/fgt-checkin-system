@@ -92,3 +92,14 @@ def test_error_ux_uses_text_and_the_maybe_registered_message(checkin_html):
     # Only static markup ever goes through innerHTML on this page.
     for match in re.finditer(r"\.innerHTML = (.+);", checkin_html):
         assert match.group(1).startswith("'") and "${" not in match.group(1), match.group(0)
+
+
+def test_tag_field_has_the_start_gg_hint(checkin_html):
+    tag = element(checkin_html, "tag")
+    assert 'aria-describedby="tag-hint"' in tag
+    hint = re.search(r'<p id="tag-hint" class="field-hint">([^<]*)</p>', checkin_html)
+    assert hint and hint.group(1) == "Use exactly the same tag as on Start.gg"
+    # Hint sits after the tag input and before the next field.
+    assert checkin_html.index('id="tag"') < hint.start() < checkin_html.index("personnummer-group")
+    assert re.search(r"\.field-hint\s*\{[^}]*color:\s*#9aa4ae", checkin_html)
+    assert "body.kiosk .field-hint" in checkin_html

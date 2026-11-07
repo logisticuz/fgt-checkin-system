@@ -265,6 +265,9 @@
     }
     .hidden { display: none; }
 
+    /* Quiet help text under a field: muted, never red, so validation errors still stand out. */
+    .field-hint { font-size: 0.8rem; line-height: 1.3; color: #9aa4ae; margin-top: 0.35rem; }
+
     /* Personal ID helpers */
     .pnr-toggle { font-size: 0.8rem; color: #58aaff; }
     .pnr-error { color: #f44336; font-size: 0.85rem; min-height: 1.1rem; margin-top: 0.3rem; }
@@ -275,6 +278,7 @@
     body.kiosk label,
     body.kiosk .consent,
     body.kiosk .pnr-toggle,
+    body.kiosk .field-hint,
     body.kiosk .pnr-error,
     body.kiosk .error-container p,
     body.kiosk footer { font-size: 1rem; }
@@ -314,7 +318,8 @@
             <span class="tooltip">If registered on Start.gg, use the exact same tag</span>
           </span>
         </label>
-        <input type="text" id="tag" name="tag" placeholder="Your player tag" autocomplete="off" required>
+        <input type="text" id="tag" name="tag" placeholder="Your player tag" autocomplete="off" required aria-describedby="tag-hint">
+        <p id="tag-hint" class="field-hint">Use exactly the same tag as on Start.gg</p>
       </div>
 
       <div class="form-group" id="personnummer-group" role="group" aria-labelledby="pnr-label" aria-describedby="ci-pnr-error">
