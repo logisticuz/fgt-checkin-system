@@ -146,23 +146,28 @@ start_stub() {
 start_stub "$backend" --network-alias backend --network-alias fgt_dashboard
 mkdir -p "$scratch/logs"
 containers+=("$gateway")
-docker run -d --name "$gateway" --network "$network" -p 127.0.0.1:18443:443 \
-    -e ADMIN_AUTH_COOKIE_TOKEN=synthetic-cookie \
-    --mount "type=bind,src=$(native_path "$root/nginx.conf"),dst=/etc/nginx/templates/default.conf.template,readonly" \
-    --mount "type=bind,src=$(native_path "$scratch/certs"),dst=/etc/letsencrypt,readonly" \
-    --mount "type=bind,src=$(native_path "$scratch/htpasswd"),dst=/etc/nginx/.htpasswd,readonly" \
-    --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
-    nginx:1.27.5 >/dev/null
+start_gateway() {
+    docker run -d --name "$gateway" --network "$network" -p 127.0.0.1:18443:443 \
+        -e ADMIN_AUTH_COOKIE_TOKEN=synthetic-cookie \
+        --mount "type=bind,src=$(native_path "$root/nginx.conf"),dst=/etc/nginx/templates/default.conf.template,readonly" \
+        --mount "type=bind,src=$(native_path "$scratch/certs"),dst=/etc/letsencrypt,readonly" \
+        --mount "type=bind,src=$(native_path "$scratch/htpasswd"),dst=/etc/nginx/.htpasswd,readonly" \
+        --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
+        nginx:1.27.5 >/dev/null
+    for ((attempt=0; attempt<30; attempt++)); do
+        if curl --noproxy '*' -ksSf --max-time 2 -H 'Host: www.checkin.fgctrollhattan.se' "$base/health" >/dev/null 2>&1; then return; fi
+        sleep 0.2
+    done
+    echo 'Disposable nginx did not become ready' >&2; exit 1
+}
+start_gateway
+
 containers+=("$dev_gateway")
 docker run -d --name "$dev_gateway" --network "$network" \
     --mount "type=bind,src=$(native_path "$root/nginx.dev.conf"),dst=/etc/nginx/conf.d/default.conf,readonly" \
     --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/var/log/nginx/fgt" \
     nginx:1.27.5 >/dev/null
 docker exec "$dev_gateway" nginx -t
-for ((attempt=0; attempt<30; attempt++)); do
-    if curl --noproxy '*' -ksSf --max-time 2 -H 'Host: www.checkin.fgctrollhattan.se' "$base/health" >/dev/null 2>&1; then break; fi
-    sleep 0.2
-done
 # Official entrypoint has rendered envsubst before either syntax test or reload.
 docker exec "$gateway" nginx -t
 docker exec "$gateway" nginx -s reload
@@ -345,3 +350,68 @@ finally:
     dev_connection.close()
 PY
 echo 'PASS isolated nginx 1.27.5: routing, headers, Basic/cookie/OAuth, sibling DNS, venue rush and 429/Retry-After'
+
+# T-049: prove persisted rows cannot retain client details or capabilities.
+request 200 "$public" '/api/participant/SyntheticPrivate/status?t=synthetic-private-query' GET \
+    --cookie session=synthetic-private-cookie --user synthetic-private-user:synthetic-private-password
+request 200 "$public" '/status/SyntheticPrivate?t=synthetic-private-query' GET
+request 200 "$public" '/member/confirm/synthetic-private-capability?t=synthetic-private-query' GET
+request 404 "$public" '/unknown/synthetic-private-capability?t=synthetic-private-query' GET
+request 502 meetup.fgctrollhattan.se '/api/participant/SyntheticPrivate/status?t=synthetic-private-error-query' GET
+# stderr remains useful for live debugging; none of this native context may enter files.
+docker logs "$gateway" > "$scratch/docker.stdout" 2> "$scratch/docker.stderr"
+grep -q 'synthetic-private-error-query' "$scratch/docker.stderr"
+docker run --rm -i --network none \
+    --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/logs,readonly" \
+    python:3.11.10-slim-bookworm python -B - <<'PY'
+import json
+import re
+from pathlib import Path
+
+access = Path("/logs/access.log").read_text()
+errors = Path("/logs/error.log").read_text()
+for text in (access, errors):
+    assert "SyntheticPrivate" not in text
+    assert "synthetic-private" not in text
+    assert "backend_rate=" not in text
+rows = [json.loads(line) for line in access.splitlines()]
+error_rows = [json.loads(line) for line in errors.splitlines()]
+assert rows and error_rows
+for row in rows:
+    assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.0/24", row["client_ip"]), row
+    assert "?" not in row["uri"]
+    assert set(row) == {"time", "client_ip", "host", "method", "uri", "route_group", "status", "bytes", "request_time", "upstream_status", "upstream_response_time", "limit_req_status"}
+assert any(row["uri"] == "/api/participant/*/status" for row in rows)
+assert any(row["uri"] == "/status/*" for row in rows)
+assert any(row["uri"] == "/member/confirm/*" for row in rows)
+assert any(row["status"] == 429 and row["limit_req_status"] == "REJECTED" for row in rows)
+assert all(500 <= row["status"] < 600 for row in error_rows)
+print(f"PASS persistent privacy: {len(rows)} JSON access rows and {len(error_rows)} sanitized 5xx rows")
+PY
+if ! bash "$root/scripts/rotate_nginx_logs.sh" --container "$gateway" --log-dir "$scratch/logs"; then
+    docker logs "$gateway" 2>&1 | tail -n 16 >&2
+    docker exec "$gateway" ls -la /var/log/nginx/fgt >&2
+    ls -la "$scratch/logs" >&2
+    exit 1
+fi
+request 200 "$public" '/health?t=synthetic-private-after-reopen' GET
+# Recreate only this test's gateway; the same host bind must retain the files.
+docker rm -f "$gateway" >/dev/null
+start_gateway
+docker exec "$gateway" nginx -t
+docker run --rm -i --network none \
+    --mount "type=bind,src=$(native_path "$scratch/logs"),dst=/logs,readonly" \
+    python:3.11.10-slim-bookworm python -B - <<'PY'
+import json
+from pathlib import Path
+
+logs = Path("/logs")
+archives = list(logs.glob("access.log.*"))
+assert len(archives) == 1
+assert len([json.loads(line) for line in archives[0].read_text().splitlines()]) > 780
+assert list(logs.glob("error.log.*"))
+active = [json.loads(line) for line in (logs / "access.log").read_text().splitlines()]
+assert len([row for row in active if row["uri"] == "/health"]) >= 2
+assert "synthetic-private" not in (logs / "access.log").read_text()
+print("PASS persistent rotation: archived records retained, new file receives requests after reopen and container recreation")
+PY
