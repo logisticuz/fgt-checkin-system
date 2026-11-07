@@ -524,6 +524,12 @@
     }
     if (data.error_code === "locked") { showHelp("help_locked_title", "help_locked"); return; }
     if (isManualReview(data)) { showHelp("help_manual_title", "help_manual"); return; }
+    // A failed send (e.g. 502 send_failed) is terminal: no "Send again" loop on the kiosk.
+    if (data.state === "failed" || data.error_code === "failed" ||
+        data.error_code === "send_failed") {
+      showHelp("help_failed_title", "help_failed");
+      return;
+    }
     if (data.error_code === "rate_limited") {
       countdown(el.resend, result.retryAfter || 30, "resend_wait", resendReady);
     } else {

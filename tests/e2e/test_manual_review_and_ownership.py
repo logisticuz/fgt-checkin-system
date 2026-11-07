@@ -221,3 +221,37 @@ def test_legacy_registration_sends_the_checkin_capability(site):
     body = calls["ebas"][0]
     assert body["checkin_id"] == "chk-a" and body["status_token"] == "tok-chk-a"
     assert body["personnummer"] == synthetic_personnummer()
+
+
+@pytest.mark.parametrize(
+    "status, answer, heading",
+    [
+        (
+            502,
+            {"ok": False, "state": "failed", "error_code": "send_failed"},
+            "The registration didn't go through",
+        ),
+        (
+            200,
+            {"ok": False, "state": "failed", "error_code": "failed"},
+            "The registration didn't go through",
+        ),
+        (200, MANUAL_REVIEW[0], "Your registration was received – a TO will finish it with you"),
+    ],
+    ids=["send-failed-502", "failed", "manual-review"],
+)
+def test_resend_terminal_answers_end_the_code_step(kiosk, status, answer, heading):
+    page, api = kiosk()
+    api.queue("start", {**CODE_SENT, "resend_after_s": 0})  # "Send again" enabled at once
+    fill_details(page)
+    page.click("#mv2-start")
+    page.wait_for_selector("#mv2-step-code:not([hidden])")
+    page.wait_for_selector("#mv2-resend:not([disabled])")
+    api.queue("resend", answer, status=status)
+    page.click("#mv2-resend")
+    page.wait_for_selector("#mv2-step-help:not([hidden])")
+    assert page.inner_text("#mv2-help-heading") == heading
+    assert not page.is_visible("#mv2-step-code")
+    assert not page.is_visible("#mv2-resend")
+    assert page.is_visible("#mv2-reset")  # kiosk reset still available
+    assert len(api.calls["resend"]) == 1
