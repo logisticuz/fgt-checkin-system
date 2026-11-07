@@ -323,6 +323,7 @@ def test_apply_and_audit_are_one_transaction(history, monkeypatch):
 
 def test_unknown_or_conflicting_dates_do_not_guess(history):
     with history.pool.connection() as conn:
+        conn.execute("UPDATE event_stats SET event_date=NULL WHERE event_slug='later'")
         conn.execute(
             "UPDATE event_archive SET event_date='2026-01-03' WHERE event_slug='later' AND player_uuid='a'"
         )
@@ -1192,3 +1193,174 @@ def test_same_player_games_union_per_event_and_aliases_do_not_duplicate_slots(hi
     )
     assert player["after"]["game_counts"] == {"Street Fighter 6": 3}
     assert player["after"]["total_paid"] == 45
+
+
+@pytest.mark.parametrize(
+    "row_dates", [("2026-01-01", None), ("2026-01-01", "2026-01-02"), (None, None)]
+)
+@pytest.mark.parametrize("linked", [True, False])
+def test_event_date_range_keeps_all_game_rows_in_actual_insights(
+    pg_db, dashboard, monkeypatch, row_dates, linked
+):
+    pg_db.insert("game_aliases", {"alias": "sf6", "canonical": "Street Fighter 6"})
+    pg_db.insert("event_stats", {"event_slug": "fightbox", "event_date": "2026-01-01"})
+    if linked:
+        pg_db.insert("players", {"uuid": "date-attendee"})
+    for day, games in zip(row_dates, (["SF6"], ["GG"])):
+        pg_db.insert(
+            "event_archive",
+            {
+                "event_slug": "fightbox",
+                "event_date": day,
+                "player_uuid": "date-attendee" if linked else None,
+                "tournament_games_registered": games,
+                "payment_amount": 25,
+            },
+        )
+    before = snapshot(pg_db)
+    monkeypatch.setattr(
+        dashboard.storage,
+        "get_event_history_dashboard",
+        postgres.get_event_history_dashboard,
+        raising=False,
+    )
+    for name in ("get_game_aliases", "get_event_game_stats", "get_multi_game_count"):
+        monkeypatch.setattr(dashboard.storage, name, getattr(postgres, name), raising=False)
+    outputs = []
+    for period in ("all", "custom"):
+        result = dashboard.callbacks["update_insights"](
+            "tab-insights", 1, [], period, [], 10, "", "", "2026-01-01", "2026-01-01"
+        )
+        values = {
+            item.component_id: value
+            for item, value in zip(dashboard.definitions["update_insights"]["output"], result)
+        }
+        assert values["insights-kpi-total"] == ("1" if linked else "2")
+        assert values["insights-kpi-avggames"] == ("2.0" if linked else "1.0")
+        assert values["insights-kpi-multigame"] == ("100.0%" if linked else "0.0%")
+        assert {row["game"]: row["entries"] for row in values["insights-games-table"]} == {
+            "Street Fighter 6": 1,
+            "GG": 1,
+        }
+        outputs.append(values["insights-games-table"])
+    assert outputs[0] == outputs[1]
+    assert snapshot(pg_db) == before
+
+
+@pytest.mark.parametrize("period", ["all", "custom"])
+def test_unknown_date_events_have_visible_count_including_empty_range(
+    pg_db, dashboard, monkeypatch, period
+):
+    pg_db.insert("event_stats", {"event_slug": "undated-event"})
+    pg_db.insert(
+        "event_archive", {"event_slug": "undated-event", "tournament_games_registered": ["SF6"]}
+    )
+    before = snapshot(pg_db)
+    monkeypatch.setattr(
+        dashboard.storage,
+        "get_event_history_dashboard",
+        postgres.get_event_history_dashboard,
+        raising=False,
+    )
+    result = dashboard.callbacks["update_insights"](
+        "tab-insights", 1, [], period, [], 10, "", "", "2026-01-01", "2026-01-01"
+    )
+    values = {
+        item.component_id: value
+        for item, value in zip(dashboard.definitions["update_insights"]["output"], result)
+    }
+    assert "1 events without a date" in values["insights-empty-hint"]
+    assert (
+        "included in all time" if period == "all" else "excluded from this date range"
+    ) in values["insights-empty-hint"]
+    assert values["insights-kpi-total"] == ("1" if period == "all" else "0")
+    assert postgres.get_unique_attendee_count(start_date="2026-01-01") == 0
+    assert postgres.get_event_game_stats(start_date="2026-01-01") == {}
+    assert len(postgres.get_event_game_stats()) == 1
+    assert snapshot(pg_db) == before
+
+
+def test_conflicting_archive_dates_without_event_date_remain_unknown_in_all_scopes(pg_db):
+    pg_db.insert("event_stats", {"event_slug": "ambiguous"})
+    pg_db.insert("players", {"uuid": "ambiguous-player"})
+    for day in ("2026-01-01", "2026-01-02"):
+        pg_db.insert(
+            "event_archive",
+            {
+                "event_slug": "ambiguous",
+                "event_date": day,
+                "player_uuid": "ambiguous-player",
+                "tournament_games_registered": ["SF6", "GG"],
+            },
+        )
+    before = snapshot(pg_db)
+    for bounds in (
+        {"start_date": "2026-01-01"},
+        {"end_date": "2026-01-02"},
+        {"start_date": "2026-01-01", "end_date": "2026-01-02"},
+    ):
+        assert postgres.get_event_game_stats(**bounds) == {}
+        assert postgres.get_unique_attendee_count(**bounds) == 0
+        assert postgres.get_top_players_history(**bounds) == []
+    assert postgres.get_event_game_stats()["ambiguous"]["total_count"] == 1
+    assert postgres.get_unique_attendee_count() == 1
+    assert postgres.get_player_funnel_stats()["new_count"] == 0
+    assert postgres.get_player_funnel_stats()["returning_count"] == 0
+    assert postgres.recompute_event_stats("ambiguous", dry_run=True)["after"]["event_date"] is None
+    assert snapshot(pg_db) == before
+
+
+@pytest.mark.parametrize("metadata", ["2026-01-01", "2026-01-03", None, "absent"])
+def test_all_insights_archive_date_scopes_select_complete_events(pg_db, metadata):
+    for player in ("dated", "undated"):
+        pg_db.insert(
+            "players",
+            {"uuid": player, "name": player, "total_events": 3, "last_seen": "2025-01-01"},
+        )
+    for index in range(3):
+        slug = f"scope-{index}"
+        if metadata != "absent":
+            pg_db.insert("event_stats", {"event_slug": slug, "event_date": metadata})
+        for player, day, games, source in (
+            ("dated", "2026-01-01", ["SF6"], "public_form"),
+            ("undated", None, ["SF6", "GG"], "manual_dashboard"),
+        ):
+            pg_db.insert(
+                "event_archive",
+                {
+                    "event_slug": slug,
+                    "event_date": day,
+                    "player_uuid": player,
+                    "name": player,
+                    "tournament_games_registered": games,
+                    "added_via": source,
+                    "acquisition_source": "friend" if day is None else "venue",
+                },
+            )
+    before = snapshot(pg_db)
+    selected_day = metadata if metadata and metadata != "absent" else "2026-01-01"
+    selected = dict(start_date=selected_day, end_date=selected_day)
+    excluded = dict(start_date="2026-02-01", end_date="2026-02-01")
+    for name in (
+        "get_event_game_stats",
+        "get_multi_game_count",
+        "get_event_manual_add_stats",
+        "get_added_via_breakdown",
+        "get_acquisition_source_breakdown",
+        "get_game_crossover_stats",
+        "get_unique_attendee_count",
+        "get_top_players_history",
+    ):
+        query = getattr(postgres, name)
+        assert query(**selected) == query(), name
+        outside = query(**excluded)
+        assert not any(outside.values()) if isinstance(outside, dict) else not outside
+    for name in ("get_community_health_v2_stats", "get_player_funnel_stats"):
+        query = getattr(postgres, name)
+        result = query(**selected, anchor_date=selected_day)
+        assert result["core_players" if name.endswith("v2_stats") else "core_count"] == 2
+    assert (
+        postgres.get_player_churn_stats(**selected, anchor_date="2026-01-01")["scoped_players"] == 2
+    )
+    assert postgres.get_top_players_history(**selected, game_filter="GG")[0]["name"] == "undated"
+    assert snapshot(pg_db) == before

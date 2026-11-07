@@ -2102,6 +2102,12 @@ def register_callbacks(app):
             range_start = _as_date(custom_start_date)
             range_end = _as_date(custom_end_date)
 
+        undated_event_count = sum(_as_date(ev.get("event_date")) is None for ev in events)
+        undated_note = (
+            f"{undated_event_count} events without a date; "
+            + ("included in all time." if selected_period == "all" else "excluded from this date range.")
+            if undated_event_count else ""
+        )
         filtered_events = []
         for ev in events:
             ev_date = _as_date(ev.get("event_date"))
@@ -2131,7 +2137,7 @@ def register_callbacks(app):
                 "all": "all time",
             }
             return _empty_response(
-                f"No archived events in {label_map.get(selected_period, 'selected period')}. Try widening date range or clearing filters.",
+                f"No archived events in {label_map.get(selected_period, 'selected period')}. Try widening date range or clearing filters. {undated_note}".strip(),
             )
 
         def _event_title(ev):
@@ -2833,6 +2839,8 @@ def register_callbacks(app):
                         f" Heads-up: no-show is {no_show_rate:.0f}% "
                         f"({no_show_total} of {reg_total} players) in this scope."
                     )
+
+        heads_up_text = " ".join(text for text in (heads_up_text, undated_note) if text)
 
         # Added-via source summary for selected scope (archive)
         if added_via_breakdown:

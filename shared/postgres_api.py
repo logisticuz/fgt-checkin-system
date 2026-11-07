@@ -1863,6 +1863,21 @@ def _game_attendances(rows, aliases):
     return list(units.values())
 
 
+def _event_scope_date_sql(archive_ref="event_archive"):
+    """Event metadata date, falling back only to one unambiguous archived event date.
+
+    archive_ref is an internal SQL table alias, never caller input. A range selects
+    complete events, including their NULL/conflicting-date rows, before aggregation.
+    """
+    return (
+        "COALESCE((SELECT scoped_event.event_date FROM event_stats scoped_event "
+        f"WHERE scoped_event.event_slug = {archive_ref}.event_slug), "
+        "(SELECT CASE WHEN count(DISTINCT scoped_archive.event_date) = 1 "
+        "THEN min(scoped_archive.event_date) END FROM event_archive scoped_archive "
+        f"WHERE scoped_archive.event_slug = {archive_ref}.event_slug))"
+    )
+
+
 def get_event_game_stats(
     event_slugs: Optional[List[str]] = None,
     start_date: Optional[str] = None,
@@ -1877,10 +1892,10 @@ def get_event_game_stats(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
     where_sql = "WHERE " + " AND ".join(conditions) if conditions else ""
     with _get_pool().connection() as conn, conn.cursor() as cur:
@@ -2085,10 +2100,10 @@ def get_event_manual_add_stats(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2135,10 +2150,10 @@ def get_added_via_breakdown(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2197,10 +2212,10 @@ def get_community_health_v2_stats(
         scope_conditions.append("event_slug = ANY(%s)")
         scope_params.append(event_slugs)
     if start_date:
-        scope_conditions.append("event_date >= %s")
+        scope_conditions.append(f"{_event_scope_date_sql()} >= %s")
         scope_params.append(start_date)
     if end_date:
-        scope_conditions.append("event_date <= %s")
+        scope_conditions.append(f"{_event_scope_date_sql()} <= %s")
         scope_params.append(end_date)
 
     scope_where = f"WHERE {' AND '.join(scope_conditions)}" if scope_conditions else ""
@@ -2215,13 +2230,17 @@ def get_community_health_v2_stats(
         core_params.append(event_slugs)
 
     if anchor:
-        core_conditions.append("ea.event_date <= %s::date")
+        core_conditions.append(f"{_event_scope_date_sql('ea')} <= %s::date")
         core_params.append(anchor)
-        core_conditions.append("ea.event_date >= (%s::date - (%s || ' months')::interval)")
+        core_conditions.append(
+            f"{_event_scope_date_sql('ea')} >= (%s::date - (%s || ' months')::interval)"
+        )
         core_params.append(anchor)
         core_params.append(max(int(recent_months), 1))
     else:
-        core_conditions.append("ea.event_date >= (CURRENT_DATE - (%s || ' months')::interval)")
+        core_conditions.append(
+            f"{_event_scope_date_sql('ea')} >= (CURRENT_DATE - (%s || ' months')::interval)"
+        )
         core_params.append(max(int(recent_months), 1))
 
     core_where = f"WHERE {' AND '.join(core_conditions)}"
@@ -2294,22 +2313,25 @@ def get_player_funnel_stats(
         context = _stats_context(conn)
         for slug, rows in context["events"].items():
             day = context["order"][slug][0]
-            if day is None or (event_slugs and slug not in event_slugs):
+            if event_slugs and slug not in event_slugs:
                 continue
-            if (lower and day < lower) or (upper and day > upper):
+            if (lower or upper) and (
+                day is None or (lower and day < lower) or (upper and day > upper)
+            ):
                 continue
             for row in rows:
                 player = row["player_uuid"]
                 if player:
                     scoped.add(player)
-                    (new if context["first"].get(player) == slug else returning).add(player)
+                    if day is not None:
+                        (new if context["first"].get(player) == slug else returning).add(player)
         # Preserve Core and Churn's existing time-window definitions.
         row = conn.execute(
-            """SELECT
+            f"""SELECT
                 (SELECT count(*) FROM (
                     SELECT player_uuid FROM event_archive
-                    WHERE player_uuid = ANY(%s) AND event_date <= coalesce(%s::date, CURRENT_DATE)
-                      AND event_date >= coalesce(%s::date, CURRENT_DATE) - (%s || ' months')::interval
+                    WHERE player_uuid = ANY(%s) AND {_event_scope_date_sql()} <= coalesce(%s::date, CURRENT_DATE)
+                      AND {_event_scope_date_sql()} >= coalesce(%s::date, CURRENT_DATE) - (%s || ' months')::interval
                       AND (%s::text[] IS NULL OR event_slug = ANY(%s))
                     GROUP BY player_uuid HAVING count(DISTINCT event_slug) >= 3
                 ) core),
@@ -2351,10 +2373,10 @@ def get_game_crossover_stats(
         conditions.append("ea.event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("ea.event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("ea.event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2414,10 +2436,10 @@ def get_acquisition_source_breakdown(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -2471,10 +2493,10 @@ def get_player_churn_stats(
         conditions.append("ea.event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("ea.event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("ea.event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql('ea')} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2536,11 +2558,11 @@ def get_top_players_history(
         params.append(event_slugs)
 
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
 
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     selected_game = str(game_filter or "").strip()
@@ -2609,10 +2631,10 @@ def get_unique_attendee_count(
         conditions.append("event_slug = ANY(%s)")
         params.append(event_slugs)
     if start_date:
-        conditions.append("event_date >= %s")
+        conditions.append(f"{_event_scope_date_sql()} >= %s")
         params.append(start_date)
     if end_date:
-        conditions.append("event_date <= %s")
+        conditions.append(f"{_event_scope_date_sql()} <= %s")
         params.append(end_date)
 
     where_sql = f"WHERE {' AND '.join(conditions)}"
@@ -2829,9 +2851,7 @@ def _stats_context(
     for slug, attendance in events.items():
         dates = {row["event_date"] for row in attendance if row["event_date"] is not None}
         meta = metadata.get(slug, {})
-        day = (
-            next(iter(dates)) if len(dates) == 1 else meta.get("event_date") if not dates else None
-        )
+        day = meta.get("event_date") or (next(iter(dates)) if len(dates) == 1 else None)
         stamps = [row["archived_at"] for row in attendance if row["archived_at"] is not None]
         if meta.get("archived_at") is not None:
             stamps.append(meta["archived_at"])

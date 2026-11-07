@@ -418,3 +418,15 @@ A recorded games list on any row makes that attendance's game metadata available
 duplicate row does not exclude an attendee whose recorded games contribute to the numerator.
 No archive fact or payment is deleted/rewritten by this grouping. Crossover's explicitly
 labelled "Shared players" remains a separate distinct-person overlap measure.
+
+### Event date ranges (C417/C418)
+
+Date ranges select whole events using `event_stats.event_date` first. If it is absent,
+use the single distinct non-NULL archived date for that event; zero or conflicting dates
+remain unknown. Every row from a selected event participates, even when a row's date is
+NULL or disagrees with the event date. The canonical context uses the identical rule.
+This applies to Games/multi-game, manual/added-via/acquisition sources, crossover,
+unique/top participants, churn scope, community scope/core rolling windows and funnel/core.
+Existing rolling-window lengths, distinct-person and attendance definitions stay intact.
+All-time includes unknown-date events; bounded ranges exclude them and Insights explicitly
+shows the count of events without a date. Unknown dates never become today's date.
