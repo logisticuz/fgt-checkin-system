@@ -135,7 +135,17 @@ def test_ebas_requires_success_and_explicit_boolean(pg_db, initial, ok, data, ex
         startgg=True,
         status="Ready" if initial else "Pending",
     )
-    result = postgres.apply_integration_result(row["record_id"], "ebas", ok, data)
+    result = postgres.apply_integration_result(
+        row["record_id"],
+        "ebas",
+        ok,
+        data,
+        state=(
+            ("verified_true" if data.get("member") is True else "verified_false")
+            if ok is True
+            else "unavailable"
+        ),
+    )
     stored = pg_db.checkins()[0]
     assert stored["member"] is expected
     assert stored["status"] == ("Ready" if expected else "Pending")
@@ -197,7 +207,9 @@ def test_field_and_status_are_written_atomically(app_client, pg_db, writer):
             postgres.update_checkin(row["record_id"], {"member": True, "status": "Pending"})
         else:
             key = "registered" if writer == "startgg" else missing_field
-            postgres.apply_integration_result(row["record_id"], writer, True, {key: True})
+            postgres.apply_integration_result(
+                row["record_id"], writer, True, {key: True}, state="verified_true"
+            )
         stored = pg_db.checkins()[0]
         assert stored[missing_field] is True
         assert stored["status"] == "Ready"
@@ -227,6 +239,7 @@ def test_integration_result_handler_recomputes_status(app_client, pg_db, member)
             "checkin_id": row["record_id"],
             "source": "ebas",
             "ok": True,
+            "state": "verified_true" if member else "verified_false",
             "data": {"member": member},
         },
     )
@@ -275,6 +288,19 @@ def test_integration_audit_never_copies_sensitive_payloads(pg_db, caplog, source
     pg_db.seed_settings()
     row = pg_db.seed_checkin()
     synthetic_identifier = "0" * 12  # Deliberately invalid synthetic identifier, never a real PNR.
+    if source != "ebas":
+        before = pg_db.checkins()
+        with pytest.raises(ValueError, match="^invalid_source$") as error:
+            postgres.apply_integration_result(
+                row["record_id"],
+                source,
+                {"private": synthetic_identifier},
+                data={"member": True, "personnummer": synthetic_identifier},
+            )
+        assert synthetic_identifier not in str(error.value)
+        assert synthetic_identifier not in caplog.text
+        assert pg_db.checkins() == before
+        return
     postgres.apply_integration_result(
         row["record_id"],
         source,
@@ -286,10 +312,14 @@ def test_integration_audit_never_copies_sensitive_payloads(pg_db, caplog, source
         },
         error={"code": synthetic_identifier, "message": f"personnummer={synthetic_identifier}"},
         fetched_at=synthetic_identifier,
+        state="verified_true",
     )
     with pg_db.pool.connection() as connection:
         details = connection.execute("SELECT details FROM audit_log").fetchone()[0]
-    assert json.loads(details)["ok"] is True
+    assert json.loads(details)["ok"] is (source != "ebas")
+    if source == "ebas":
+        assert json.loads(details)["state"] == "unavailable"
+        assert json.loads(details)["error_code"] == "provider_error"
     assert "personnummer" not in details.lower()
     assert not re.search(r"\d{10,12}", details)
     assert "personnummer" not in caplog.text.lower()
@@ -396,7 +426,11 @@ def test_integration_endpoint_forwards_degraded_state_and_preserves_startgg(
             "data": {"registered": False, "events": []},
         },
     )
-    assert response.status_code == 200 and response.json()["updated"] is False
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "state": "unavailable",
+        "error_code": "contradictory_verdict",
+    }
     stored = pg_db.checkins()[0]
     assert stored["startgg"] is True and stored["is_guest"] is False
     assert stored["status"] == "Ready"
@@ -419,26 +453,30 @@ def test_dashboard_recheck_applies_successful_negative_lookup(
     n8n_stub.response = {"isRegistered": False, "events": []}
     if not legacy:
         n8n_stub.response.update(ok=True, state="verified_false")
-    response = app_client.post(
-        f"/api/admin/{route}", json={"record_id": row["record_id"]}
-    )
+    response = app_client.post(f"/api/admin/{route}", json={"record_id": row["record_id"]})
+    if legacy:
+        if route == "recheck-startgg":
+            assert response.status_code == 502
+        else:
+            assert response.status_code == 200
+            assert response.json()["checked"] == 0 and len(response.json()["errors"]) == 1
+        stored = pg_db.checkins()[0]
+        assert stored["startgg"] is True and stored["is_guest"] is False
+        assert stored["tournament_games_registered"] == ["Original synthetic game"]
+        assert stored["status"] == "Ready" and stored["payment_expected"] == 25
+        return
     assert response.status_code == 200
     stored = pg_db.checkins()[0]
     assert stored["startgg"] is False and stored["is_guest"] is True
     assert stored["tournament_games_registered"] == []
     assert stored["status"] == "Pending" and stored["payment_expected"] == 0
     if route == "recheck-startgg":
-        assert (
-            response.json()["startgg"] is False
-            and response.json()["status"] == "Pending"
-        )
+        assert response.json()["startgg"] is False and response.json()["status"] == "Pending"
         assert response.json()["events"] == []
     else:
         assert response.json()["checked"] == 1 and response.json()["errors"] == []
     with pg_db.pool.connection() as connection:
-        audit = json.loads(
-            connection.execute("SELECT details FROM audit_log").fetchone()[0]
-        )
+        audit = json.loads(connection.execute("SELECT details FROM audit_log").fetchone()[0])
     assert audit["ok"] is True and "startgg" in audit["updated_fields"]
 
 

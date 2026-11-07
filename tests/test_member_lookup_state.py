@@ -76,10 +76,13 @@ def attempt_evidence(database, attempt_id):
 def test_confirmed_boolean_changes_only_automated_membership(pg_db, previous, found):
     pg_db.seed_settings(require_startgg=False)
     checkin = pg_db.seed_checkin(member=previous, member_source="ebas_check")
-    attempt = postgres.start_integration_attempt(
-        checkin["record_id"], sources=("ebas",)
+    attempt = postgres.start_integration_attempt(checkin["record_id"], sources=("ebas",))
+    result = apply_check(
+        checkin,
+        member=found,
+        attempt_id=attempt,
+        state="verified_true" if found else "verified_false",
     )
-    result = apply_check(checkin, member=found, attempt_id=attempt)
     stored = pg_db.checkins()[0]
     expected = "confirmed_member" if found else "confirmed_nonmember"
     assert result["updated"] is True
@@ -140,7 +143,7 @@ def test_errors_are_unknown_and_never_change_membership(
 def test_skipped_lookup_does_not_use_a_boolean_in_the_payload(pg_db, previous):
     pg_db.seed_settings()
     checkin = pg_db.seed_checkin(member=previous, member_source="ebas_check")
-    result = apply_check(checkin, member=not previous, state="skipped")
+    result = apply_check(checkin, member=not previous, ok=False, state="skipped")
     stored = pg_db.checkins()[0]
     assert result["updated"] is False
     assert (
@@ -159,18 +162,16 @@ def test_skipped_lookup_does_not_use_a_boolean_in_the_payload(pg_db, previous):
         (True, "v2", False),
     ],
 )
-def test_lookup_outcome_cannot_override_protected_truth(
-    pg_db, member, provenance, found
-):
+def test_lookup_outcome_cannot_override_protected_truth(pg_db, member, provenance, found):
     pg_db.seed_settings()
     checkin = pg_db.seed_checkin(member=member, member_source=provenance)
-    result = apply_check(checkin, member=found)
+    result = apply_check(
+        checkin, member=found, state="verified_true" if found else "verified_false"
+    )
     stored = pg_db.checkins()[0]
     assert result["updated"] is False
     assert (stored["member"], stored["member_source"]) == (member, provenance)
-    assert stored["member_lookup_state"] == (
-        "confirmed_member" if found else "confirmed_nonmember"
-    )
+    assert stored["member_lookup_state"] == ("confirmed_member" if found else "confirmed_nonmember")
 
 
 def test_submitted_receipt_protects_truth_before_provenance_is_written(pg_db):
@@ -178,7 +179,7 @@ def test_submitted_receipt_protects_truth_before_provenance_is_written(pg_db):
     checkin = pg_db.seed_checkin(member=True, member_source="ebas_check")
     attempt_id = v2_attempt(checkin, "submitted")
     before = attempt_evidence(pg_db, attempt_id)
-    assert apply_check(checkin, member=False)["updated"] is False
+    assert apply_check(checkin, member=False, state="verified_false")["updated"] is False
     stored = pg_db.checkins()[0]
     assert (
         stored["member"],
@@ -212,22 +213,18 @@ def test_stale_result_cannot_change_lookup_or_truth(pg_db, stale):
         member=True, member_source="ebas_check", member_lookup_state="confirmed_member"
     )
     old = postgres.start_integration_attempt(checkin["record_id"], sources=("ebas",))
-    current = postgres.start_integration_attempt(
-        checkin["record_id"], sources=("ebas",)
-    )
+    current = postgres.start_integration_attempt(checkin["record_id"], sources=("ebas",))
     arguments = {"attempt_id": current}
     if stale == "older_attempt":
         arguments["attempt_id"] = old
     elif stale == "missing_attempt":
         arguments["attempt_id"] = None
     elif stale == "older_time":
-        arguments["fetched_at"] = (
-            datetime.now(timezone.utc) - timedelta(days=1)
-        ).isoformat()
+        arguments["fetched_at"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     else:
-        apply_check(checkin, member=True, attempt_id=current)
+        apply_check(checkin, member=True, attempt_id=current, state="verified_true")
     before = pg_db.checkins()
-    result = apply_check(checkin, member=False, **arguments)
+    result = apply_check(checkin, member=False, state="verified_false", **arguments)
     assert result["updated"] is False and result["state"] == "stale_rejected"
     assert pg_db.checkins() == before
 
@@ -244,7 +241,7 @@ def test_lookup_metadata_and_membership_roll_back_with_failed_audit(pg_db, monke
 
     monkeypatch.setattr(postgres, "_integration_audit", unavailable_audit)
     with pytest.raises(RuntimeError, match="synthetic audit unavailable"):
-        apply_check(checkin, member=False)
+        apply_check(checkin, member=False, state="verified_false")
     assert pg_db.checkins() == before
 
 
@@ -256,17 +253,16 @@ def test_other_integrations_and_payload_fields_cannot_set_lookup_state(pg_db):
         "startgg",
         True,
         {"registered": True, "member_lookup_state": "confirmed_member", "member": True},
+        state="verified_true",
     )
     stored = pg_db.checkins()[0]
-    assert (
-        stored["member"] is False
-        and stored["member_lookup_state"] == "confirmed_nonmember"
-    )
+    assert stored["member"] is False and stored["member_lookup_state"] == "confirmed_nonmember"
     postgres.apply_integration_result(
         checkin["record_id"],
         "ebas",
         True,
         {"member": False, "member_lookup_state": "confirmed_member"},
+        state="verified_false",
     )
     assert pg_db.checkins()[0]["member_lookup_state"] == "confirmed_nonmember"
 

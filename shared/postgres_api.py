@@ -1092,30 +1092,171 @@ def _membership_provenance(conn, current):
     return "v2" if confirmed else current.get("member_source")
 
 
-def apply_legacy_member_status(checkin_id: str, member: bool):
+def validate_provider_verdict(source: str, payload: Any) -> Dict[str, Any]:
+    """Validate a typed provider result without inferring truth from transport success."""
+
+    def result(valid, state, error_code=None, data=None):
+        return {
+            "valid": valid,
+            "ok": valid and state in {"verified_true", "verified_false"},
+            "state": state,
+            "error_code": error_code,
+            "data": data if data is not None else {},
+        }
+
+    def reject(code):
+        return result(False, "unavailable", code)
+
+    if source not in {"ebas", "startgg"}:
+        return reject("invalid_source")
+    if not isinstance(payload, dict):
+        return reject("invalid_payload")
+    ok, state = payload.get("ok"), payload.get("state")
+    if type(ok) is not bool:
+        return reject("invalid_ok")
+    if not isinstance(state, str) or state not in {
+        "verified_true",
+        "verified_false",
+        "unavailable",
+        "skipped",
+    }:
+        return reject("invalid_state")
+    if state in {"unavailable", "skipped"}:
+        if ok:
+            return reject("contradictory_verdict")
+        error = payload.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        safe_codes = {
+            "api_unavailable",
+            "provider_timeout",
+            "timeout",
+            "invalid_input",
+            "provider_error",
+        }
+        safe_code = code if isinstance(code, str) and code in safe_codes else "provider_unavailable"
+        return result(True, state, "skipped" if state == "skipped" else safe_code)
+    if not ok:
+        return reject("contradictory_verdict")
+
+    # Inspect envelopes as well as data; never copy provider error values into an audit.
+    pending = [payload]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if (key in {"error", "errors"} and value) or (
+                    key == "request_result" and value != "success"
+                ):
+                    return reject("provider_error")
+                pending.append(value)
+        elif isinstance(item, list):
+            pending.extend(item)
+
+    key = "member" if source == "ebas" else "registered"
+    if "data" in payload:
+        data = payload["data"]
+        if not isinstance(data, dict):
+            return reject("invalid_data")
+    else:
+        alias = "member" if source == "ebas" else "isRegistered"
+        data = {key: payload[alias]} if alias in payload else {}
+        if source == "startgg":
+            for name in ("events", "email", "startgg_event_id"):
+                if name in payload:
+                    data[name] = payload[name]
+    if key not in data:
+        return reject("missing_verdict")
+    if type(data[key]) is not bool:
+        return reject("invalid_boolean")
+    if data[key] is not (state == "verified_true"):
+        return reject("contradictory_verdict")
+    if (
+        source == "startgg"
+        and "events" in data
+        and (
+            not isinstance(data["events"], list)
+            or any(not isinstance(event, str) or not event.strip() for event in data["events"])
+        )
+    ):
+        return reject("invalid_events")
+    return result(True, state, data=data)
+
+
+def _safe_provider_attempt_id(attempt_id):
+    """Only backend-shaped UUIDs are safe correlation metadata for the audit."""
+    if not isinstance(attempt_id, str):
+        return None
+    try:
+        return str(uuid.UUID(attempt_id))
+    except ValueError:
+        return None
+
+
+def apply_legacy_member_status(
+    checkin_id: str, member: Any, *, ok=None, state=None, error=None, attempt_id=None, envelope=None
+):
     """Apply a legacy automated membership callback without erasing TO/v2 authority."""
+    # TODO(T-053): remove this exact-body shim once R sends typed ok/state after stored_member success.
+    compatibility = (
+        isinstance(envelope, dict)
+        and set(envelope) == {"member"}
+        and envelope["member"] is True
+        and member is True
+        and ok is None
+        and state is None
+        and error is None
+    )
+    if compatibility:
+        ok, state = True, "verified_true"
+    verdict = validate_provider_verdict(
+        "ebas",
+        {
+            "ok": ok,
+            "state": state,
+            "data": {"member": member},
+            "error": error,
+            "envelope": envelope,
+        },
+    )
     with _get_pool().connection() as conn, conn.transaction():
         current = _lock_integration_checkin(conn, checkin_id)
         if current is None:
             return None
         provenance = _membership_provenance(conn, current)
         fields = {}
-        if provenance != "to" and not (provenance == "v2" and not member):
+        if verdict["ok"] and provenance != "to" and not (provenance == "v2" and not member):
             fields = {"member": member}
             if provenance != "v2":
                 fields["member_source"] = "ebas_check"
-        result = _update_checkin_with_status(
-            conn, checkin_id, fields, event_slug=current["event_slug"]
+        result = (
+            _update_checkin_with_status(conn, checkin_id, fields, event_slug=current["event_slug"])
+            if verdict["ok"]
+            else {"fields": {"member": current["member"], "status": current["status"]}}
         )
+        if verdict["ok"] and not result:
+            raise RuntimeError("Failed to update checkin from legacy member result")
         _integration_audit(
             conn,
             "legacy_member_result",
             "active_event_data",
             current["event_slug"],
             checkin_id,
-            {"updated": bool(fields)},
+            {
+                "updated": bool(fields),
+                "state": verdict["state"],
+                "error_code": verdict["error_code"],
+                "attempt_id": _safe_provider_attempt_id(attempt_id),
+                "compatibility": "legacy_member_true" if compatibility else None,
+            },
         )
-        return result
+        return {
+            **(result or {}),
+            "verdict_valid": verdict["valid"],
+            "ok": verdict["ok"],
+            "state": verdict["state"],
+            "error_code": verdict["error_code"],
+            "updated": bool(fields),
+        }
 
 
 def _acknowledge_membership_link(conn, attempt_id):
@@ -1217,23 +1358,38 @@ def apply_integration_result(
     state: Optional[str] = None,
     attempt_id: Optional[str] = None,
     recompute_payment_expected: bool = False,
+    envelope: Any = None,
 ) -> Dict[str, Any]:
     """Apply integration result to a checkin record and write audit log."""
     if not checkin_id:
         raise ValueError("checkin_id is required")
-    if not source:
-        raise ValueError("source is required")
+    if not isinstance(source, str) or source.strip().lower() not in {
+        "ebas",
+        "startgg",
+        "swish",
+        "stripe",
+    }:
+        raise ValueError("invalid_source")
 
-    data = data or {}
     update_fields: Dict[str, Any] = {}
 
     src = source.lower().strip()
+    if src in {"swish", "stripe"} and type(ok) is not bool:
+        raise ValueError("invalid_ok")
+    verdict = None
+    if src in {"ebas", "startgg"}:
+        verdict = validate_provider_verdict(
+            src, {"ok": ok, "state": state, "data": data, "error": error, "envelope": envelope}
+        )
+        ok, state, data = verdict["ok"], verdict["state"], verdict["data"]
+    else:
+        data = data if isinstance(data, dict) else {}
     if src == "startgg":
         # Failed/skipped checks must preserve registration, games and contact data.
         if (
             ok
             and isinstance(data.get("registered"), bool)
-            and state not in ("unavailable", "skipped")
+            and state in ("verified_true", "verified_false")
         ):
             registered = data["registered"]
             update_fields["startgg"] = registered
@@ -1251,13 +1407,10 @@ def apply_integration_result(
         elif (
             ok
             and isinstance(data.get("member"), bool)
-            and state in (None, "verified_true" if data["member"] else "verified_false")
-            and not error
+            and state == ("verified_true" if data["member"] else "verified_false")
         ):
             update_fields["member"] = data["member"]
-            member_lookup_state = (
-                "confirmed_member" if data["member"] else "confirmed_nonmember"
-            )
+            member_lookup_state = "confirmed_member" if data["member"] else "confirmed_nonmember"
     elif src in ("swish", "stripe"):
         if data.get("payment_amount") is not None:
             update_fields["payment_amount"] = data.get("payment_amount")
@@ -1301,7 +1454,17 @@ def apply_integration_result(
                 "active_event_data",
                 event_slug,
                 checkin_id,
-                {"source": audit_source, "outcome": "stale_rejected"},
+                {
+                    "source": audit_source,
+                    "outcome": "stale_rejected",
+                    "state": "stale_rejected",
+                    "error_code": (
+                        verdict["error_code"]
+                        if verdict and not verdict["valid"]
+                        else "stale_attempt"
+                    ),
+                    "attempt_id": _safe_provider_attempt_id(attempt_id),
+                },
             )
             logger.info(
                 "Integration result rejected: source=%s outcome=stale_rejected",
@@ -1313,12 +1476,12 @@ def apply_integration_result(
                 "ok": ok,
                 "updated": False,
                 "state": "stale_rejected",
+                "verdict_valid": verdict["valid"] if verdict else True,
+                "error_code": verdict["error_code"] if verdict else None,
             }
         if src == "ebas" and "member" in update_fields:
             provenance = _membership_provenance(conn, current)
-            if provenance == "to" or (
-                provenance == "v2" and update_fields["member"] is False
-            ):
+            if provenance == "to" or (provenance == "v2" and update_fields["member"] is False):
                 update_fields.pop("member")
             elif provenance != "v2":
                 update_fields["member_source"] = "ebas_check"
@@ -1360,8 +1523,11 @@ def apply_integration_result(
             checkin_id,
             {
                 "source": audit_source,
-                "ok": bool(ok),
+                "ok": ok is True,
                 "updated_fields": sorted(update_fields),
+                "state": state if verdict else "unavailable",
+                "error_code": verdict["error_code"] if verdict else None,
+                "attempt_id": _safe_provider_attempt_id(attempt_id),
             },
         )
 
@@ -1370,6 +1536,9 @@ def apply_integration_result(
         "source": src,
         "ok": ok,
         "updated": bool(update_fields),
+        "state": state if verdict else None,
+        "error_code": verdict["error_code"] if verdict else None,
+        "verdict_valid": verdict["valid"] if verdict else True,
     }
 
 

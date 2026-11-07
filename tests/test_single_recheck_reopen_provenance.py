@@ -49,11 +49,12 @@ def test_single_recheck_stale_has_no_side_effects(
             {"registered": True, "events": ["Current A", "Current B"]},
             attempt_id=attempt,
             recompute_payment_expected=True,
+            state="verified_true",
         )
         newest.extend(pg_db.checkins())
 
     n8n_stub.on_call = newer_result
-    n8n_stub.response = {"ok": True, "isRegistered": False, "events": []}
+    n8n_stub.response = {"ok": True, "state": "verified_false", "isRegistered": False, "events": []}
     response = app_client.post(
         "/api/admin/recheck-startgg", json={"record_id": checkin["record_id"]}
     )
@@ -105,13 +106,15 @@ def test_pre004_to_override_survives_provider_negative(app_client, pg_db, callba
                 "checkin_id": checkin["record_id"],
                 "source": "ebas",
                 "ok": True,
+                "state": "verified_false",
                 "attempt_id": attempt,
                 "data": {"member": False},
             },
         )
     else:
         response = app_client.post(
-            f"/api/checkin/{checkin['record_id']}/member-status", json={"member": False}
+            f"/api/checkin/{checkin['record_id']}/member-status",
+            json={"member": False, "ok": True, "state": "verified_false"},
         )
     assert response.status_code == 200
     stored = pg_db.checkins()[0]

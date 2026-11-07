@@ -69,6 +69,7 @@ def test_stale_attempt_is_rejected_without_any_checkin_field_change(pg_db, sourc
         True,
         {"member": False, "registered": False, "events": ["Old"]},
         attempt_id=old,
+        state="verified_false",
     )
     assert result["state"] == "stale_rejected" and result["updated"] is False
     assert pg_db.checkins() == before
@@ -80,13 +81,13 @@ def test_stale_attempt_is_rejected_without_any_checkin_field_change(pg_db, sourc
 def test_missing_id_is_legacy_only_until_the_first_tracked_run(pg_db):
     pg_db.seed_settings()
     checkin = pg_db.seed_checkin()
-    assert postgres.apply_integration_result(checkin["record_id"], "ebas", True, {"member": True})[
-        "updated"
-    ]
+    assert postgres.apply_integration_result(
+        checkin["record_id"], "ebas", True, {"member": True}, state="verified_true"
+    )["updated"]
     postgres.start_integration_attempt(checkin["record_id"])
     before = pg_db.checkins()
     result = postgres.apply_integration_result(
-        checkin["record_id"], "ebas", True, {"member": False}
+        checkin["record_id"], "ebas", True, {"member": False}, state="verified_false"
     )
     assert result["state"] == "stale_rejected" and pg_db.checkins() == before
 
@@ -118,6 +119,7 @@ def test_starting_a_new_run_serializes_with_the_locked_callback(pg_db, monkeypat
             True,
             {"registered": True},
             attempt_id=old,
+            state="verified_true",
         )
         try:
             assert locked.wait(timeout=5)
@@ -142,7 +144,12 @@ def test_starting_a_new_run_serializes_with_the_locked_callback(pg_db, monkeypat
     assert current != old
     assert (
         postgres.apply_integration_result(
-            checkin["record_id"], "startgg", True, {"registered": False}, attempt_id=old
+            checkin["record_id"],
+            "startgg",
+            True,
+            {"registered": False},
+            attempt_id=old,
+            state="verified_false",
         )["state"]
         == "stale_rejected"
     )
@@ -164,6 +171,7 @@ def test_same_attempt_rejects_replayed_or_out_of_order_results(pg_db, timestamp_
         {"registered": True, "events": ["Current"]},
         attempt_id=attempt_id,
         fetched_at=accepted.isoformat(),
+        state="verified_true",
     )
     before = pg_db.checkins()
     fetched_at = {
@@ -179,6 +187,7 @@ def test_same_attempt_rejects_replayed_or_out_of_order_results(pg_db, timestamp_
         {"registered": False, "events": ["Old"]},
         attempt_id=attempt_id,
         fetched_at=fetched_at,
+        state="verified_false",
     )
     assert result["state"] == "stale_rejected" and pg_db.checkins() == before
 
@@ -193,6 +202,7 @@ def test_endpoint_passes_the_current_attempt_id_to_storage(app_client, pg_db):
             "source": "startgg",
             "attempt_id": attempt_id,
             "ok": True,
+            "state": "verified_true",
             "data": {"registered": True, "events": ["Verified"]},
         },
     )
@@ -226,7 +236,12 @@ def test_late_verified_false_cannot_clear_v2_membership(pg_db):
     attempt = submitted_attempt(pg_db, checkin)
     assert postgres.mark_membership_checkin(attempt) == "submitted"
     result = postgres.apply_integration_result(
-        checkin["record_id"], "ebas", True, {"member": False}, attempt_id=integration
+        checkin["record_id"],
+        "ebas",
+        True,
+        {"member": False},
+        attempt_id=integration,
+        state="verified_false",
     )
     stored = pg_db.checkins()[0]
     assert result["updated"] is False
@@ -240,7 +255,7 @@ def test_submitted_receipt_protects_membership_before_its_provenance_write(pg_db
     submitted_attempt(pg_db, checkin)
     # Models the finish_submit/member-update gap and pre-004 submitted receipts.
     result = postgres.apply_integration_result(
-        checkin["record_id"], "ebas", True, {"member": False}
+        checkin["record_id"], "ebas", True, {"member": False}, state="verified_false"
     )
     assert result["updated"] is False and pg_db.checkins()[0]["member"] is True
 
@@ -251,7 +266,9 @@ def test_to_override_survives_automated_true_and_submitted_receipt_poll(pg_db):
     attempt = submitted_attempt(pg_db, checkin)
     postgres.mark_membership_checkin(attempt)
     postgres.update_checkin(checkin["record_id"], {"member": False})
-    postgres.apply_integration_result(checkin["record_id"], "ebas", True, {"member": True})
+    postgres.apply_integration_result(
+        checkin["record_id"], "ebas", True, {"member": True}, state="verified_true"
+    )
     postgres.mark_membership_checkin(attempt)
     stored = pg_db.checkins()[0]
     assert stored["member"] is False and stored["member_source"] == "to"
@@ -265,7 +282,12 @@ def test_admin_recheck_tracks_only_startgg_and_keeps_disabled_engine_inert(
     checkin = pg_db.seed_checkin()
     original = postgres.start_integration_attempt(checkin["record_id"])
     monkeypatch.setattr(backend_app.admin, "INTEGRATION_ENGINE", engine)
-    n8n_stub.response = {"ok": True, "isRegistered": True, "events": ["Current recheck"]}
+    n8n_stub.response = {
+        "ok": True,
+        "state": "verified_true",
+        "isRegistered": True,
+        "events": ["Current recheck"],
+    }
     before = pg_db.checkins()
     response = app_client.post(f"/api/admin/{route}", json={"record_id": checkin["record_id"]})
     if engine == "none":
@@ -282,12 +304,22 @@ def test_admin_recheck_tracks_only_startgg_and_keeps_disabled_engine_inert(
         "Current recheck"
     ]
     stale = postgres.apply_integration_result(
-        checkin["record_id"], "startgg", True, {"registered": False}, attempt_id=original
+        checkin["record_id"],
+        "startgg",
+        True,
+        {"registered": False},
+        attempt_id=original,
+        state="verified_false",
     )
     assert stale["state"] == "stale_rejected"
     assert (
         postgres.apply_integration_result(
-            checkin["record_id"], "ebas", True, {"member": True}, attempt_id=original
+            checkin["record_id"],
+            "ebas",
+            True,
+            {"member": True},
+            attempt_id=original,
+            state="verified_true",
         )["updated"]
         is True
     )
@@ -298,7 +330,8 @@ def test_legacy_member_callback_preserves_authoritative_membership(app_client, p
     checkin = pg_db.seed_checkin()
     postgres.update_checkin(checkin["record_id"], {"member": True}, member_source=provenance)
     response = app_client.post(
-        f"/api/checkin/{checkin['record_id']}/member-status", json={"member": False}
+        f"/api/checkin/{checkin['record_id']}/member-status",
+        json={"member": False, "ok": True, "state": "verified_false"},
     )
     assert response.status_code == 200 and response.json()["member"] is True
     assert pg_db.checkins()[0]["member_source"] == provenance
