@@ -871,15 +871,30 @@ def register_callbacks(app):
         return time.time()
 
     def _broadcast_duplicates_changed(event_slug=""):
-        """Tell every connected dashboard to refresh (no candidate or contact data)."""
+        """Tell every connected dashboard to refresh (no candidate or contact data).
+
+        /api/notify/update is an internal route (require_internal_soft): send the shared
+        X-Internal-Token like n8n does, so it also works with INTERNAL_AUTH_MODE=enforce.
+        Returns False when the broadcast was not accepted (other TOs refresh later)."""
+        headers = {}
+        token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
+        if token:
+            headers["X-Internal-Token"] = token
         try:
-            requests.post(
+            response = requests.post(
                 f"{BACKEND_INTERNAL_URL}/api/notify/update",
                 json={"type": "duplicates_changed", "event_slug": event_slug or ""},
+                headers=headers,
                 timeout=2,
             )
         except Exception as error:
-            logger.warning("Failed to broadcast duplicates update: %s", error)
+            logger.warning("Failed to broadcast duplicates update: %s", type(error).__name__)
+            return False
+        status = getattr(response, "status_code", 0) or 0
+        if not 200 <= status < 300:
+            logger.warning("Duplicates update broadcast was refused (HTTP %s)", status)
+            return False
+        return True
 
     @app.callback(
         Output("duplicate-warning", "style", allow_duplicate=True),
@@ -2194,7 +2209,7 @@ def register_callbacks(app):
                 style={"color": COLORS["accent_red"], "fontSize": "0.85rem"},
             )
             return (hidden, None, message, no_update, *unchanged)
-        _broadcast_duplicates_changed((result or {}).get("event_slug", ""))
+        broadcast = _broadcast_duplicates_changed((result or {}).get("event_slug", ""))
         if action == "not_same":
             text = "Marked as different players."
         else:
@@ -2202,6 +2217,8 @@ def register_callbacks(app):
                 f"Merged: kept {result.get('keep_player_tag') or 'the chosen profile'}. "
                 "Undo in Insights → Duplicates → Merge history."
             )
+        if not broadcast:
+            text += " (Saved. Other dashboards show it on their next refresh.)"
         message = html.Span(text, style={"color": COLORS["accent_green"], "fontSize": "0.85rem"})
         history = _build_merge_history_list() if action != "not_same" else no_update
         return (hidden, None, message, time.time(), no_update, no_update, no_update, history)

@@ -277,7 +277,7 @@ def test_table_refresh_assigns_record_identity_after_filtering(dashboard):
         for number in range(3)
     ]
     result = dashboard.callbacks["update_table"](
-        "test-event", 0, 0, None, ["name", "member"], "all", "Player 2", None, {}
+        "test-event", 0, 0, None, ["name", "member"], "all", "Player 2", None, 0, {}
     )
     rows, columns = result[:2]
     assert [row["id"] for row in rows] == ["record-2"]

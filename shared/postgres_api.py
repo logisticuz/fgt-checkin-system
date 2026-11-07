@@ -3526,11 +3526,22 @@ def _match_or_create_player(
         events_list, game_counts, first_seen, last_seen, last_event
     """
 
-    # T-068: a TO's merge decision is durable in merge_log. Only when no profile has the
-    # tag (or email) itself, a tag/email of a merged-away profile resolves to the profile
-    # that absorbed it; that profile keeps its own identity fields (tag, name, email, phone).
+    # T-068: a TO's merge decision is durable in merge_log. First: a check-in the decision
+    # itself covered (unchanged identity) stays on that profile. Then, only when no profile
+    # has the tag (or email) itself, a tag/email of a merged-away profile resolves to the
+    # profile that absorbed it; that profile keeps its own identity fields.
     merged_into = False
-    if tag:
+    confirmed = _confirmed_row_survivor(cur, checkin)
+    if confirmed:
+        cur.execute(f"SELECT {select_cols} FROM players WHERE uuid = %s", (confirmed,))
+        player_row = cur.fetchone()
+        cur.execute("SELECT tag FROM players WHERE uuid = %s", (confirmed,))
+        profile_tag = str((cur.fetchone() or [""])[0] or "").strip().lower()
+        # Another identity than the profile's own (e.g. today's typo tag, or no tag at all):
+        # the profile keeps its identity fields.
+        merged_into = profile_tag != str(tag or "").strip().lower()
+
+    if not player_row and tag:
         cur.execute(
             f"SELECT {select_cols} FROM players WHERE LOWER(tag) = LOWER(%s) LIMIT 1",
             (tag,),
@@ -3693,6 +3704,68 @@ def _match_or_create_player(
         return (new_uuid, True)
 
 
+def _row_identity_hash(name: Any, tag: Any, email: Any, telephone: Any) -> str:
+    """Opaque hash of a check-in's identity (case/space-insensitive, phone digits only)."""
+    raw = "\x1f".join(
+        [
+            str(name or "").strip().lower(),
+            str(tag or "").strip().lower(),
+            str(email or "").strip().lower(),
+            _phone_digits(telephone),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _merge_log_has_confirmed_rows(cur) -> bool:
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = 'merge_log' AND column_name = 'confirmed_rows'"
+    )
+    return cur.fetchone() is not None
+
+
+def _current_survivor(cur, survivor: Optional[str]) -> Optional[str]:
+    """Follow later merges (not undone) until an existing profile; None if it ends."""
+    for _hop in range(20):
+        if not survivor:
+            return None
+        cur.execute("SELECT 1 FROM players WHERE uuid = %s", (survivor,))
+        if cur.fetchone():
+            return survivor
+        cur.execute(
+            "SELECT keep_uuid FROM merge_log WHERE remove_uuid = %s AND undone IS NOT TRUE "
+            "ORDER BY id DESC LIMIT 1",
+            (survivor,),
+        )
+        found = cur.fetchone()
+        survivor = found[0] if found else None
+    return None
+
+
+def _confirmed_row_survivor(cur, checkin: Dict[str, Any]) -> Optional[str]:
+    """The profile a merge decision put THIS check-in on (T-068), while its identity is
+    still what it was then. Covers name-only check-ins too. merge_log.confirmed_rows maps
+    record_id -> identity hash; an undone merge no longer counts."""
+    record_id = checkin.get("record_id")
+    if not record_id or not _merge_log_has_confirmed_rows(cur):
+        return None
+    cur.execute(
+        "SELECT keep_uuid, confirmed_rows ->> %s FROM merge_log "
+        "WHERE undone IS NOT TRUE AND confirmed_rows ? %s ORDER BY id DESC LIMIT 1",
+        (record_id, record_id),
+    )
+    found = cur.fetchone()
+    if not found:
+        return None
+    current = _row_identity_hash(
+        checkin.get("name"), checkin.get("tag"), checkin.get("email"), checkin.get("telephone")
+    )
+    if found[1] != current:
+        return None  # edited since the decision: match the identity as it is now
+    return _current_survivor(cur, found[0])
+
+
 def _merged_survivor(cur, kind: str, value: Any) -> Optional[str]:
     """The current profile that absorbed a merged-away profile's tag or email (T-068).
 
@@ -3709,21 +3782,7 @@ def _merged_survivor(cur, kind: str, value: Any) -> Optional[str]:
         (value,),
     )
     found = cur.fetchone()
-    survivor = found[0] if found else None
-    for _hop in range(20):
-        if not survivor:
-            return None
-        cur.execute("SELECT 1 FROM players WHERE uuid = %s", (survivor,))
-        if cur.fetchone():
-            return survivor
-        cur.execute(
-            "SELECT keep_uuid FROM merge_log WHERE remove_uuid = %s AND undone IS NOT TRUE "
-            "ORDER BY id DESC LIMIT 1",
-            (survivor,),
-        )
-        found = cur.fetchone()
-        survivor = found[0] if found else None
-    return None
+    return _current_survivor(cur, found[0] if found else None)
 
 
 def _merged_identity_player(cur, kind: str, value: Any, select_cols: str):
@@ -4985,14 +5044,21 @@ def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str
     ]
 
 
+def _phone_digits(value: Any) -> str:
+    """Digits only: the same normaliser as backend/validation.py sanitize_phone."""
+    return "".join(c for c in str(value or "") if c.isdigit())
+
+
 def _duplicate_signals(a: Dict[str, Any], b: Dict[str, Any]) -> tuple:
     """The duplicate tool's pair scoring: (reasons, confidence). Shared by the Insights scan
     and the live check-in hints (T-068), so both always agree on what a duplicate is."""
     reasons: List[str] = []
     confidence = "low"
 
-    # 1. Phone match (strongest signal)
-    if a["telephone"] and b["telephone"] and a["telephone"] == b["telephone"]:
+    # 1. Phone match (strongest signal), digits only like backend/validation.py's
+    #    sanitize_phone ("070-000 01 05" and "0700000105" are the same number)
+    phone_a, phone_b = _phone_digits(a["telephone"]), _phone_digits(b["telephone"])
+    if phone_a and phone_a == phone_b:
         reasons.append("same_phone")
         confidence = "high"
 
@@ -5028,8 +5094,6 @@ def _duplicate_signals(a: Dict[str, Any], b: Dict[str, Any]) -> tuple:
 # ---------------------------------------------------------------------------
 LIVE_HINTS_TABLE = "live_duplicate_hints"
 LIVE_HINTS_PER_CHECKIN = 3
-# Upper bound per indexed lookup (phone, email, tag/name head and tail): never a full scan.
-LIVE_CANDIDATES_PER_LOOKUP = 50
 _CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
@@ -5068,7 +5132,7 @@ def _live_context_version(cur) -> str:
 
 def _live_fingerprint(row: Dict[str, Any], context: str) -> str:
     """Opaque hash of the check-in's identity plus the player/dismissal context."""
-    phone = re.sub(r"\D+", "", str(row.get("telephone") or ""))
+    phone = _phone_digits(row.get("telephone"))  # exactly what the scoring compares
     raw = "\x1f".join(
         [
             str(row.get("name") or "").strip().lower(),
@@ -5087,56 +5151,14 @@ def _live_hints_table_exists(cur) -> bool:
     return bool(cur.fetchone()[0])
 
 
-def _live_candidates(cur, row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Bounded, indexed candidate lookups for one check-in instead of a full player scan:
-    the same phone, the same email, and tags/names that share their first or last two
-    letters within +-2 characters of length (text_pattern_ops indexes, migration 012).
-    The shared _duplicate_signals scoring then decides, exactly as in Insights. Pairs whose
-    tags/names differ at both ends are left to the full Insights scan."""
-    me = _identity(row.get("name"), row.get("tag"), row.get("telephone"))
-    email = str(row.get("email") or "").strip().lower()
-    limit = int(LIVE_CANDIDATES_PER_LOOKUP)
-    parts: List[str] = []
-    params: List[Any] = []
-    if me["telephone"]:
-        parts.append(f"(SELECT uuid FROM players WHERE telephone = %s LIMIT {limit})")
-        params.append(me["telephone"])
-    if email:
-        parts.append(f"(SELECT uuid FROM players WHERE lower(email) = %s LIMIT {limit})")
-        params.append(email)
-    for column in ("tag", "name"):
-        value = me[column].lower()
-        if not value:
-            continue
-        low, high = max(1, len(value) - 2), len(value) + 2
-        parts.append(
-            f"(SELECT uuid FROM players WHERE lower({column}) LIKE %s "
-            f"AND length({column}) BETWEEN %s AND %s LIMIT {limit})"
-        )
-        params += [_like_prefix(value[:2]), low, high]
-        parts.append(
-            f"(SELECT uuid FROM players WHERE reverse(lower({column})) LIKE %s "
-            f"AND length({column}) BETWEEN %s AND %s LIMIT {limit})"
-        )
-        params += [_like_prefix(value[::-1][:2]), low, high]
-    if not parts:
-        return []
-    cur.execute(
-        "SELECT uuid, name, tag, telephone FROM players WHERE uuid IN ("
-        + " UNION ".join(parts)
-        + ")",
-        params,
-    )
-    return [{**_identity(r[1], r[2], r[3]), "uuid": r[0]} for r in cur.fetchall()]
-
-
 def detect_live_duplicate_hints(event_slug: str) -> int:
     """(Re)check the event's check-ins whose identity, or the player/"Not same" context,
     changed since they were last checked; returns how many were re-checked.
 
-    Uses bounded indexed lookups plus the Insights scoring. Runs from the dashboard's own
-    detection callback (not the table response, not the check-in path). Best effort for
-    the caller: an exception here must never affect check-in.
+    Candidate parity with the Insights scan: every changed row is scored against every
+    player with the same _duplicate_signals (one players read per run; a few thousand
+    players at most). Runs from the dashboard's own detection callback (not the table
+    response, not the check-in path). Best effort: an exception must never affect check-in.
     """
     if not event_slug:
         return 0
@@ -5179,12 +5201,19 @@ def detect_live_duplicate_hints(event_slug: str) -> int:
                     for r in rows
                     if stored.get(r["record_id"]) != {_live_fingerprint(r, context)}
                 ]
-                dismissed = _dismissed_pair_keys(cur) if changed else set()
+                players: List[Dict[str, Any]] = []
+                dismissed: set = set()
+                if changed:
+                    cur.execute("SELECT uuid, name, tag, telephone FROM players")
+                    players = [
+                        {**_identity(p[1], p[2], p[3]), "uuid": p[0]} for p in cur.fetchall()
+                    ]
+                    dismissed = _dismissed_pair_keys(cur)
                 for row in changed:
                     own = row.get("player_uuid") or ""
                     me = _identity(row["name"], row["tag"], row["telephone"])
                     found = []
-                    for player in _live_candidates(cur, row):
+                    for player in players:
                         if player["uuid"] == own:
                             continue
                         if own and tuple(sorted((own, player["uuid"]))) in dismissed:
@@ -5489,7 +5518,9 @@ def resolve_live_duplicate(
                         else (candidate_uuid, own)
                     )
                     reason = "Live duplicate: same player"
-                    merged = _merge_players_locked(cur, keep, remove, reason, actor)
+                    merged = _merge_players_locked(
+                        cur, keep, remove, reason, actor, confirm_records=(record_id,)
+                    )
                     _insert_audit(
                         cur,
                         actor,
@@ -5629,9 +5660,18 @@ def _lock_player_merge_scope(cur, uuids, extra_slugs=(), what: str = "merge") ->
 
 
 def _merge_players_locked(
-    cur, keep_uuid: str, remove_uuid: str, reason: str, merge_user: Dict[str, Any]
+    cur,
+    keep_uuid: str,
+    remove_uuid: str,
+    reason: str,
+    merge_user: Dict[str, Any],
+    confirm_records: tuple = (),
 ) -> Dict[str, Any]:
-    """merge_players' writes on the caller's transaction; _lock_player_merge_scope is held."""
+    """merge_players' writes on the caller's transaction; _lock_player_merge_scope is held.
+
+    T-068: merge_log.confirmed_rows records the active check-ins this decision covers (the
+    rows moved to the kept profile, plus confirm_records) with their identity hash, so
+    archive keeps them on the kept profile even without a tag/email to match by."""
     from psycopg.types.json import Json as _Json  # type: ignore
 
     cur.execute("SELECT * FROM players WHERE uuid = %s FOR UPDATE", (keep_uuid,))
@@ -5667,6 +5707,14 @@ def _merge_players_locked(
     )
     moved_archive_ids = sorted(row[0] for row in cur.fetchall())
     archive_updated = len(moved_archive_ids)
+
+    # T-068: the check-ins this decision covers, with their identity at decision time.
+    cur.execute(
+        "SELECT record_id, name, tag, email, telephone FROM active_event_data "
+        "WHERE player_uuid = %s OR record_id = ANY(%s)",
+        (remove_uuid, list(confirm_records)),
+    )
+    confirmed_rows = {r[0]: _row_identity_hash(r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
 
     # 4. Re-point active_event_data rows
     cur.execute(
@@ -5831,6 +5879,11 @@ def _merge_players_locked(
         ),
     )
     merge_id = cur.fetchone()[0]
+    if confirmed_rows and _merge_log_has_confirmed_rows(cur):
+        cur.execute(
+            "UPDATE merge_log SET confirmed_rows = %s WHERE id = %s",
+            (_Json(confirmed_rows), merge_id),
+        )
 
     return {
         "merge_id": merge_id,

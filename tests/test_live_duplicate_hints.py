@@ -101,31 +101,44 @@ def test_no_hint_without_similarity_and_none_for_its_own_player(event, kenji):  
     assert exact not in hints and len(hints) == 0
 
 
-def test_detection_uses_bounded_lookups_not_a_full_player_scan(
-    archive_db, event, kenji, monkeypatch  # noqa: F811
-):
-    """Review P2#8: 120 unrelated profiles are never scored for one new check-in."""
-    for number in range(120):
-        seed_player(
-            archive_db,
-            f"zz-filler-{number:03d}",
-            name=f"Filler Person {number:03d}",
-            telephone=f"07111{number:05d}",
-        )
-    scored = []
-    real = postgres._duplicate_signals
-    monkeypatch.setattr(
-        postgres, "_duplicate_signals", lambda a, b: scored.append(b["tag"]) or real(a, b)
-    )
-    record = check_in(event, "pw-kenjj")
+def test_live_candidates_match_the_insights_scan_for_the_row(archive_db, event):  # noqa: F811
+    """Round 2 P2#3: parity with Insights, incl. typos at both ends and phone formats."""
+    both_ends = seed_player(archive_db, "abca", name="Profile One", telephone="0711000001")
+    spaced = seed_player(archive_db, "pw-qqq", name="Profile Two", telephone=" 0700000777 ")
+    dashed = seed_player(archive_db, "pw-rrr", name="Profile Three", telephone="070-000 07 77")
+    seed_player(archive_db, "pw-unrelated", name="Someone Else", telephone="0711000009")
+    seed_player(archive_db, "zz-far-away", name="Nobody Similar", telephone="0711000010")
+    record = check_in(event, "xbcb", name="Row Person", phone="0700000777")
+    live = {h["candidate_uuid"] for h in postgres.refresh_live_duplicate_hints(event)[record]}
+
+    # Insights, for the same identity as a profile:
+    twin = seed_player(archive_db, "xbcb", name="Row Person", telephone="0700000777")
+    insights = set()
+    for pair in postgres.find_duplicate_candidates(limit=1000):
+        uuids = {pair["player_a"]["uuid"], pair["player_b"]["uuid"]}
+        if twin["uuid"] in uuids:
+            insights |= uuids - {twin["uuid"]}
+    assert live == insights == {both_ends["uuid"], spaced["uuid"], dashed["uuid"]}
+
+
+def test_phone_format_changes_never_leave_a_stale_result(archive_db, event):  # noqa: F811
+    """Round 2 P2#4: scoring and the cache fingerprint both use digits only."""
+    owner = seed_player(archive_db, "pw-owner", name="Phone Owner", telephone="0700000105")
+    record = check_in(event, "pw-somebody", name="Other Name", phone="070-000-0105")
     hints = postgres.refresh_live_duplicate_hints(event)
-    assert [h["candidate_uuid"] for h in hints[record]] == [kenji["uuid"]]
-    assert not any(tag.startswith("zz-filler") for tag in scored)
-    assert len(scored) <= 5
-    scored.clear()
-    postgres.update_checkin(record, {"tag": "pw-kenjx"})
-    postgres.refresh_live_duplicate_hints(event)
-    assert not any(tag.startswith("zz-filler") for tag in scored)
+    assert [h["candidate_uuid"] for h in hints[record]] == [owner["uuid"]]
+    assert hints[record][0]["reasons"] == ["same_phone"]
+    postgres.update_checkin(record, {"telephone": "0700000105"})  # same digits
+    assert record in postgres.refresh_live_duplicate_hints(event)
+    postgres.update_checkin(record, {"telephone": "0700000999"})  # another number
+    assert postgres.refresh_live_duplicate_hints(event) == {}
+
+
+def test_phone_digits_is_the_validation_normaliser():
+    from backend.validation import sanitize_phone
+
+    for value in ("070-123 45 67", "+46 70 123 45 67", " 0700000777 ", "", "07O0"):
+        assert postgres._phone_digits(value) == sanitize_phone(value)
 
 
 def test_undoing_a_dismissal_brings_the_live_suggestion_back(archive_db, event, kenji):  # noqa: F811
@@ -393,6 +406,34 @@ def test_other_rows_of_the_merged_profile_follow_it(archive_db, event, kenji):  
     archive(second_event)
     assert [r["player_uuid"] for r in archived(archive_db, second_event)] == [kenji["uuid"]]
     assert "pw-kenjj" not in [p["tag"] for p in table_rows(archive_db, "players")]
+
+
+def test_a_name_only_decision_survives_archive_and_reopen(archive_db, event, kenji):  # noqa: F811
+    """Round 2 P2#1: no tag/email to match by; the decision covers the row itself."""
+    archive_db.seed_checkin(
+        event_slug=event, record_id="rec-name-only", name="Synthetic Kenji", tag=None, email=None,
+        telephone=None,
+    )
+    decide("rec-name-only", kenji["uuid"], "keep_candidate")
+    archive(event)
+    assert [r["player_uuid"] for r in archived(archive_db, event)] == [kenji["uuid"]]
+    kept = player(archive_db, kenji["uuid"])
+    assert (kept["tag"], kept["email"]) == (kenji["tag"], kenji["email"])
+    with archive_db.pool.connection() as connection:
+        connection.execute("DELETE FROM active_event_data WHERE event_slug = %s", (event,))
+    postgres.reopen_event(event, restore_active=True, user=TO)
+    archive(event)
+    assert {r["player_uuid"] for r in archived(archive_db, event)} == {kenji["uuid"]}
+    names = [p["name"] for p in table_rows(archive_db, "players")]
+    assert names.count("Synthetic Kenji") == 1  # no second profile for the name-only row
+
+
+def test_the_decision_records_the_rows_it_covers(archive_db, event, kenji):  # noqa: F811
+    record = check_in(event, "pw-kenjj")
+    result = decide(record, kenji["uuid"], "keep_candidate")
+    entry = [r for r in table_rows(archive_db, "merge_log") if r["id"] == result["merge_id"]][0]
+    assert list(entry["confirmed_rows"]) == [record]
+    assert len(entry["confirmed_rows"][record]) == 64  # an opaque identity hash, no contact data
 
 
 def test_later_merges_of_the_survivor_are_followed(archive_db, event, kenji):  # noqa: F811

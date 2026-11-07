@@ -335,3 +335,21 @@ def test_insights_merge_and_undo_broadcast_too(ui):
     click(undo + ".n_clicks")
     ui.callbacks["undo_merge_callback"]([1])
     assert ui.post.call_args.kwargs["json"]["type"] == "duplicates_changed"
+
+
+def test_the_broadcast_authenticates_and_reports_a_refusal(ui, monkeypatch):
+    """Round 2 P2#2: X-Internal-Token like n8n; a refused broadcast is not silent."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "synthetic-internal-token")
+    click("btn-live-dup-keep-b.n_clicks")
+    target = {"record_id": "rec-1", "candidate_uuid": "uuid-kenji", "version": "v1"}
+    _, _, feedback, *_ = ui.callbacks["resolve_live_duplicate_choice"](0, 1, 0, 0, target)
+    sent = ui.post.call_args.kwargs
+    assert sent["headers"] == {"X-Internal-Token": "synthetic-internal-token"}
+    assert "next refresh" not in text_of(feedback)
+
+    ui.post.return_value = SimpleNamespace(status_code=401, json=lambda: {})
+    _, _, feedback, *_ = ui.callbacks["resolve_live_duplicate_choice"](0, 1, 0, 0, target)
+    assert "Merged: kept pw-kenji" in text_of(feedback)
+    assert "Other dashboards show it on their next refresh" in text_of(feedback)

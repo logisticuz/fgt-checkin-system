@@ -18,18 +18,12 @@ CREATE TABLE IF NOT EXISTS live_duplicate_hints (
 );
 CREATE INDEX IF NOT EXISTS live_duplicate_hints_event_idx ON live_duplicate_hints (event_slug);
 
--- Bounded candidate lookups for one check-in (no full player scan): phone, email, and
--- tags/names sharing their first or last two letters (LIKE 'ab%' needs text_pattern_ops).
-CREATE INDEX IF NOT EXISTS players_telephone_idx ON players (telephone);
+-- The TO's decision lives only in the existing merge history. Archive resolves:
+-- 1) a check-in the decision covered (record_id -> identity hash at decision time),
+-- 2) a merged-away profile's tag/email to the profile that absorbed it.
+ALTER TABLE merge_log ADD COLUMN IF NOT EXISTS confirmed_rows JSONB;
+CREATE INDEX IF NOT EXISTS merge_log_confirmed_rows_idx ON merge_log USING gin (confirmed_rows);
 CREATE INDEX IF NOT EXISTS players_lower_email_idx ON players (lower(email));
-CREATE INDEX IF NOT EXISTS players_tag_head_idx ON players (lower(tag) text_pattern_ops);
-CREATE INDEX IF NOT EXISTS players_tag_tail_idx ON players (reverse(lower(tag)) text_pattern_ops);
-CREATE INDEX IF NOT EXISTS players_name_head_idx ON players (lower(name) text_pattern_ops);
-CREATE INDEX IF NOT EXISTS players_name_tail_idx
-    ON players (reverse(lower(name)) text_pattern_ops);
-
--- Archive resolves a merged-away profile's tag/email to the profile that absorbed it,
--- straight from the existing merge history (the TO's decision lives only there).
 CREATE INDEX IF NOT EXISTS merge_log_removed_tag_idx
     ON merge_log (lower(removed_player_snapshot ->> 'tag'));
 CREATE INDEX IF NOT EXISTS merge_log_removed_email_idx
