@@ -94,7 +94,7 @@ services:
     networks: [fgt-net]
 
   nginx:
-    image: nginx:latest
+    image: nginx:1.27.5
     ports: ["80:80","443:443"]
     environment:
       - ADMIN_AUTH_COOKIE_TOKEN=${ADMIN_AUTH_COOKIE_TOKEN}

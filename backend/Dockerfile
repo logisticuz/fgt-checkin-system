@@ -1,12 +1,12 @@
 # Base image: slimmed-down official Python 3.11 image
-FROM python:3.11-slim
+FROM python:3.11.10-slim-bookworm
 
 # Set working directory inside the container
 WORKDIR /app
 
 # Copy Python dependencies list and install them
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy all app files into the container
 COPY . .

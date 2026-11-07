@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.10-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python deps
-COPY fgt_dashboard/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY fgt_dashboard/requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy application code (not critical in dev if you bind-mount, but keeps prod usable)
 COPY fgt_dashboard/ ./
