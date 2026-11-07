@@ -188,6 +188,10 @@ def payload(database=None, **overrides):
         "checkin_id": record["record_id"] if record is not None else None,
     }
     details.update(overrides)
+    if details.get("checkin_id"):
+        from status_api import capability_token
+
+        details.setdefault("status_token", capability_token(details["checkin_id"]))
     return details
 
 
