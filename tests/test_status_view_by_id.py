@@ -144,7 +144,7 @@ def test_verified_missing_or_inactive_id_is_pending_without_name_fallback(
 @pytest.mark.parametrize(
     "kind", ["no-params", "no-token", "no-id", "invalid", "expired", "mismatched"]
 )
-def test_unverified_capabilities_preserve_legacy_name_rendering(
+def test_capability_params_require_valid_tokens_but_legacy_links_still_work(
     app_client, pg_db, backend_app, monkeypatch, kind
 ):
     named = pg_db.seed_checkin(
@@ -176,7 +176,14 @@ def test_unverified_capabilities_preserve_legacy_name_rendering(
         pytest.fail("Unverified status pages must retain their legacy name path")
 
     monkeypatch.setattr(backend_app.pages, "lookup_checkin_status", forbidden)
+    if kind != "no-params":
+        forbid_name_lookups(backend_app, monkeypatch)
     response = app_client.get(page_url(named["name"]), params=params)
+    if kind != "no-params":
+        assert response.status_code == 403
+        assert "expired" in response.text and "ask a TO" in response.text
+        assert "<script" not in response.text
+        return
     assert response.status_code == 200 and response.template.name == "status_ready.html"
     assert response.context["tag"] == named["tag"]
     assert response.context["games"] == named["tournament_games_registered"]

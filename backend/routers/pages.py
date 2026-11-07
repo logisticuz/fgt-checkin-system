@@ -4,9 +4,7 @@ from fastapi import APIRouter
 
 from app_state import (
     HTMLResponse,
-    N8N_WEBHOOK_TOKEN,
     Request,
-    SSE_TOKEN,
     check_participant_status,
     compute_ready_and_missing,
     compute_requirements,
@@ -27,6 +25,15 @@ router = APIRouter()
 @router.get("/status/{name}", response_class=HTMLResponse, tags=["Checkin"])
 async def status_view(request: Request, name: str, kiosk: bool = False):
     capability = status_context(request)
+    if not capability and any(key in request.query_params for key in ("t", "checkin_id")):
+        return HTMLResponse(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            "<title>Status link expired</title></head><body><main>"
+            "<h1>Status link expired</h1><p>This status link is invalid or has expired. "
+            "Please ask a TO for help.</p></main></body></html>",
+            status_code=403,
+        )
     status_context_fields = {}
     if capability:
         try:
@@ -74,10 +81,8 @@ async def status_view(request: Request, name: str, kiosk: bool = False):
             "event_name": event_name,
             "event_slug": event_slug,
             "games": details.get("games", []),
-            "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123-456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
-            "sse_token": SSE_TOKEN or "",
             # Optional membership offer (shown on Ready page when membership not required AND not already a member)
             "offer_membership": settings.get("offer_membership") is True,
             "is_member": status.get("member", False),
@@ -99,7 +104,6 @@ async def root(request: Request):
         context={
             "request": request,
             "membership_flow": get_membership_flow(),
-            "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "kiosk": False,
             "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
             # Pass all requirements so frontend can compute missing array correctly
@@ -122,7 +126,6 @@ async def kiosk_mode(request: Request):
         context={
             "request": request,
             "membership_flow": get_membership_flow(),
-            "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "kiosk": True,
             "collect_acquisition_source": settings.get("collect_acquisition_source") is True,
             **requirements,
@@ -143,7 +146,6 @@ async def register_form(request: Request):
             "request": request,
             "membership_flow": get_membership_flow(),
             **__import__("membership_api").registration_context(request),
-            "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
             "games": games,
@@ -168,7 +170,6 @@ async def register_form_alias(request: Request):
             "request": request,
             "membership_flow": get_membership_flow(),
             **__import__("membership_api").registration_context(request),
-            "n8n_token": N8N_WEBHOOK_TOKEN or "",
             "swish_number": settings.get("swish_number", "123 456 78 90"),
             "swish_expected_per_game": settings.get("swish_expected_per_game", 25),
             "games": games,

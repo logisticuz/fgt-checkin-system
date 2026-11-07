@@ -397,8 +397,9 @@ def test_integration_endpoint_forwards_degraded_state_and_preserves_startgg(
 @pytest.mark.parametrize("route", ["recheck-startgg", "bulk-recheck-startgg"])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_dashboard_recheck_applies_successful_negative_lookup(
-    app_client, pg_db, n8n_stub, route, legacy
+    app_client, pg_db, n8n_stub, backend_app, monkeypatch, route, legacy
 ):
+    monkeypatch.setattr(backend_app.admin, "INTEGRATION_ENGINE", "n8n")
     row = pg_db.seed_checkin(
         member=True,
         startgg=True,
@@ -448,8 +449,9 @@ def test_dashboard_recheck_applies_successful_negative_lookup(
     ],
 )
 def test_dashboard_recheck_preserves_stored_fields_on_degraded_lookup(
-    app_client, pg_db, n8n_stub, route, kind
+    app_client, pg_db, n8n_stub, backend_app, monkeypatch, route, kind
 ):
+    monkeypatch.setattr(backend_app.admin, "INTEGRATION_ENGINE", "n8n")
     row = pg_db.seed_checkin(
         member=True,
         startgg=True,

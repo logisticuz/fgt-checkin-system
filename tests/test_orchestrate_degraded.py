@@ -51,7 +51,7 @@ def test_disabled_engine_is_explicitly_degraded(app_client, pg_db, n8n_stub):
     _assert_no_membership_hint(body)
     assert pg_db.checkins()[0]["member"] is False
     assert pg_db.checkins()[0]["status"] == "Pending"
-    assert len(n8n_stub.calls) == 1  # Reporting adds no upstream requests.
+    assert n8n_stub.calls == []  # Disabled integrations must never reach a transport.
 
 
 @pytest.mark.parametrize("failure", ["timeout", "http_error", "invalid_shape", "empty_summary"])

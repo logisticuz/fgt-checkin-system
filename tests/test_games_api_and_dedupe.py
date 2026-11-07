@@ -10,6 +10,7 @@ from threading import Barrier
 import httpx
 import psycopg
 import pytest
+from status_api import capability_token
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -36,6 +37,8 @@ def test_games_requires_an_existing_checkin_id(games_client, pg_db, checkin_id, 
     body = {"tag": row["tag"], "slug": row["event_slug"], "games": [ALLOWED[0]]}
     if checkin_id is not None:
         body["checkin_id"] = checkin_id
+    if checkin_id:
+        body["status_token"] = capability_token(checkin_id)
     response = games_client.patch("/api/player/games", json=body)
     assert response.status_code == status
     assert pg_db.checkins()[0]["tournament_games_registered"] == []
@@ -46,7 +49,7 @@ def test_games_requires_an_existing_checkin_id(games_client, pg_db, checkin_id, 
 def test_unknown_game_is_rejected_with_allowed_names_and_no_write(games_client, pg_db, game):
     row = pg_db.seed_checkin(payment_expected=25, tournament_games_registered=[ALLOWED[0]])
     response = games_client.patch(
-        "/api/player/games", json={"checkin_id": row["record_id"], "games": [game]}
+        "/api/player/games", json={"checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]), "games": [game]}
     )
     assert response.status_code == 400
     assert response.json()["detail"]["allowed_games"] == ALLOWED
@@ -61,7 +64,7 @@ def test_games_uses_stored_identity_and_server_price(games_client, pg_db):
     response = games_client.patch(
         "/api/player/games",
         json={
-            "checkin_id": row["record_id"],
+            "checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]),
             "tag": "spoofed-tag",
             "slug": "another-event",
             "games": ALLOWED,
@@ -81,7 +84,7 @@ def test_repeated_games_are_billed_once(games_client, pg_db):
     row = pg_db.seed_checkin()
     response = games_client.patch(
         "/api/player/games",
-        json={"checkin_id": row["record_id"], "games": [ALLOWED[0], ALLOWED[0]]},
+        json={"checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]), "games": [ALLOWED[0], ALLOWED[0]]},
     )
     assert response.status_code == 200
     assert response.json()["payment_expected"] == 25
@@ -92,7 +95,7 @@ def test_repeated_games_are_billed_once(games_client, pg_db):
 def test_checkin_from_a_different_event_cannot_be_changed(games_client, pg_db):
     row = pg_db.seed_checkin(event_slug="different-test-event")
     response = games_client.patch(
-        "/api/player/games", json={"checkin_id": row["record_id"], "games": ALLOWED}
+        "/api/player/games", json={"checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]), "games": ALLOWED}
     )
     assert response.status_code == 404
     assert pg_db.checkins()[0]["tournament_games_registered"] == []
@@ -109,7 +112,7 @@ def test_settings_event_list_is_used_when_no_default_games(games_client, pg_db, 
             "UPDATE settings SET default_game = NULL, events_json = %s", (Jsonb(events),)
         )
     response = games_client.patch(
-        "/api/player/games", json={"checkin_id": row["record_id"], "games": [ALLOWED[0]]}
+        "/api/player/games", json={"checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]), "games": [ALLOWED[0]]}
     )
     assert response.status_code == 200
     assert pg_db.checkins()[0]["payment_expected"] == 25
@@ -124,7 +127,7 @@ def test_active_configured_subset_wins_over_unselected_startgg_games(games_clien
             ([ALLOWED[0]], Jsonb([{"name": game} for game in ALLOWED])),
         )
     response = games_client.patch(
-        "/api/player/games", json={"checkin_id": row["record_id"], "games": [ALLOWED[1]]}
+        "/api/player/games", json={"checkin_id": row["record_id"], "status_token": capability_token(row["record_id"]), "games": [ALLOWED[1]]}
     )
     assert response.status_code == 400
     assert response.json()["detail"]["allowed_games"] == [ALLOWED[0]]

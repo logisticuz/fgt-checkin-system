@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app_state import (
     HTTPException,
+    INTEGRATION_ENGINE,
     N8N_BASIC_AUTH_PASSWORD,
     N8N_BASIC_AUTH_USER,
     N8N_INTERNAL,
@@ -76,6 +77,12 @@ async def admin_recheck_startgg(request: Request):
 
     Body: { "record_id": "..." }
     """
+    if INTEGRATION_ENGINE != "n8n":
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "integrations_disabled", "state": "skipped"},
+        )
+
     try:
         body = await request.json()
     except Exception:
@@ -220,6 +227,12 @@ async def admin_bulk_recheck_startgg():
     applies result (email, events, startgg flag), and recomputes status.
     Includes a small delay between calls to respect Start.gg rate limits.
     """
+    if INTEGRATION_ENGINE != "n8n":
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "integrations_disabled", "state": "skipped"},
+        )
+
     get_checkins = getattr(storage_api, "get_checkins", None)
     get_by_id = getattr(storage_api, "get_checkin_by_record_id", None)
     apply_fn = getattr(storage_api, "apply_integration_result", None)

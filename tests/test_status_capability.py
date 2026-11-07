@@ -233,7 +233,7 @@ def test_status_uses_canonical_requirements_instead_of_stored_status(
     assert body["payment_ok"] is payment_ok
 
 
-def test_status_page_context_requires_a_valid_matching_token(app_client, pg_db):
+def test_status_page_context_requires_a_valid_matching_token(app_client, pg_db, backend_app, monkeypatch):
     row = pg_db.seed_checkin(name="Context player")
     checkin_id = row["record_id"]
     token = status.capability_token(checkin_id)
@@ -243,16 +243,23 @@ def test_status_page_context_requires_a_valid_matching_token(app_client, pg_db):
     assert response.status_code == 200
     assert response.context["checkin_id"] == checkin_id
     assert response.context["status_token"] == token
+    legacy = app_client.get("/status/Context%20player")
+    assert legacy.status_code == 200 and "checkin_id" not in legacy.context
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid capability must not fall back to name lookup")
+
+    monkeypatch.setattr(backend_app.pages, "check_participant_status", forbidden)
+    monkeypatch.setattr(backend_app.pages, "get_participant_details", forbidden)
     for params in (
-        {},
         {"checkin_id": checkin_id},
         {"checkin_id": str(uuid.uuid4()), "t": token},
         {"checkin_id": checkin_id, "t": status.capability_token(checkin_id, ttl=-1)},
         {"checkin_id": checkin_id, "t": "invalid"},
     ):
         response = app_client.get("/status/Context%20player", params=params)
-        assert "checkin_id" not in response.context
-        assert "status_token" not in response.context
+        assert response.status_code == 403
+        assert "expired" in response.text and "ask a TO" in response.text
 
 
 def test_explicit_status_key_and_private_secret_fallback(monkeypatch):
