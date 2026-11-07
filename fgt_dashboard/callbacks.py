@@ -2708,8 +2708,13 @@ def register_callbacks(app):
             ),
             "pp",
         )
-        if metrics["unknown_games"]:
-            known_games_note = f"Known games only; unknown: {metrics['unknown_games']} check-ins"
+        prev_unknown_games = _as_int(prev_metrics.get("unknown_games")) if prev_metrics else 0
+        if metrics["unknown_games"] or prev_unknown_games:
+            known_games_note = "Comparison n/a"
+            if metrics["unknown_games"]:
+                known_games_note += f"; unknown: {metrics['unknown_games']} check-ins"
+            if prev_unknown_games:
+                known_games_note += f"; prev: unknown games for {prev_unknown_games} check-ins"
             slots_delta = known_games_note
             avggames_delta = known_games_note
             multigame_delta = known_games_note

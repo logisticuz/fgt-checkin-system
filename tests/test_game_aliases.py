@@ -280,6 +280,64 @@ def test_top_players_dropdown_deduplicates_canonical_games_and_restores_alias_se
     assert {option["value"] for option in fallback_options} == {"all", SF6, SMASH, "TEKKEN 8"}
 
 
+@pytest.mark.parametrize(
+    "previous_games, current_games",
+    [
+        ([None], [[SF6]]),
+        ([[SF6], None], [[SF6, GG]]),
+        ([[SF6]], [[SF6, GG]]),
+        ([[SF6]], [None]),
+        ([None], [[SF6], None]),
+    ],
+    ids=["unknown-prev", "partial-prev", "known-control", "unknown-current", "both-partial"],
+)
+def test_game_comparisons_require_known_metadata_in_both_periods(
+    archive_db, dashboard, monkeypatch, previous_games, current_games
+):
+    for slug, date, game_rows in (
+        ("previous", "2026-01-01", previous_games),
+        ("current", "2026-01-02", current_games),
+    ):
+        for games in game_rows:
+            seed_archive(
+                archive_db, event_slug=slug, event_date=date, tournament_games_registered=games
+            )
+        archive_db.insert(
+            "event_stats",
+            {
+                "event_slug": slug,
+                "event_date": date,
+                "total_participants": len(game_rows),
+                "games_breakdown": {"SF6": 1},
+            },
+        )
+    before = facts(archive_db)
+    wire_reads(dashboard, monkeypatch)
+    values = dashboard.callbacks["update_insights"](
+        "tab-insights", 1, [], "custom", [], 15, None, None, "2026-01-02", "2026-01-02"
+    )
+    output = {
+        (item.component_id, item.component_property): value
+        for item, value in zip(dashboard.definitions["update_insights"]["output"], values)
+    }
+    deltas = [
+        output[(f"insights-kpi-{metric}-delta", "children")]
+        for metric in ("slots", "avggames", "multigame")
+    ]
+    if None in previous_games or None in current_games:
+        assert all("Comparison n/a" in delta and "vs prev" not in delta for delta in deltas)
+        if None in previous_games:
+            assert all("prev: unknown" in delta for delta in deltas)
+        if None in current_games:
+            assert all(
+                f"unknown: {current_games.count(None)} check-ins" in delta for delta in deltas
+            )
+    else:
+        for delta, expected in zip(deltas, ("+1 vs prev", "+1.0 vs prev", "+100.0 pp vs prev")):
+            assert delta.endswith(expected)
+    assert facts(archive_db) == before
+
+
 def test_alias_note_markdown_treats_unknown_labels_as_text(history, dashboard, monkeypatch):
     wire_reads(dashboard, monkeypatch)
     unsafe = "[bracket](https://example.invalid) <img> *game*"
