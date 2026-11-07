@@ -32,6 +32,7 @@ OUTCOME_ERROR_CODES = frozenset(
         "consent_required",
         "stale_texts",
         "year_changed",
+        "checkin_missing",
         "internal_error",
     }
 )

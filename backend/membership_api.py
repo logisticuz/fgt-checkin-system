@@ -83,6 +83,8 @@ _MESSAGES = {
     "failed": "Membership registration could not be confirmed. Please ask a TO.",
     "internal_error": "Membership registration is temporarily unavailable. Please ask a TO.",
 }
+_MESSAGES["checkin_missing"] = "Ask a TO to check your membership"
+
 _STATE_MESSAGES = {
     "code_sent": "A verification code has been sent.",
     "submitting": "Your membership is being registered. Please wait.",
@@ -341,13 +343,7 @@ def _start(details):
 
 
 def _update_member(attempt):
-    checkin_id = _field(attempt, "checkin_id")
-    if checkin_id is not None:
-        checkin = postgres_api.get_checkin_by_record_id(checkin_id)
-        if checkin and _field(checkin, "fields", {}).get("event_slug") == _field(
-            attempt, "event_slug"
-        ):
-            postgres_api.update_checkin(checkin_id, {"member": True})
+    return postgres_api.mark_membership_checkin(_field(attempt, "id"))
 
 
 def _year_changed(attempt_id, *, submitting=False):
@@ -383,7 +379,9 @@ def _submit(attempt_id, claim, attempt):
     try:
         if outcome == "submitted":
             store.finish_submit(attempt_id, "submitted")
-            _update_member(attempt)
+            if _update_member(attempt) == "manual_review":
+                _log(attempt_id, "manual_review", "checkin_missing")
+                return _reply(state="manual_review", error_code="checkin_missing")
             _log(attempt_id, "submitted")
             return _reply(ok=True, state="submitted")
         if outcome == "rejected":
@@ -400,7 +398,14 @@ def _submit(attempt_id, claim, attempt):
 def _state_response(attempt):
     state = _field(attempt, "state")
     if state == "manual_review":
-        return _reply(state="manual_review")
+        return _reply(
+            state="manual_review",
+            error_code=(
+                "checkin_missing"
+                if _field(attempt, "outcome_error_code") == "checkin_missing"
+                else None
+            ),
+        )
     error = _field(attempt, "outcome_error_code")
     if state in ("locked", "expired", "failed") and error is None:
         error = state
@@ -463,6 +468,7 @@ def _status(attempt_id):
         state = _field(attempt, "state")
         if state == "submitted":
             _update_member(attempt)
+            attempt = store.get_attempt(attempt_id)
         elif state == "outcome_unknown":
             claimed = store.claim_reconcile(attempt_id, min_interval_s=RECONCILE_INTERVAL_SECONDS)
             if claimed:

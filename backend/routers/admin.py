@@ -126,9 +126,10 @@ async def admin_recheck_startgg(request: Request):
         n8n_headers["authorization"] = f"Basic {b64}"
 
     try:
+        attempt_id = storage_api.start_integration_attempt(record_id, sources=("startgg",))
         n8n_resp = await httpx_client.post(
             n8n_url,
-            json={"tag": tag, "slug": slug},
+            json={"tag": tag, "slug": slug, "attempt_id": attempt_id},
             headers=n8n_headers,
             timeout=httpx.Timeout(15.0, connect=5.0),
         )
@@ -171,6 +172,7 @@ async def admin_recheck_startgg(request: Request):
             ok=True,
             data=result_data,
             state=result_state,
+            attempt_id=attempt_id,
         )
 
     # 4. Recompute status
@@ -274,9 +276,10 @@ async def admin_bulk_recheck_startgg():
         total += 1
 
         try:
+            attempt_id = storage_api.start_integration_attempt(record_id, sources=("startgg",))
             n8n_resp = await httpx_client.post(
                 n8n_url,
-                json={"tag": tag, "slug": slug},
+                json={"tag": tag, "slug": slug, "attempt_id": attempt_id},
                 headers=n8n_headers,
                 timeout=httpx.Timeout(15.0, connect=5.0),
             )
@@ -311,6 +314,7 @@ async def admin_bulk_recheck_startgg():
                 ok=True,
                 data=result_data,
                 state=result_state,
+                attempt_id=attempt_id,
             )
 
             # Recompute status
