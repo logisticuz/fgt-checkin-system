@@ -95,16 +95,17 @@ Venue limits use the connection IP, shared by players behind a NAT. The event ha
   60/minute, burst 40: a legacy-registration probe cannot consume their quota.
 - Legacy eBas registration stays strict at 10/minute, burst 30. It accommodates
   a wave of 30, while 100 registration attempts across a minute exceed the budget.
-- Membership start stays 10/minute, verify/confirm 20/minute (burst 20), and resend
+- Membership start stays 10/minute, verify/confirm 20/minute, each with burst 40 so
+  30 first-time signups can start and verify together. Resend stays strict at
   5/minute (burst 5). Polling keeps its own 30/second budget, burst 120; 30 players
   polling one URL every ten seconds need about 3/second (three URLs need 9/second).
 
-`tests/test_nginx_allowlist.py` models one source IP doing 720 requests: three HTML
-pages, ten assets, orchestrate, a game save and three polling URLs at 0/10/20 seconds
-for each of 30 players. It requires zero rejections. A second model spaces 100 legacy
+`tests/test_nginx_allowlist.py` models one source IP doing 780 requests: three HTML
+pages, ten assets, orchestrate, v2 start/verify, a game save and three polling URLs at
+0/10/20 seconds for each of 30 players. It requires zero rejections. A second model spaces 100 legacy
 registrations evenly across 60 seconds and requires rejections while game saves work.
 The isolated smoke also runs the 30 players concurrently from one container/IP,
-requires all 720 responses to be 200 within 30 seconds, then probes legacy registration
+requires all 780 responses to be 200 within 30 seconds, then probes legacy registration
 and verifies independent game capacity. This proves gateway admission against stubs;
 it does not measure backend/provider throughput or authorize requests to live providers.
 nginx excess public requests return 429 and `Retry-After: 60`; backend Retry-After

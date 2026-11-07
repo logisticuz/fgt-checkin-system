@@ -197,13 +197,15 @@ def test_venue_write_budgets_and_polling_are_separate(public):
         assert directives(location(block, path), "limit_req") == [
             [f"zone={zone}", f"burst={burst}", "nodelay"]
         ]
-    for path, zone in (
-        ("/api/membership/start", "membership_start"),
-        ("/api/membership/verify", "membership_verify"),
-        ("/api/membership/resend", "membership_resend"),
-        ("/member/confirm/token", "membership_confirm"),
+    for path, zone, burst in (
+        ("/api/membership/start", "membership_start", 40),
+        ("/api/membership/verify", "membership_verify", 40),
+        ("/api/membership/resend", "membership_resend", 5),
+        ("/member/confirm/token", "membership_confirm", 40),
     ):
-        assert directives(location(block, path), "limit_req")[0][0] == f"zone={zone}"
+        assert directives(location(block, path), "limit_req") == [
+            [f"zone={zone}", f"burst={burst}", "nodelay"]
+        ]
     for path in (
         "/api/participant/name/status",
         "/api/checkin/id/status",
@@ -423,11 +425,19 @@ def test_thirty_player_rush_model_has_no_rejections(public):
     _, config, block = public
     events = []
     for player in range(30):
-        # Three HTML pages, ten assets, two writes, and three polling URLs every10s.
+        # Three pages, ten assets, check-in/games plus v2 start/verify, and polls every10s.
         for path in ("/kiosk", "/register", f"/status/Synthetic{player}"):
             events.append((0, path))
         events.extend((0, f"/static/logo.png?asset={asset}") for asset in range(10))
-        events.extend((0, path) for path in ("/api/checkin/orchestrate", "/api/player/games"))
+        events.extend(
+            (0, path)
+            for path in (
+                "/api/checkin/orchestrate",
+                "/api/player/games",
+                "/api/membership/start",
+                "/api/membership/verify",
+            )
+        )
         for tick in (0, 10, 20):
             events.extend(
                 (tick, path)
@@ -437,7 +447,7 @@ def test_thirty_player_rush_model_has_no_rejections(public):
                     f"/api/membership/id{player}/status",
                 )
             )
-    assert len(events) == 720
+    assert len(events) == 780
     assert model_venue_requests(config, block, events) == [200] * len(events)
 
 

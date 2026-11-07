@@ -269,6 +269,8 @@ def player(index):
         statuses.extend(send(connection, path) for path in assets)
         statuses.append(send(connection, "/api/checkin/orchestrate", "POST"))
         statuses.append(send(connection, "/register"))
+        statuses.append(send(connection, "/api/membership/start", "POST"))
+        statuses.append(send(connection, "/api/membership/verify", "POST"))
         statuses.append(send(connection, "/api/player/games", "PATCH"))
         statuses.append(send(connection, f"/status/Synthetic{index}"))
         for tick in (0, 10, 20):
@@ -284,10 +286,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
     results = list(executor.map(player, range(30)))
 statuses = [status for result in results for status in result]
 elapsed = time.monotonic() - started
-assert len(statuses) == 720, len(statuses)
+assert len(statuses) == 780, len(statuses)
 assert set(statuses) == {200}, Counter(statuses)
 assert elapsed < 30, elapsed
-print(f"PASS venue rush: 30 players, ONE source IP, 720 requests in {elapsed:.2f}s, ZERO 429s", flush=True)
+print(f"PASS venue rush: 30 players, ONE source IP, 780 requests in {elapsed:.2f}s, ZERO 429s", flush=True)
 
 connection = connect()
 try:
