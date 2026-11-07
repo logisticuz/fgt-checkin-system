@@ -11,6 +11,7 @@ import httpx
 import pytest
 import requests
 import status_api
+from psycopg.types.json import Jsonb
 
 from tests.fixtures import make_checkin
 
@@ -110,7 +111,25 @@ def test_provider_error_logs_never_include_body_or_contact_sentinels(
             raise httpx.ConnectError(private_body, request=request)
 
         n8n_stub.on_call = unavailable
-    caplog.set_level(logging.WARNING)
+    transport = backend_app.checkin.httpx_client._transport
+    original_handler = transport.handler
+    transport_loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    original_levels = [item.level for item in transport_loggers]
+    original_filters = [list(item.filters) for item in transport_loggers]
+
+    async def provider_diagnostics(request):
+        logging.getLogger(f"httpcore.n8n_{path}_diagnostic").warning(
+            "Provider metadata: %s", private_body
+        )
+        logging.getLogger("unrelated.application").info(
+            "Unrelated application log preserved"
+        )
+        response = await original_handler(request)
+        response.extensions["reason_phrase"] = private_body.encode("ascii")
+        return response
+
+    monkeypatch.setattr(transport, "handler", provider_diagnostics)
+    caplog.set_level(logging.INFO)
     if path == "orchestrate":
         response = app_client.post("/api/checkin/orchestrate", json=make_checkin())
         assert response.status_code == 200 and response.json()["degraded"] is True
@@ -135,6 +154,11 @@ def test_provider_error_logs_never_include_body_or_contact_sentinels(
     ]
     assert len(errors) == 1
     assert errors[0].endswith("status=502" if failure == "http" else "status=none")
+    assert "Unrelated application log preserved" in caplog.messages
+    assert [item.level for item in transport_loggers] == original_levels
+    assert [item.filters for item in transport_loggers] == original_filters
+    logging.getLogger("httpx").info("Post-provider transport log preserved")
+    assert "Post-provider transport log preserved" in caplog.messages
 
 
 @pytest.mark.db
@@ -233,3 +257,75 @@ def test_games_mutation_requires_capability_for_its_own_row(
         )
         lookup.assert_not_called()
     assert n8n_stub.calls == []
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("route", ["/register", "/register.html", "/api/player/games"])
+@pytest.mark.parametrize("source", ["settings", "fresh-cache", "expired-cache"])
+def test_disabled_engine_game_entry_points_use_only_cache_or_settings(
+    app_client, pg_db, backend_app, n8n_stub, monkeypatch, route, source
+):
+    state = backend_app.app_state
+    row = pg_db.seed_checkin()
+    local = {"id": "local-event", "name": "Local synthetic game"}
+    cached = {"id": "cached-event", "name": "Cached synthetic game"}
+    with pg_db.pool.connection() as connection:
+        connection.execute(
+            "UPDATE settings SET default_game = NULL, events_json = %s",
+            (Jsonb([local]),),
+        )
+    monkeypatch.setattr(state, "STARTGG_API_KEY", "synthetic-configured-startgg-key")
+    cache = {}
+    expected = local
+    if source != "settings":
+        timestamp = state.time.time()
+        if source == "expired-cache":
+            timestamp -= state.STARTGG_CACHE_TTL + 1
+        else:
+            expected = cached
+        cache[row["event_slug"]] = ([cached], timestamp)
+    monkeypatch.setattr(state, "STARTGG_CACHE", cache)
+    provider = Mock(
+        side_effect=AssertionError("Disabled engine attempted Start.gg transport")
+    )
+    monkeypatch.setattr(state.SESSION, "post", provider)
+    if route == "/api/player/games":
+        response = app_client.patch(
+            route,
+            json={
+                "checkin_id": row["record_id"],
+                "status_token": status_api.capability_token(row["record_id"]),
+                "games": [expected["name"]],
+            },
+        )
+        assert response.status_code == 200
+        assert pg_db.checkins()[0]["tournament_games_registered"] == [expected["name"]]
+    else:
+        response = app_client.get(route)
+        assert response.status_code == 200 and response.context["games"] == [expected]
+    provider.assert_not_called()
+    assert n8n_stub.calls == []
+
+
+def test_enabled_engine_still_fetches_and_caches_tournament_games(
+    backend_app, monkeypatch
+):
+    state = backend_app.app_state
+    monkeypatch.setattr(state, "INTEGRATION_ENGINE", "n8n")
+    monkeypatch.setattr(state, "STARTGG_API_KEY", "synthetic-configured-startgg-key")
+    monkeypatch.setattr(state, "STARTGG_CACHE", {})
+    response = Mock()
+    response.json.return_value = {
+        "data": {
+            "tournament": {
+                "events": [{"id": "synthetic-game", "name": "Provider synthetic game"}]
+            }
+        }
+    }
+    provider = Mock(return_value=response)
+    monkeypatch.setattr(state.SESSION, "post", provider)
+    for _ in range(2):
+        assert state.get_tournament_events("synthetic-event") == [
+            {"id": "synthetic-game", "name": "Provider synthetic game"}
+        ]
+    provider.assert_called_once()

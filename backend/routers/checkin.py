@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 from status_api import verify_capability
+from shared.ebas_client import _private_transport_logging
 
 from app_state import (
     Depends,
@@ -236,12 +237,13 @@ async def orchestrate_checkin(request: Request):
                 ).decode()
                 n8n_headers["authorization"] = f"Basic {token}"
 
-            n8n_resp = await httpx_client.post(
-                n8n_url,
-                json=n8n_payload,
-                headers=n8n_headers,
-                timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
-            )
+            with _private_transport_logging():
+                n8n_resp = await httpx_client.post(
+                    n8n_url,
+                    json=n8n_payload,
+                    headers=n8n_headers,
+                    timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+                )
 
             if n8n_resp.status_code < 400:
                 n8n_response_data = n8n_resp.json()

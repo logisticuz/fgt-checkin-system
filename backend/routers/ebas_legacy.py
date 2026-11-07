@@ -1,6 +1,7 @@
 """Ebas legacy routes moved from main.py without handler changes."""
 
 from fastapi import APIRouter
+from shared.ebas_client import _private_transport_logging
 
 from app_state import (
     EBAS_REGISTER_TIMEOUT_SECONDS,
@@ -62,12 +63,13 @@ async def _submit_legacy_ebas(checkin_id, started_at, payload):
             ).decode()
             headers["authorization"] = f"Basic {token}"
 
-        response = await httpx_client.post(
-            f"{N8N_INTERNAL}/webhook/ebas/register-v2",
-            json=payload,
-            headers=headers,
-            timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
-        )
+        with _private_transport_logging():
+            response = await httpx_client.post(
+                f"{N8N_INTERNAL}/webhook/ebas/register-v2",
+                json=payload,
+                headers=headers,
+                timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+            )
         if response.status_code < 400:
             return response.json()
 
