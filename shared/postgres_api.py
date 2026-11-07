@@ -4269,6 +4269,7 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
             """
             )
             players = cur.fetchall()
+            dismissed = _dismissed_pair_keys(cur)
 
     # Build lookup structures
     player_list = []
@@ -4290,7 +4291,8 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
     for i, a in enumerate(player_list):
         for b in player_list[i + 1 :]:
             pair_key = tuple(sorted([a["uuid"], b["uuid"]]))
-            if pair_key in seen_pairs:
+            # Skip before the limit check, so dismissed pairs never use up candidate slots.
+            if pair_key in seen_pairs or pair_key in dismissed:
                 continue
 
             reasons = []
@@ -4347,6 +4349,148 @@ def find_duplicate_candidates(limit: int = 50) -> List[Dict[str, Any]]:
 
     logger.info(f"🔍 Found {len(candidates)} duplicate candidates")
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# Duplicate dismissals ("Not same", T-056)
+# ---------------------------------------------------------------------------
+DISMISSALS_TABLE = "player_duplicate_dismissals"
+
+
+def ordered_duplicate_pair(uuid_a: str, uuid_b: str) -> tuple:
+    """Return the stored (smaller, larger) form of a pair; reject empty or identical uuids."""
+    a = (uuid_a or "").strip()
+    b = (uuid_b or "").strip()
+    if not a or not b or a == b:
+        raise ValueError("A dismissal needs two different player uuids")
+    return (a, b) if a < b else (b, a)
+
+
+def _dismissals_table_exists(cur) -> bool:
+    # Startup migrations can be disabled (FGT_MIGRATIONS_ENABLED=0); the scan must still work.
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL", (DISMISSALS_TABLE,))
+    return bool(cur.fetchone()[0])
+
+
+def _dismissed_pair_keys(cur) -> set:
+    if not _dismissals_table_exists(cur):
+        logger.warning("player_duplicate_dismissals is missing; showing all duplicate pairs")
+        return set()
+    cur.execute("SELECT uuid_a, uuid_b FROM player_duplicate_dismissals")
+    return {(row[0], row[1]) for row in cur.fetchall()}
+
+
+def dismiss_duplicate_pair(uuid_a: str, uuid_b: str, dismissed_by: str = "") -> bool:
+    """Persist "these two are different players". Idempotent.
+
+    Returns True when the pair is (now) dismissed, False when either player no longer
+    exists (e.g. merged meanwhile). Takes the global player-merge lock shared, so it
+    serializes against merge/undo (exclusive) like every other player writer.
+    """
+    a, b = ordered_duplicate_pair(uuid_a, uuid_b)
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+                cur.execute("SELECT count(*) FROM players WHERE uuid IN (%s, %s)", (a, b))
+                if cur.fetchone()[0] != 2:
+                    return False
+                cur.execute(
+                    """
+                    INSERT INTO player_duplicate_dismissals (uuid_a, uuid_b, dismissed_by)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (uuid_a, uuid_b) DO NOTHING
+                    """,
+                    (a, b, (dismissed_by or "")[:120]),
+                )
+    return True
+
+
+def undo_duplicate_dismissal(uuid_a: str, uuid_b: str) -> bool:
+    """Remove a dismissal so the pair shows up in the next scan. True if a row was removed."""
+    a, b = ordered_duplicate_pair(uuid_a, uuid_b)
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock_shared(hashtext('fgt:player-merges'))")
+                cur.execute(
+                    "DELETE FROM player_duplicate_dismissals WHERE uuid_a = %s AND uuid_b = %s",
+                    (a, b),
+                )
+                return cur.rowcount > 0
+
+
+def is_duplicate_pair_dismissed(uuid_a: str, uuid_b: str) -> bool:
+    a, b = ordered_duplicate_pair(uuid_a, uuid_b)
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if not _dismissals_table_exists(cur):
+                return False
+            cur.execute(
+                "SELECT 1 FROM player_duplicate_dismissals WHERE uuid_a = %s AND uuid_b = %s",
+                (a, b),
+            )
+            return cur.fetchone() is not None
+
+
+def _dismissal_player(player_uuid, name, tag) -> Dict[str, str]:
+    return {"uuid": player_uuid, "name": (name or "").strip(), "tag": (tag or "").strip()}
+
+
+_LIVE_DISMISSALS = """
+    FROM player_duplicate_dismissals d
+    JOIN players pa ON pa.uuid = d.uuid_a
+    JOIN players pb ON pb.uuid = d.uuid_b
+"""
+
+
+def count_duplicate_dismissals() -> int:
+    """How many dismissed pairs still have both players (the true "Dismissed pairs (N)")."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if not _dismissals_table_exists(cur):
+                return 0
+            cur.execute("SELECT count(*) " + _LIVE_DISMISSALS)
+            return int(cur.fetchone()[0])
+
+
+def get_dismissed_pair_keys() -> set:
+    """Every stored (uuid_a, uuid_b) pair, for reconciling the cards on screen."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            return _dismissed_pair_keys(cur)
+
+
+def get_duplicate_dismissals(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    """Dismissed pairs whose players both still exist, newest first (names/tags only)."""
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if not _dismissals_table_exists(cur):
+                return []
+            cur.execute(
+                """
+                SELECT d.uuid_a, d.uuid_b, d.dismissed_at, d.dismissed_by,
+                       pa.name, pa.tag, pb.name, pb.tag
+                """
+                + _LIVE_DISMISSALS
+                + """
+                ORDER BY d.dismissed_at DESC, d.id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, max(0, offset)),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "uuid_a": row[0],
+            "uuid_b": row[1],
+            "dismissed_at": row[2].isoformat() if row[2] else "",
+            "dismissed_by": row[3] or "",
+            "player_a": _dismissal_player(row[0], row[4], row[5]),
+            "player_b": _dismissal_player(row[1], row[6], row[7]),
+        }
+        for row in rows
+    ]
 
 
 def _levenshtein(s1: str, s2: str) -> int:
