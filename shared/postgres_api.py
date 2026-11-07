@@ -6828,7 +6828,6 @@ def resolve_live_duplicate(
                         ),
                     )
                     result = {"action": action, **merged}
-    # TODO(T-067): trigger its recompute here once merged.
     return {**result, "event_slug": event_slug}
 
 

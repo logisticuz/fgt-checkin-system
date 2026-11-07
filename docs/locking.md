@@ -84,7 +84,9 @@ Reopen uses the event's date or its unambiguous archived-date fallback and clear
 unrelated settings date. An entirely unknown historical date requires an explicit TO
 correction before rearchive; it never silently becomes today's date.
 
-Merge refresh runs before capturing its undo fingerprints. A later statistics-only
+Insights and live-dialog merges both use `_merge_players_locked`; its refresh runs
+inside the fact transaction before capturing undo fingerprints. Undo invalidates T068
+decision proofs, then uses the same refresh/admission rule. A later statistics-only
 heal may extend the newest fingerprint only if the entire player, archive and active
 snapshots still match beforehand; the player row is locked while checking. Changed
 identity or attendance facts never receive a fresh undo fingerprint. Dismissing a
