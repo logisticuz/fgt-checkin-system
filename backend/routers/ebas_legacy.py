@@ -1,10 +1,12 @@
 """Ebas legacy routes moved from main.py without handler changes."""
 
 from fastapi import APIRouter
+from shared.ebas_client import _private_transport_logging
 
 from app_state import (
     EBAS_REGISTER_TIMEOUT_SECONDS,
     HTTPException,
+    INTEGRATION_ENGINE,
     N8N_BASIC_AUTH_PASSWORD,
     N8N_BASIC_AUTH_USER,
     N8N_INTERNAL,
@@ -45,6 +47,13 @@ def _ebas_registration_response(status_code, **data):
 async def _submit_legacy_ebas(checkin_id, started_at, payload):
     """Finish one upstream request even after its browser request returns processing."""
     try:
+        if INTEGRATION_ENGINE != "n8n":
+            return _ebas_registration_response(
+                503,
+                error_code="integrations_disabled",
+                state="skipped",
+                user_message="Membership registration is handled by a TO today. Please ask a TO.",
+            )
         headers = {"Content-Type": "application/json"}
         if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
             import base64
@@ -54,28 +63,27 @@ async def _submit_legacy_ebas(checkin_id, started_at, payload):
             ).decode()
             headers["authorization"] = f"Basic {token}"
 
-        response = await httpx_client.post(
-            f"{N8N_INTERNAL}/webhook/ebas/register-v2",
-            json=payload,
-            headers=headers,
-            timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
-        )
+        with _private_transport_logging():
+            response = await httpx_client.post(
+                f"{N8N_INTERNAL}/webhook/ebas/register-v2",
+                json=payload,
+                headers=headers,
+                timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+            )
         if response.status_code < 400:
             return response.json()
 
-        import re
-
-        # Redact before truncation so a cutoff cannot leave a partial personal ID in logs.
-        safe_body = re.sub(r"\d(?:[\s-]*\d){9,}", "[redacted]", response.text)[:200]
-        logger.warning("n8n eBas registration returned %s: %s", response.status_code, safe_body)
+        logger.warning(
+            "integration_error code=ebas_registration_http_error status=%s",
+            response.status_code,
+        )
         return _ebas_registration_response(502, detail="eBas registration service error")
     except httpx.TimeoutException:
         # n8n may still finish the request and report membership through its callback.
-        logger.info("n8n eBas registration is still processing after the upstream timeout")
+        logger.info("integration_error code=ebas_registration_timeout status=none")
         return _ebas_registration_response(202, success=True, state="processing")
-    except Exception as error:
-        # Exception strings can contain request bodies; log only the exception type.
-        logger.warning("n8n eBas registration failed (%s)", type(error).__name__)
+    except Exception:
+        logger.warning("integration_error code=ebas_registration_unavailable status=none")
         return _ebas_registration_response(502, detail="eBas registration service unavailable")
     finally:
         async with _ebas_registration_lock:
@@ -110,6 +118,14 @@ async def ebas_register(request: Request):
         return _ebas_registration_response(
             503,
             error_code="flow_off",
+            user_message="Membership registration is handled by a TO today. Please ask a TO.",
+        )
+
+    if INTEGRATION_ENGINE != "n8n":
+        return _ebas_registration_response(
+            503,
+            error_code="integrations_disabled",
+            state="skipped",
             user_message="Membership registration is handled by a TO today. Please ask a TO.",
         )
 

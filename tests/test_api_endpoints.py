@@ -21,7 +21,8 @@ def test_orchestrate_rejects_invalid_payload_before_storage(handler_client):
 
 
 @pytest.mark.db
-def test_orchestrate_creates_exactly_one_row(app_client, pg_db, n8n_stub):
+def test_orchestrate_creates_exactly_one_row(app_client, pg_db, n8n_stub, backend_app, monkeypatch):
+    monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
     payload = make_checkin()
     response = app_client.post("/api/checkin/orchestrate", json=payload)
     assert response.status_code == 200
@@ -76,8 +77,10 @@ def test_integration_callback_recomputes_stored_status(app_client, pg_db):
 
 @pytest.mark.db
 def test_orchestrate_recomputes_status_after_real_integration_callbacks(
-    app_client, pg_db, backend_app, n8n_stub
+    app_client, pg_db, backend_app, n8n_stub, monkeypatch
 ):
+    monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
+
     async def integration_callbacks(request):
         checkin_id = n8n_stub.calls[-1]["json"]["checkin_id"]
         async with httpx.AsyncClient(

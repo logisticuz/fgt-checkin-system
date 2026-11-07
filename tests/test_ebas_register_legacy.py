@@ -15,6 +15,7 @@ SYNTHETIC_PERSONNUMMER = "000000000000"
 
 @pytest.fixture
 def legacy_context(pg_db, backend_app, n8n_stub, monkeypatch):
+    monkeypatch.setattr(backend_app.ebas_legacy, "INTEGRATION_ENGINE", "n8n")
     row = pg_db.seed_checkin()
     monkeypatch.setattr(backend_app.ebas_legacy, "EBAS_REGISTER_WAIT_SECONDS", 0.2)
     monkeypatch.setattr(backend_app.ebas_legacy, "_ebas_registrations", {})

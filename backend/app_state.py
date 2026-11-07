@@ -398,6 +398,9 @@ def get_tournament_events(tournament_slug: str) -> list:
             logger.debug(f"Cache hit for tournament: {tournament_slug}")
             return cached_data
 
+    if INTEGRATION_ENGINE != "n8n":
+        return _events_from_settings_fallback()
+
     # Cache miss - fetch from Start.gg
     logger.info(f"Fetching events from Start.gg for tournament: {tournament_slug}")
 

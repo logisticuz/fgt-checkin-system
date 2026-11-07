@@ -1,6 +1,8 @@
 """Checkin routes moved from main.py without handler changes."""
 
 from fastapi import APIRouter
+from status_api import verify_capability
+from shared.ebas_client import _private_transport_logging
 
 from app_state import (
     Depends,
@@ -212,40 +214,46 @@ async def orchestrate_checkin(request: Request):
     logger.info(f"Orchestrate: checkin_id={checkin_id}, tag={tag}, slug={slug}")
 
     # 2. Forward to n8n v5 webhook (synchronous - n8n calls /api/integration/result internally)
-    n8n_payload = {
-        "checkin_id": checkin_id,
-        "tag": tag,
-        "slug": slug,
-        "personnummer": personnummer,
-        "name": name,
-    }
-
-    n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
     n8n_response_data = {}
+    n8n_resp = None
+    n8n_payload = {}
+    if INTEGRATION_ENGINE == "n8n":
+        n8n_payload = {
+            "checkin_id": checkin_id,
+            "tag": tag,
+            "slug": slug,
+            "personnummer": personnummer,
+            "name": name,
+        }
 
-    try:
-        n8n_headers = {"Content-Type": "application/json"}
-        if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
-            import base64
-            token = base64.b64encode(
-                f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
-            ).decode()
-            n8n_headers["authorization"] = f"Basic {token}"
+        n8n_url = f"{N8N_INTERNAL}/webhook/checkin/validate-v5"
 
-        n8n_resp = await httpx_client.post(
-            n8n_url,
-            json=n8n_payload,
-            headers=n8n_headers,
-            timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
-        )
+        try:
+            n8n_headers = {"Content-Type": "application/json"}
+            if N8N_BASIC_AUTH_USER and N8N_BASIC_AUTH_PASSWORD:
+                import base64
+                token = base64.b64encode(
+                    f"{N8N_BASIC_AUTH_USER}:{N8N_BASIC_AUTH_PASSWORD}".encode()
+                ).decode()
+                n8n_headers["authorization"] = f"Basic {token}"
 
-        if n8n_resp.status_code < 400:
-            n8n_response_data = n8n_resp.json()
-        else:
-            logger.warning(f"n8n v5 returned {n8n_resp.status_code}: {n8n_resp.text}")
-    except Exception as e:
-        logger.warning(f"n8n v5 call failed (graceful): {e}")
-        # Continue - checkin is created, integrations just didn't run
+            with _private_transport_logging():
+                n8n_resp = await httpx_client.post(
+                    n8n_url,
+                    json=n8n_payload,
+                    headers=n8n_headers,
+                    timeout=httpx.Timeout(EBAS_REGISTER_TIMEOUT_SECONDS, connect=5.0),
+                )
+
+            if n8n_resp.status_code < 400:
+                n8n_response_data = n8n_resp.json()
+            else:
+                logger.warning(
+                    "integration_error code=n8n_http_error status=%s", n8n_resp.status_code
+                )
+        except Exception:
+            logger.warning("integration_error code=n8n_transport_error status=none")
+            # Continue - checkin is created, integrations just didn't run
 
     # 3. Re-read the updated checkin record
     get_by_id = getattr(storage_api, "get_checkin_by_record_id", None)
@@ -287,7 +295,7 @@ async def orchestrate_checkin(request: Request):
 
     # 7. Return response compatible with checkin.html
     integrations, degraded = _orchestrate_integrations(
-        locals().get("n8n_resp"), n8n_response_data, n8n_payload
+        n8n_resp, n8n_response_data, n8n_payload
     )
     membership_unknown = integrations["ebas"] != "ok"
     response_missing = [
@@ -330,6 +338,9 @@ async def update_player_games(request: Request):
 
     if not isinstance(checkin_id, str) or not checkin_id.strip():
         raise HTTPException(status_code=400, detail="checkin_id is required")
+
+    if not verify_capability(checkin_id.strip(), body.get("status_token")):
+        raise HTTPException(status_code=403, detail="Invalid or expired check-in authorization")
 
     if not isinstance(games, list) or not all(isinstance(game, str) for game in games):
         raise HTTPException(status_code=400, detail="games must be an array of strings")

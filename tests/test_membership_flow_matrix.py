@@ -32,8 +32,9 @@ V2_MESSAGE = (
     ],
 )
 def test_membership_mode_route_matrix(
-    flow, method, route, app_client, pg_db, n8n_stub, monkeypatch
+    flow, method, route, app_client, pg_db, n8n_stub, monkeypatch, backend_app
 ):
+    monkeypatch.setattr(backend_app.ebas_legacy, "INTEGRATION_ENGINE", "n8n")
     monkeypatch.setattr(membership_flow, "_membership_flow", flow)
     row = pg_db.seed_checkin()
     n8n_stub.response = {"success": True}
