@@ -35,7 +35,7 @@ BASE = {
             "Webhook",
             "eBas Check",
         },
-        "invariant": "e60c7d35274726d5e99182cdcbbf23f4ca3e418cab2a3adda3e9c08072b38708",
+        "invariant": "983b2bef3f296d2335e2b6a1654440be69f8aeb4d5dc6038a9aefdd9cf78504c",
         "callbacks": 4,
     },
     "FGC THN - eBas Membership Check.json": {
@@ -1097,7 +1097,7 @@ def t054_ack(combined, *, ok=True, updated=True):
         {
             "checkin_id": combined["checkin_id"],
             "source": "startgg",
-            "success": True,
+            "success": updated is True,
             "ok": ok,
             "updated": updated,
             "state": combined["_startggState"],
@@ -1246,7 +1246,7 @@ def test_t054_failed_local_ack_is_never_reported_as_completed_verification(
     )
     ack = t054_ack(combined)
     if failure == "stale":
-        ack["body"].update(state="stale_rejected", updated=False)
+        ack["body"].update(state="stale_rejected", updated=False, success=False)
     elif failure == "not-updated":
         ack["body"]["updated"] = False
     elif failure == "http":
@@ -1470,3 +1470,76 @@ def test_t054_skipped_provider_still_checks_every_executed_callback(
     assert result["results"]["startgg"] == (
         "skipped" if expected_sync == "ok" else "unavailable"
     )
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("state", ["verified_true", "verified_false", "unavailable", "skipped"])
+def test_t054_real_backend_acknowledgement_contract(
+    app_client, pg_db, published, state
+):
+    from shared import postgres_api as postgres
+
+    row = pg_db.seed_checkin(
+        member=True,
+        startgg=True,
+        is_guest=False,
+        status="Ready",
+        tournament_games_registered=["Existing synthetic game"],
+    )
+    attempt = postgres.start_integration_attempt(row["record_id"], sources=("startgg",))
+    is_verdict = state in ("verified_true", "verified_false")
+    found = state == "verified_true"
+    verdict = (
+        t054_verdict(found, events=["New synthetic game"] if found else [])
+        if is_verdict
+        else {
+            "ok": False,
+            "state": state,
+            "skipped": state == "skipped",
+        }
+    )
+    version = flow_version(ORCHESTRATOR, published)
+    combined = t054_combine(published, t054_http(verdict))
+    combined.update(checkin_id=row["record_id"], attempt_id=attempt)
+    with pg_db.pool.connection() as connection:
+        combined["fetched_at"] = (
+            connection.execute("SELECT clock_timestamp()").fetchone()[0].isoformat()
+        )
+    payload = run_node(
+        version, "Report Start.gg Result", named={"Combine Results": combined}
+    )
+    response = app_client.post("/api/integration/result", json=payload)
+    assert response.status_code == 200
+    acknowledgement = response.json()
+    assert acknowledgement["success"] is acknowledgement["updated"] is is_verdict
+    assert acknowledgement["ok"] is is_verdict and acknowledgement["state"] == state
+    result = run_node(
+        version,
+        "Return Results",
+        named={
+            "Combine Results": combined,
+            "Report Start.gg Result": t054_http(acknowledgement, response.status_code),
+        },
+    )
+    assert result["local_sync"] == "ok"
+    assert (
+        result["integration_complete"] is is_verdict
+        and result["results"]["startgg"] == state
+    )
+    stored = pg_db.checkins()[0]
+    if is_verdict:
+        assert result["startgg"] is found and stored["startgg"] is found
+        assert stored["tournament_games_registered"] == (
+            ["New synthetic game"] if found else []
+        )
+    else:
+        assert result["startgg"] is None and "events" not in result
+        for key in (
+            "member",
+            "startgg",
+            "is_guest",
+            "status",
+            "tournament_games_registered",
+        ):
+            assert stored[key] == row[key]

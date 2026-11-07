@@ -276,7 +276,7 @@ def test_valid_empty_startgg_participant_list_remains_verified_false(
     parsed = run_node(
         flow_version(STARTGG),
         "Parse Response",
-        {"data": {"tournament": {"participants": {"nodes": []}}}},
+        {"statusCode": 200, "body": {"data": {"tournament": {"participants": {"nodes": []}}}}},
         {"Parse Input": {"tag": "Synthetic", "attempt_id": "synthetic-attempt"}},
     )
     assert parsed["state"] == "verified_false" and parsed["isRegistered"] is False
