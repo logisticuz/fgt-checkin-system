@@ -205,7 +205,7 @@ async def orchestrate_checkin(request: Request):
     telefon = sanitized.get("telefon") or sanitized.get("telephone") or ""
     email = sanitized.get("email") or ""
     personnummer = sanitized.pop("personnummer", "") or ""
-    body.pop("personnummer", None)
+    personnummer = body.pop("personnummer", None) or personnummer
     acquisition_source = sanitized.get("acquisition_source")
 
     # 1. begin_checkin (dedupe by tag+slug)

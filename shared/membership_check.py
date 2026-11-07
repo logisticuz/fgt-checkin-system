@@ -7,13 +7,14 @@ from datetime import date
 from starlette.concurrency import run_in_threadpool
 
 from shared import storage
-from shared.ebas_client import create_ebas_client
+from shared.ebas_client import create_ebas_client, normalize_check_pnr
 
 _checks_in_flight = set()
 
 
 def _confirm(pnr: str, timeout_seconds: float) -> str:
     try:
+        pnr = normalize_check_pnr(pnr)
         with create_ebas_client() as client:
             client.config = replace(
                 client.config,

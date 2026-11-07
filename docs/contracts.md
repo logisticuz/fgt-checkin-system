@@ -255,3 +255,15 @@ confirmation and are never passed to the writer, logs, error messages, or respon
 
 The legacy `/api/ebas/register` path still sends PNR to n8n as the user's explicitly
 accepted temporary exception (2026-11-07 decision). It is outside this check-path change.
+
+Confirm and validate accept only successful HTTP status codes. Confirm also rejects any
+`error`/`errors` field or non-success `request_result`; an error envelope containing
+`member_found: false` is unavailable and cannot change stored membership.
+The default stub confirmation returns `stub_transport`/unavailable. Synthetic tests may
+explicitly choose `EBAS_STUB_CONFIRM=found|not_found` in DEV. Production ignores that opt-in,
+keeps checks unavailable, and logs one startup ERROR when the stub is selected; a real
+backend check requires the deliberately configured live transport.
+
+Before the client call, 10-digit PNRs use the workflow's fixed century cutoff: YY > 30
+means 19YY, otherwise 20YY. A `-` preserves that rule; `+` selects a century at least
+100 calendar years old. Explicit 12-digit centuries are preserved. PNR is never logged.

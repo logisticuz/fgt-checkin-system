@@ -20,6 +20,7 @@ from shared.ebas_client import (
     SubmitResult,
     ValidateResult,
     _safe_log,
+    normalize_check_pnr,
 )
 
 PNR = "200001010008"
@@ -404,6 +405,90 @@ def test_confirm_false_is_distinct_from_unavailable(make_client):
     assert client.confirm_membership(PNR, 2026) == ConfirmResult(False)
 
 
+@pytest.mark.parametrize("status", [199, 300, 401, 403, 429, 500])
+@pytest.mark.parametrize("operation", ["validate", "confirm"])
+def test_non_success_status_never_confirms_even_when_body_claims_success(
+    make_client, caplog, status, operation
+):
+    client, calls = make_client(
+        {"response": {"member_found": False, "request_result": "success"}},
+        status=status,
+    )
+    result = (
+        client.validate_member(MEMBER)
+        if operation == "validate"
+        else client.confirm_membership(PNR, 2026)
+    )
+    assert result.error_code == "provider_unavailable"
+    if operation == "confirm":
+        assert result.found is None
+    else:
+        assert result.ok is False
+    assert len(calls) == 1
+    assert_private(result, caplog)
+
+
+@pytest.mark.parametrize("location", ["outer", "inner"])
+@pytest.mark.parametrize("marker,value", [("error", None), ("errors", []), ("error", "private"), ("request_result", "error")])
+@pytest.mark.parametrize("operation", ["validate", "confirm"])
+def test_error_fields_cannot_be_interpreted_as_membership_or_valid_input(
+    make_client, caplog, location, marker, value, operation
+):
+    response = {"response": {"member_found": False, "request_result": "success"}}
+    part = response if location == "outer" else response["response"]
+    part[marker] = value
+    client, _ = make_client(response)
+    result = (
+        client.validate_member(MEMBER)
+        if operation == "validate"
+        else client.confirm_membership(PNR, 2026)
+    )
+    assert result.error_code == "provider_unavailable"
+    if operation == "confirm":
+        assert result.found is None
+    else:
+        assert result.ok is False
+    assert_private(result, caplog)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("3001011232", "203001011232"),
+        ("3101011231", "193101011231"),
+        ("300101-1232", "203001011232"),
+        ("310101-1231", "193101011231"),
+        ("000101+1238", "190001011238"),
+        ("900101+1239", "189001011239"),
+        ("300101+1232", "183001011232"),
+        ("310101+1231", "183101011231"),
+        ("20000101-0008", PNR),
+        (PNR, PNR),
+    ],
+)
+def test_check_normalization_matches_flow_cutoff_and_preserves_100_plus(
+    raw, expected, monkeypatch, caplog
+):
+    from shared import ebas_client
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 7)
+
+    monkeypatch.setattr(ebas_client, "date", FixedDate)
+    assert normalize_check_pnr(raw) == expected
+    assert raw not in caplog.text and expected not in caplog.text
+
+
+@pytest.mark.parametrize("raw", ["20000101+0008", "000101-0009", "invalid-" + PNR, "０００１０１０００８", None])
+def test_check_normalization_rejects_invalid_input_without_echoing_it(raw, caplog):
+    with pytest.raises(ValueError) as error:
+        normalize_check_pnr(raw)
+    if raw:
+        assert raw not in str(error.value) + caplog.text
+
+
 @pytest.mark.parametrize("source", [SPAR_NAME, PNR, API_KEY, "unverified provider text"])
 def test_unapproved_registration_source_text_is_not_returned(make_client, caplog, source):
     client, _ = make_client({"response": {"member_found": True, "registration_source": source}})
@@ -522,7 +607,8 @@ def test_unrelated_thread_httpx_logging_is_preserved_during_ebas_call(caplog):
     assert_private(result, caplog)
 
 
-def test_concurrent_ebas_calls_do_not_leak_provider_metadata(caplog):
+@pytest.mark.parametrize("status", [200, 400])
+def test_concurrent_ebas_calls_do_not_leak_provider_metadata(caplog, status):
     barrier = Barrier(2)
     echo = f"Echo {PNR} {API_KEY} {SPAR_NAME}"
 
@@ -530,7 +616,7 @@ def test_concurrent_ebas_calls_do_not_leak_provider_metadata(caplog):
         barrier.wait(timeout=5)
         logging.getLogger("httpcore.http11").warning("Provider metadata: %s", echo)
         return httpx.Response(
-            400,
+            status,
             json={"response": {"member_found": True}},
             extensions={"reason_phrase": echo.encode("ascii")},
         )
@@ -539,8 +625,16 @@ def test_concurrent_ebas_calls_do_not_leak_provider_metadata(caplog):
         with httpx.Client(transport=httpx.MockTransport(handle)) as transport:
             client = EbasClient(EbasConfig(API_KEY), transport)
             with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [executor.submit(client.confirm_membership, PNR, 2026) for _ in range(2)]
+                futures = [
+                    executor.submit(client.confirm_membership, PNR, 2026)
+                    for _ in range(2)
+                ]
                 results = [future.result(timeout=10) for future in futures]
-    assert all(result == ConfirmResult(True) for result in results)
+    expected = (
+        ConfirmResult(True)
+        if status == 200
+        else ConfirmResult(None, error_code="provider_unavailable")
+    )
+    assert all(result == expected for result in results)
     for result in results:
         assert_private(result, caplog)

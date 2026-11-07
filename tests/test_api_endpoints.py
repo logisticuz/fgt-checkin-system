@@ -82,6 +82,7 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
     monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
 
     monkeypatch.setenv("EBAS_TRANSPORT", "stub")
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", "found")
 
     async def integration_callbacks(request):
         checkin_id = n8n_stub.calls[-1]["json"]["checkin_id"]

@@ -108,6 +108,39 @@ def _validate_pnr(pnr: str) -> None:
         raise ValueError("Personal ID failed validation")
 
 
+def normalize_check_pnr(pnr: str) -> str:
+    """Match the check workflow's fixed YY cutoff; preserve an explicit 100+ marker."""
+    if (
+        not isinstance(pnr, str)
+        or re.fullmatch(r"(?:[0-9]{6}|[0-9]{8})[-+]?[0-9]{4}", pnr.strip()) is None
+    ):
+        raise ValueError("Invalid personal ID format")
+    older = "+" in pnr
+    digits = pnr.strip().replace("-", "").replace("+", "")
+    if len(digits) == 10:
+        year = (1900 if int(digits[:2]) > 30 else 2000) + int(digits[:2])
+        if older:
+            while date.today().year - year < 100:
+                year -= 100
+        digits = f"{year:04d}" + digits[2:]
+    elif older and date.today().year - int(digits[:4]) < 100:
+        raise ValueError("Invalid personal ID century marker")
+    _validate_pnr(digits)
+    return digits
+
+
+def _production_environment() -> bool:
+    return os.getenv("IS_PROD", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ) or any(
+        os.getenv(name, "").strip().lower() in ("prod", "production")
+        for name in ("APP_ENV", "ENV")
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class EbasConfig:
     api_key: str
@@ -293,7 +326,9 @@ class EbasClient:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def _post(self, action: str, payload: dict, timeout: float) -> tuple[object, str | None]:
+    def _post(
+        self, action: str, payload: dict, timeout: float
+    ) -> tuple[object, str | None]:
         try:
             with _private_transport_logging():
                 response = self._client.post(
@@ -307,7 +342,16 @@ class EbasClient:
         except Exception:
             # Provider exception text can echo the complete request. Never expose it.
             return None, "provider_unavailable"
-        if not (200 <= response.status_code < 300 or 400 <= response.status_code < 500):
+        if (
+            action == "confirm_membership"
+            and response.extensions.get("ebas_stub_unavailable") is True
+        ):
+            return None, "stub_transport"
+        success = 200 <= response.status_code < 300
+        submit_error_body = (
+            action == "submit_member_with_lookup" and 400 <= response.status_code < 500
+        )
+        if not (success or submit_error_body):
             return None, "provider_unavailable"
         try:
             return response.json(), None
@@ -337,11 +381,19 @@ class EbasClient:
         if (
             failure
             or not isinstance(body, dict)
+            or any(
+                "error" in part or "errors" in part
+                for part in (response, body)
+                if isinstance(part, dict)
+            )
+            or response.get("request_result", "success") != "success"
             or body.get("request_result") not in ("success", "fail")
         ):
             _safe_log("eBas validate unavailable", self.config.api_key)
             return ValidateResult(ok=False, error_code="provider_unavailable")
-        ok = body["request_result"] == "success" and not _has_errors(body.get("member_errors"))
+        ok = body["request_result"] == "success" and not _has_errors(
+            body.get("member_errors")
+        )
         result = ValidateResult(
             ok=ok,
             field_errors=_field_errors(body.get("member_errors")),
@@ -412,9 +464,27 @@ class EbasClient:
             "confirm_membership", payload, self.config.confirm_timeout_seconds
         )
         body = response.get("response") if isinstance(response, dict) else None
-        if failure or not isinstance(body, dict) or type(body.get("member_found")) is not bool:
+        if (
+            failure
+            or not isinstance(body, dict)
+            or type(body.get("member_found")) is not bool
+            or any(
+                "error" in part
+                or "errors" in part
+                or part.get("request_result", "success") != "success"
+                for part in (response, body)
+                if isinstance(part, dict)
+            )
+        ):
             _safe_log("eBas confirm unavailable", self.config.api_key)
-            return ConfirmResult(found=None, error_code="provider_unavailable")
+            return ConfirmResult(
+                found=None,
+                error_code=(
+                    "stub_transport"
+                    if failure == "stub_transport"
+                    else "provider_unavailable"
+                ),
+            )
         source = body.get("registration_source")
         approved_source = (
             source if isinstance(source, str) and source in _REGISTRATION_SOURCES else None
@@ -435,7 +505,15 @@ class StubEbasTransport(httpx.BaseTransport):
         elif action == "submit_member_with_lookup.json":
             data = {"stored_member": True, "request_result": "success"}
         elif action == "confirm_membership.json":
-            data = {"response": {"member_found": True}}
+            outcome = os.getenv("EBAS_STUB_CONFIRM", "").strip().lower()
+            if _production_environment() or outcome not in ("found", "not_found"):
+                return httpx.Response(
+                    503,
+                    json={"error": "stub_transport"},
+                    request=request,
+                    extensions={"ebas_stub_unavailable": True},
+                )
+            data = {"response": {"member_found": outcome == "found"}}
         else:
             return httpx.Response(404, json={}, request=request)
         return httpx.Response(200, json=data, request=request)
@@ -464,6 +542,10 @@ def initialize_ebas_transport() -> str:
     mode = ebas_transport_mode()
     if mode == "live":
         EbasConfig.from_env()
+    elif _production_environment():
+        logger.error(
+            "EBAS STUB IN PRODUCTION: membership checks are unavailable; configure the live transport"
+        )
     logger.info("eBas transport: %s", mode)
     return mode
 

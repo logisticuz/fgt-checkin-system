@@ -26,6 +26,8 @@ OWNER_PHONE = "+46701234567"
 class PythonProvider:
     def __init__(self):
         self.outcome = True
+        self.status = 200
+        self.body = None
         self.calls = []
         self.clients = []
         self.entered = threading.Event()
@@ -62,8 +64,12 @@ class PythonProvider:
             )
         value = "malformed" if self.outcome == "malformed" else self.outcome
         return httpx.Response(
-            200,
-            json={"response": {"member_found": value}},
+            self.status,
+            json=(
+                self.body
+                if self.body is not None
+                else {"response": {"member_found": value}}
+            ),
             extensions={"reason_phrase": echo.encode("ascii")},
         )
 
@@ -311,18 +317,84 @@ def test_slow_python_check_does_not_extend_current_orchestrate_budget(
     assert pg_db.checkins()[0]["member"] is True
 
 
-def test_default_stub_check_never_calls_external_transport(
-    app_client, pg_db, integrations, monkeypatch, n8n_stub
+@pytest.mark.parametrize("initial", [False, True])
+def test_default_stub_check_is_unavailable_and_never_calls_external_transport(
+    app_client, pg_db, integrations, monkeypatch, n8n_stub, initial
 ):
     monkeypatch.delenv("EBAS_TRANSPORT", raising=False)
+    monkeypatch.delenv("EBAS_STUB_CONFIRM", raising=False)
     monkeypatch.setenv("EBAS_API_KEY", "synthetic-configured-but-unused-key")
     transport = Mock(side_effect=AssertionError("External transport must stay blocked"))
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", transport)
-    row = owner(pg_db)
+    row = owner(pg_db, member=initial)
     response = app_client.post("/api/checkin/orchestrate", json=repeat(row))
     assert (
-        response.status_code == 200 and response.json()["integrations"]["ebas"] == "ok"
+        response.status_code == 200
+        and response.json()["integrations"]["ebas"] == "unavailable"
     )
-    assert pg_db.checkins()[0]["member"] is True
+    assert response.json()["degraded"] is True
+    assert pg_db.checkins()[0]["member"] is initial
     assert len(n8n_stub.calls) == 1
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429, 500])
+def test_provider_http_error_with_false_body_preserves_member(
+    app_client, pg_db, integrations, python_provider, caplog, status_code
+):
+    python_provider.status = status_code
+    python_provider.body = {"response": {"member_found": False}}
+    row = owner(pg_db, member=True)
+    response = app_client.post("/api/checkin/orchestrate", json=repeat(row))
+    assert response.status_code == 200
+    assert response.json()["integrations"]["ebas"] == "unavailable"
+    assert response.json()["degraded"] is True
+    stored = pg_db.checkins()[0]
+    assert stored["member"] is True and stored["member_source"] == "ebas_check"
+    assert PNR not in response.text + caplog.text
+
+
+@pytest.mark.parametrize("marker", ["error", "errors"])
+def test_provider_success_status_with_error_envelope_preserves_member(
+    app_client, pg_db, integrations, python_provider, caplog, marker
+):
+    python_provider.body = {marker: PNR, "response": {"member_found": False}}
+    row = owner(pg_db, member=True)
+    response = app_client.post("/api/checkin/orchestrate", json=repeat(row))
+    assert response.status_code == 200
+    assert response.json()["integrations"]["ebas"] == "unavailable"
+    assert pg_db.checkins()[0]["member"] is True
+    assert PNR not in response.text + caplog.text
+
+
+@pytest.mark.parametrize("separator", ["", "-", "+"])
+def test_short_pnr_is_normalized_before_native_client_without_n8n_disclosure(
+    app_client, pg_db, integrations, python_provider, n8n_stub, caplog, separator
+):
+    row = owner(pg_db)
+    short = PNR[-10:]
+    raw = short[:6] + separator + short[6:]
+    payload = repeat(row)
+    payload["personnummer"] = raw
+    response = app_client.post("/api/checkin/orchestrate", json=payload)
+    assert response.status_code == 200
+    assert response.json()["integrations"]["ebas"] == "ok"
+    expected = ("19" if separator == "+" else "20") + short
+    assert python_provider.calls[0]["data"]["socialsecuritynumber"] == expected
+    assert pg_db.checkins()[0]["member"] is True
+    exposed = json.dumps(n8n_stub.calls) + response.text + caplog.text
+    assert raw not in exposed and short not in exposed and expected not in exposed
+
+
+def test_production_stub_check_is_unavailable_even_with_found_opt_in(
+    app_client, pg_db, integrations, monkeypatch
+):
+    monkeypatch.setenv("ENV", "prod")
+    monkeypatch.setenv("EBAS_TRANSPORT", "stub")
+    monkeypatch.setenv("EBAS_STUB_CONFIRM", "found")
+    row = owner(pg_db, member=True)
+    response = app_client.post("/api/checkin/orchestrate", json=repeat(row))
+    assert response.status_code == 200
+    assert response.json()["integrations"]["ebas"] == "unavailable"
+    assert response.json()["degraded"] is True
+    assert pg_db.checkins()[0]["member"] is True
