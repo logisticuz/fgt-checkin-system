@@ -243,11 +243,15 @@ def test_next_person_inherits_nothing(checkin):
     for value in (NAME_A, PHONE_A, TAG_A, "synthetic-event"):
         assert value not in dump, value
 
-    page.go_back()  # Back on the kiosk must not show A's details
-    page.wait_for_selector("#checkin-form")
-    for selector in ("#namn", "#telefon", "#tag", "#ci-pnr-last4"):
-        assert page.input_value(selector) == "", selector
-    assert page.input_value("#personnummer") == ""
+    # Back on the kiosk must not show A's details. Since T-062 kiosk navigations replace the
+    # history entry, so there is no filled-in kiosk form or player page to go back to at all.
+    page.go_back()
+    page.wait_for_timeout(300)
+    assert "/register" not in page.url and "/status/" not in page.url
+    if page.locator("#checkin-form").count():
+        for selector in ("#namn", "#telefon", "#tag", "#ci-pnr-last4"):
+            assert page.input_value(selector) == "", selector
+        assert page.input_value("#personnummer") == ""
 
     page.goto("/kiosk")  # person B
     for selector in ("#namn", "#telefon", "#tag", "#ci-pnr-last4", "#ci-pnr-manual-input"):

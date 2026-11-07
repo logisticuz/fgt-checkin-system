@@ -229,6 +229,14 @@
       margin-bottom: 1rem;
     }
   </style>
+  <script src="/static/js/checkin_hygiene.js"></script>
+  <script>
+    // T-062: on the shared kiosk, an older player page (with that player's token in the URL)
+    // never comes back via the browser's Back button: it hides itself and returns to /kiosk.
+    CheckinHygiene.kioskPlayerPage({
+      kiosk: CheckinHygiene.isKioskPage({{ kiosk | default(false) | tojson }})
+    });
+  </script>
 </head>
 <body>
   <div class="container">
@@ -438,7 +446,18 @@
     }
 
     // Kiosk mode - check sessionStorage (set by /kiosk page)
-    const KIOSK_MODE = sessionStorage.getItem("kioskMode") === "true";
+    // T-062: the session flag OR ?kiosk=true (a direct kiosk URL in a fresh tab). The flag is
+    // re-set so every page after this one in the tab knows it's on the kiosk.
+    const KIOSK_MODE = CheckinHygiene.isKioskPage(false);
+    if (KIOSK_MODE) sessionStorage.setItem("kioskMode", "true");
+    const KIOSK_NAV = KIOSK_MODE;
+    // Requests a kiosk idle return must cancel (the next person must not get late answers).
+    const pendingSaves = new Set();
+    function trackedSignal() {
+      const controller = new AbortController();
+      pendingSaves.add(controller);
+      return { controller: controller, signal: controller.signal };
+    }
 
     // Configurable requirements from event settings
     // If a requirement is disabled, we never show that section
@@ -843,7 +862,7 @@
           // In membership_only mode, redirect back to status page after short delay
           if (state.membershipOnly) {
             setTimeout(() => {
-              window.location.href = `/status/${encodeURIComponent(state.name)}${statusQuery()}`;
+              CheckinHygiene.navigate(`/status/${encodeURIComponent(state.name)}${statusQuery()}`, KIOSK_NAV);
             }, 2000);
             return;
           }
@@ -904,11 +923,18 @@
         // PATCH selected games to backend
         const body = { checkin_id: checkinId, games: selectedNames, tag: tag, slug: slug };
         if (statusToken) body.status_token = statusToken;
-        const response = await fetch("/api/player/games", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
+        const save = trackedSignal();
+        let response;
+        try {
+          response = await fetch("/api/player/games", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: save.signal,
+          });
+        } finally {
+          pendingSaves.delete(save.controller);
+        }
 
         if (!response.ok) {
           let err = null;
@@ -939,7 +965,7 @@
       try {
         // Redirect to status page (preserve kiosk mode and the opaque checkin_id)
         const name = state.name || localStorage.getItem("namn");
-        window.location.href = `/status/${encodeURIComponent(name)}${statusQuery()}`;
+        CheckinHygiene.navigate(`/status/${encodeURIComponent(name)}${statusQuery()}`, KIOSK_NAV);
       } catch (err) {
         console.error("Final checkin error:", err);
         showMessage("Something went wrong. Please try again.", "error");
@@ -957,6 +983,25 @@
         backLink.href = "/kiosk";
         backLink.onclick = function() { sessionStorage.removeItem("kioskMode"); };
       }
+    }
+
+    // T-062: a kiosk register page left alone returns to /kiosk (same 90 s as the kiosk
+    // check-in page and the v2 step), with a 10 s countdown and a "Still here" button.
+    // The v2 membership step runs its own idle wipe, so this waits while that step is shown.
+    if (KIOSK_NAV) {
+      CheckinHygiene.kioskIdleReturn({
+        idleMs: 90000,
+        warnMs: 10000,
+        shouldRun: function () {
+          const v2 = document.querySelector('#section-ebas[data-membership-flow="v2"]');
+          return !(v2 && !v2.classList.contains("hidden") && v2.offsetParent !== null);
+        },
+        onLeave: function () {
+          pendingSaves.forEach(function (controller) { controller.abort(); });
+          pendingSaves.clear();
+          sessionStorage.removeItem("kioskMode");
+        },
+      });
     }
   </script>
 </body>

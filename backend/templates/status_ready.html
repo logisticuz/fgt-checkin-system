@@ -249,6 +249,14 @@
       font-size: 0.85rem;
     }
   </style>
+  <script src="/static/js/checkin_hygiene.js"></script>
+  <script>
+    // T-062: on the shared kiosk, an older player page (with that player's token in the URL)
+    // never comes back via the browser's Back button: it hides itself and returns to /kiosk.
+    CheckinHygiene.kioskPlayerPage({
+      kiosk: CheckinHygiene.isKioskPage({{ kiosk | default(false) | tojson }})
+    });
+  </script>
 </head>
 <body>
   <div class="container">
@@ -369,7 +377,8 @@
 {% endif %}
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
-    const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
+    // Server flag, ?kiosk=true or the tab's kiosk flag (T-062: one effective kiosk flag).
+    const KIOSK_MODE = CheckinHygiene.isKioskPage({{ kiosk | default(false) | tojson }});
     if (KIOSK_MODE) {
       const REDIRECT_DELAY = 5000; // 5 seconds
       let countdown = REDIRECT_DELAY / 1000;
@@ -400,7 +409,7 @@
       setTimeout(() => {
         clearInterval(countdownInterval);
         sessionStorage.removeItem("kioskMode");  // Clear for next person
-        window.location.href = "/kiosk";
+        CheckinHygiene.navigate("/kiosk", true);  // T-062: no history entry left behind
       }, REDIRECT_DELAY);
     }
   </script>
