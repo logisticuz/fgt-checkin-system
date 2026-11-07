@@ -1,8 +1,10 @@
 """T-068 e2e: live "possible duplicate" in Needs attention, on the real layout + test Postgres.
 
 A real Dash server (127.0.0.1, OS port) runs the production create_layout() and callbacks.
-A check-in arrives while the dashboard is open; the refresh the SSE client performs on a
-check-in event (it clicks #btn-refresh) brings the hint in. Synthetic players only.
+A check-in arrives while the dashboard is open; the refresh the SSE client performs on an
+SSE event (it clicks #btn-refresh and #live-sync) brings the hint in. A stub for the
+backend's notify endpoint records the broadcast a decision sends; a second TO's dashboard then gets
+that delivery and shows the merge, with a working Undo, in Insights. Synthetic players only.
 """
 
 import os
@@ -36,7 +38,27 @@ def live_slug(archive_db):  # noqa: F811
 
 
 @pytest.fixture
-def dashboard_url(archive_db, live_slug):  # noqa: F811
+def broadcasts(monkeypatch):
+    """An explicit stub for the backend's /api/notify/update (records the payloads);
+    every other outbound request stays blocked."""
+    from types import SimpleNamespace
+
+    import fgt_dashboard.callbacks as callbacks
+
+    received = []
+
+    def post(url, json=None, **kwargs):
+        if not url.endswith("/api/notify/update"):
+            raise AssertionError(f"unexpected outbound request: {url}")
+        received.append(("/api/notify/update", json))
+        return SimpleNamespace(status_code=200, json=lambda: {"success": True})
+
+    monkeypatch.setattr(callbacks.requests, "post", post)
+    return received
+
+
+@pytest.fixture
+def dashboard_url(archive_db, live_slug, broadcasts):  # noqa: F811
     from dash import Dash
 
     from fgt_dashboard.callbacks import register_callbacks
@@ -80,7 +102,21 @@ def refresh(page):
     page.click("#btn-refresh")  # what assets/sse-client.js does on a check-in event
 
 
-def test_live_duplicate_flow(browser, dashboard_url, archive_db, live_slug):  # noqa: F811
+def deliver_sse(page):
+    """What assets/sse-client.js flushRefresh does for an SSE event, on any tab."""
+    page.evaluate(
+        """() => {
+            const btn = document.getElementById('btn-refresh');
+            if (btn) btn.click();
+            const sync = document.getElementById('live-sync');
+            if (sync) sync.click();
+        }"""
+    )
+
+
+def test_live_duplicate_flow(
+    browser, dashboard_url, archive_db, live_slug, broadcasts  # noqa: F811
+):
     kenji = seed_player(archive_db, "pw-kenji", name="Synthetic Kenji", telephone="0700000301")
     alpha = seed_player(archive_db, "pw-alpha", name="Synthetic Alpha", telephone="0700000302")
     postgres.begin_checkin(  # an unrelated, already checked-in player
@@ -138,13 +174,22 @@ def test_live_duplicate_flow(browser, dashboard_url, archive_db, live_slug):  # 
         assert tuple(sorted((stub, kenji["uuid"]))) not in pairs
         shot(page, "T-068-3-after-not-same")
 
-        # Keep B → merged with the existing tool; visible in merge history; undo works.
+        # Keep B → merged with the existing tool, in one transaction.
         second = postgres.begin_checkin(
             live_slug, {"name": "Synthetic Alpha", "tag": "pw-alfa", "telephone": "0700000302"}
         )["checkin_id"]
         refresh(page)
         item = page.locator(".live-dup-item", has_text="pw-alfa ↔ pw-alpha")
         expect(item).to_have_count(1, timeout=15000)
+
+        # A second TO already has Insights → Duplicates open (no merges yet).
+        other = context.new_page()
+        other.on("pageerror", lambda error: errors.append(str(error)))
+        other.goto(dashboard_url)
+        other.get_by_text("📈 Insights").click()
+        other.get_by_text("Duplicates", exact=True).click()
+        expect(other.locator("#merge-history-list")).to_contain_text("No merges yet.")
+
         item.click()
         expect(page.locator("#btn-live-dup-keep-b")).to_have_text("Keep pw-alpha")
         page.click("#btn-live-dup-keep-b")
@@ -156,8 +201,24 @@ def test_live_duplicate_flow(browser, dashboard_url, archive_db, live_slug):  # 
         assert history and history[0]["keep_uuid"] == alpha["uuid"]
         shot(page, "T-068-4-after-merge")
 
-        postgres.undo_merge(int(history[0]["id"]))
-        assert row(archive_db, second)[0] not in (None, alpha["uuid"])  # back on its own stub
+        # The decision was broadcast (no candidate or contact data in it)...
+        expect_payload = {"type": "duplicates_changed", "event_slug": live_slug}
+        assert ("/api/notify/update", expect_payload) in broadcasts
+        # ...and the other TO's Insights shows the live merge with Undo once it arrives.
+        deliver_sse(other)
+        entry = other.locator("#merge-history-list div", has_text="Removed pw-alfa").first
+        expect(entry).to_be_visible(timeout=15000)
+        shot(other, "T-068-5-insights-merge-history", other.locator("#merge-history-list"))
+        entry.get_by_role("button", name="Undo").click()  # the user path, not undo_merge()
+        expect(other.locator("#duplicates-feedback")).to_contain_text("Undo complete!")
+        restored = row(archive_db, second)[0]
+        assert restored not in (None, alpha["uuid"])  # back on its own profile
+
+        # The Undo broadcast reaches the first TO: the possible duplicate is back.
+        deliver_sse(page)
+        expect(page.locator(".live-dup-item", has_text="pw-alfa ↔ pw-alpha")).to_have_count(
+            1, timeout=15000
+        )
     finally:
         context.close()
     assert not errors, errors

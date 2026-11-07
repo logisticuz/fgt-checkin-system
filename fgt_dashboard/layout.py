@@ -369,6 +369,14 @@ def create_layout():
             # T-068: live "possible duplicate" hints by record_id, and the pair being reviewed
             dcc.Store(id="live-dup-store", data={}),
             dcc.Store(id="live-dup-target", data=None),
+            # Bumped by the detection callback when stored hints changed (re-renders the table)
+            dcc.Store(id="live-dup-version", data=0),
+            # Clicked by assets/sse-client.js on every SSE refresh, on any tab (the Live tab's
+            # Refresh button only exists while that tab is shown): merge history, Insights
+            # duplicate cards and live hints stay current for every TO.
+            html.Button(
+                id="live-sync", n_clicks=0, style={"display": "none"}, **{"aria-hidden": "true"}
+            ),
             dcc.Store(id="sse-status", data="disconnected"),  # SSE connection status
             # T-029: destructive event actions need a confirmation that names both the current
             # and the target event. The target is captured when the dialog opens, so the action
