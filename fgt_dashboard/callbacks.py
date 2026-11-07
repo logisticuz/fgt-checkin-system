@@ -140,6 +140,120 @@ def _find_checkin_row(table_data, row_id):
     )
 
 
+def _startgg_slug_from_link(link):
+    """Tournament slug from a Start.gg URL, or None."""
+    try:
+        match = re.search(r"/tournament/([^/]+)", urlparse((link or "").strip()).path or "")
+    except Exception:
+        return None
+    return match.group(1) if match else None
+
+
+def _event_label(slug, settings=None, options=None):
+    """'Display Name (slug)' for confirmation texts; the active event uses its settings name."""
+    if not slug:
+        return "none"
+    settings = settings or {}
+    name = ""
+    if slug == settings.get("active_event_slug"):
+        name = settings.get("event_display_name") or settings.get("tournament_name") or ""
+    if not name:
+        for option in options or []:
+            if isinstance(option, dict) and option.get("value") == slug:
+                name = str(option.get("label") or "").strip()
+                break
+    if not name:
+        name = slug.replace("-", " ").title()
+    return f"{name} ({slug})"
+
+
+def _archive_confirmation_text(target_slug, clear_active, settings, options):
+    active = settings.get("active_event_slug") or ""
+    lines = [
+        "Archive this event?",
+        "",
+        f"Event to archive: {_event_label(target_slug, settings, options)}",
+        f"Current active event: {_event_label(active, settings, options)}",
+    ]
+    if active and target_slug != active:
+        lines.append("⚠ The event you are archiving is NOT the current active event.")
+    lines.append(
+        "Active check-ins will be CLEARED after archiving."
+        if clear_active
+        else "Active check-ins are kept."
+    )
+    return "\n".join(lines)
+
+
+def _reopen_confirmation_text(target_slug, restore_active, settings, reopen_options):
+    active = settings.get("active_event_slug") or ""
+    lines = [
+        "Reopen an archived event?",
+        "",
+        f"Event to reopen: {_event_label(target_slug, {}, reopen_options)}",
+        f"Current active event: {_event_label(active, settings)}",
+        "The reopened event becomes the active event.",
+        "Active check-ins will be restored from the archive."
+        if restore_active
+        else "Active check-ins are NOT restored.",
+    ]
+    return "\n".join(lines)
+
+
+def _active_slug_now():
+    return (get_active_settings() or {}).get("active_event_slug") or ""
+
+
+def _active_changed_feedback(target):
+    """None if the active event is still the one the dialog showed, else an abort message.
+
+    A confirmation is only valid for the context it displayed: if the active event changed
+    meanwhile, nothing happens and the admin has to confirm again (T-029 review).
+    """
+    now = _active_slug_now()
+    if now == ((target or {}).get("active_slug") or ""):
+        return None
+    return html.Span(
+        f"⚠️ The active event changed to '{now or 'none'}' since the dialog opened – nothing "
+        "was changed. Click the button again to confirm with the current event.",
+        style={"color": "#f59e0b"},
+    )
+
+
+def _row_fingerprint(fields):
+    """Stable digest of the fields a games/payment decision depends on."""
+    import hashlib
+
+    relevant = {
+        key: fields.get(key)
+        for key in (
+            "event_slug",
+            "tournament_games_registered",
+            "payment_valid",
+            "payment_amount",
+            "payment_expected",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(relevant, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _fetch_confirmation_text(target_slug, target_name, settings):
+    active = settings.get("active_event_slug") or ""
+    lines = [
+        "Fetch event data from Start.gg?",
+        "",
+        f"New event: {target_name} ({target_slug})",
+        f"Current active event: {_event_label(active, settings)}",
+    ]
+    if active and target_slug != active:
+        lines.append("⚠ This REPLACES the active event (games, date, Start.gg link).")
+    else:
+        lines.append("This refreshes the current event's data.")
+    return "\n".join(lines)
+
+
 def register_callbacks(app):
     """
     Register all Dash callbacks for:
@@ -858,19 +972,71 @@ def register_callbacks(app):
 
     # ---------------------------------------------------------------------
     # Admin: Fetch event data from Start.gg and update settings
+    # Step 1 (T-029): confirm, naming the current and the new event.
     # ---------------------------------------------------------------------
+    @app.callback(
+        Output("confirm-fetch-event-dialog", "displayed"),
+        Output("confirm-fetch-event-dialog", "message"),
+        Output("pending-fetch-target", "data"),
+        Output("settings-output", "children", allow_duplicate=True),
+        Input("btn-fetch-event", "n_clicks"),
+        State("input-startgg-link", "value"),
+        prevent_initial_call=True,
+    )
+    def show_fetch_confirmation(n_clicks, link):
+        if not n_clicks:
+            return False, no_update, no_update, no_update
+        if not (link or "").strip():
+            return False, no_update, None, "❌ Enter a Start.gg link first."
+        slug = _startgg_slug_from_link(link)
+        if not slug:
+            return False, no_update, None, "❌ Invalid Start.gg tournament link."
+        if not STARTGG_API_KEY:
+            return False, no_update, None, "❌ Missing STARTGG_API_KEY."
+        # Read-only lookup so the dialog can name the target event; nothing is written here.
+        try:
+            resp = requests.post(
+                "https://api.start.gg/gql/alpha",
+                json={
+                    "query": "query T($slug: String!) { tournament(slug: $slug) { name } }",
+                    "variables": {"slug": slug},
+                },
+                headers={
+                    "Authorization": f"Bearer {STARTGG_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            tournament = ((resp.json() or {}).get("data") or {}).get("tournament") or {}
+        except Exception as e:
+            logger.warning(f"Start.gg name lookup failed for {slug}: {e}")
+            return False, no_update, None, f"❌ Could not read the event from Start.gg: {e}"
+        name = (tournament.get("name") or "").strip()
+        if not name:
+            return False, no_update, None, "❌ Tournament not found on Start.gg."
+        settings = get_active_settings() or {}
+        message = _fetch_confirmation_text(slug, name, settings)
+        target = {
+            "link": link.strip(),
+            "slug": slug,
+            "name": name,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
+
     @app.callback(
         Output("settings-output", "children"),
         Output("event-dropdown", "options"),
         Output("event-dropdown", "value"),
-        Input("btn-fetch-event", "n_clicks"),
+        Input("confirm-fetch-event-dialog", "submit_n_clicks"),
         Input("btn-use-mock-event", "n_clicks"),
-        State("input-startgg-link", "value"),
+        State("pending-fetch-target", "data"),
         State("input-mock-event-slug", "value"),
         State("input-mock-event-name", "value"),
         State("auth-store", "data"),
     )
-    def fetch_event_data(n_clicks, mock_clicks, link, mock_slug, mock_name, auth_state):
+    def fetch_event_data(n_clicks, mock_clicks, fetch_target, mock_slug, mock_name, auth_state):
         """
         Admin action:
         1) Extract tournament slug from Start.gg URL
@@ -888,6 +1054,8 @@ def register_callbacks(app):
         auth_state = current_user() or {}
         if not n_clicks and not mock_clicks:
             return no_update, no_update, no_update
+        # Step 2 runs only on the confirmed target captured when the dialog opened.
+        link = (fetch_target or {}).get("link") or ""
 
         trigger_id = ctx.triggered_id
 
@@ -985,6 +1153,9 @@ def register_callbacks(app):
 
         if not link:
             return "❌ Enter a Start.gg link first.", no_update, no_update
+        changed = _active_changed_feedback(fetch_target)
+        if changed is not None:
+            return changed, no_update, no_update
 
         def _fetch_event_games_summary(event_id: Any, headers: Dict[str, str]) -> Dict[str, int]:
             """Fetch set scores for one event and aggregate game counts."""
@@ -1092,6 +1263,9 @@ def register_callbacks(app):
             logger.info(f"Extracted slug: {slug}")
         except Exception:
             return "❌ Invalid URL format.", no_update, no_update
+        # Only the confirmed target may be committed.
+        if slug != (fetch_target or {}).get("slug"):
+            return "❌ The link no longer matches the confirmed event.", no_update, no_update
 
         # 2) Query Start.gg (GraphQL)
         gql = {
@@ -1224,6 +1398,12 @@ def register_callbacks(app):
         )
         fetched_names = [e.get("name") for e in events if isinstance(e, dict) and e.get("name")]
 
+        # The Start.gg read can take a while: re-check that the active event is still the one
+        # the admin confirmed against before anything is written.
+        changed = _active_changed_feedback(fetch_target)
+        if changed is not None:
+            return changed, no_update, no_update
+
         # 3) Find active settings row using storage backend
         settings_data = get_active_settings_with_id()
         if not settings_data:
@@ -1355,7 +1535,7 @@ def register_callbacks(app):
         Output("game-help", "children"),
         Output("events-map-store", "data"),
         Output("input-manual-games", "options"),
-        Input("btn-fetch-event", "n_clicks"),
+        Input("confirm-fetch-event-dialog", "submit_n_clicks"),
         Input("interval-refresh", "n_intervals"),
         Input("event-dropdown", "value"),
         prevent_initial_call=False,
@@ -5013,6 +5193,9 @@ def register_callbacks(app):
         Output("input-manual-name", "value"),
         Output("input-manual-tag", "value"),
         Output("input-manual-games", "value"),
+        Output("pending-games-payment", "data"),
+        Output("games-payment-modal", "style"),
+        Output("games-payment-text", "children"),
         Input("btn-manual-checkin", "n_clicks"),
         State("input-manual-name", "value"),
         State("input-manual-tag", "value"),
@@ -5022,28 +5205,24 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def add_manual_checkin(n_clicks, input_name, input_tag, input_games, selected_slug, auth_state):
-        """Manually add a missing Start.gg participant to active check-ins."""
+        """Manually add a missing Start.gg participant, or update an existing one's games."""
         auth_state = current_user() or {}
+        no_prompt = (no_update, no_update, no_update)
+
+        def warn(message, color="#f59e0b"):
+            return (html.Span(message, style={"color": color}), no_update, no_update, no_update,
+                    *no_prompt)
+
         if not n_clicks:
-            return no_update, no_update, no_update, no_update
+            return (no_update,) * 7
 
         if not selected_slug or selected_slug == "__ALL__":
-            return (
-                html.Span("⚠️ Select a specific event first.", style={"color": "#f59e0b"}),
-                no_update,
-                no_update,
-                no_update,
-            )
+            return warn("⚠️ Select a specific event first.")
 
         name = (input_name or "").strip()
         tag = (input_tag or "").strip()
         if not name and not tag:
-            return (
-                html.Span("⚠️ Enter at least name or tag.", style={"color": "#f59e0b"}),
-                no_update,
-                no_update,
-                no_update,
-            )
+            return warn("⚠️ Enter at least name or tag.")
 
         if not name:
             name = tag
@@ -5052,7 +5231,13 @@ def register_callbacks(app):
         require_membership = settings.get("require_membership") is True
         require_payment = settings.get("require_payment") is True
 
-        selected_games = input_games or []
+        selected_games = list(dict.fromkeys(input_games or []))
+        # Same whitelist source as the player's own games endpoint (T-022): the event's
+        # configured games. Unknown names are rejected instead of stored.
+        allowed_games = [g for g in (settings.get("default_game") or []) if isinstance(g, str)]
+        unknown = [g for g in selected_games if g not in allowed_games]
+        if unknown:
+            return warn(f"❌ Unknown game(s) for this event: {', '.join(unknown)}", "#ef4444")
 
         payload = {
             "name": name,
@@ -5072,20 +5257,41 @@ def register_callbacks(app):
 
         begin_fn = getattr(storage_api, "begin_checkin", None)
         if not callable(begin_fn):
-            return (
-                html.Span(
-                    "❌ Manual check-in is not available in current backend.",
-                    style={"color": "#ef4444"},
-                ),
-                no_update,
-                no_update,
-                no_update,
-            )
+            return warn("❌ Manual check-in is not available in current backend.", "#ef4444")
 
         try:
             result = begin_fn(selected_slug, payload)
             record_id = result.get("record_id") or result.get("checkin_id")
             created = bool(result.get("created"))
+
+            # begin_checkin ignores games for an existing row (it only refreshes name/contact),
+            # so apply the picked games here. Before T-029 they were silently dropped.
+            games_note = ""
+            if not created and selected_games:
+                change = _plan_games_change(record_id, selected_games, settings)
+                if change.get("error"):
+                    return warn(f"⚠️ {name}: {change['error']}")
+                if change.get("needs_prompt"):
+                    pending = {**change["pending"], "name": name, "slug": selected_slug}
+                    question = _games_question(name, change)
+                    return (
+                        html.Span(
+                            f"⏳ {name} is already paid and the expected amount went up – "
+                            "answer the question below.",
+                            style={"color": "#f59e0b"},
+                        ),
+                        "",
+                        "",
+                        [],
+                        pending,
+                        {"display": "block", "marginTop": "0.75rem"},
+                        question,
+                    )
+                if change.get("fields"):
+                    if not update_checkin(record_id, change["fields"]):
+                        return warn(f"❌ Could not update the games for {name}.", "#ef4444")
+                    _log_games_change(auth_state, selected_slug, record_id, name, change, "auto")
+                    games_note = " – games updated"
 
             try:
                 requests.post(
@@ -5120,18 +5326,232 @@ def register_callbacks(app):
             games_label = f" ({', '.join(selected_games)})" if selected_games else ""
             label = "added" if created else "updated"
             feedback = html.Span(
-                f"✅ Manual check-in {label}: {name}{games_label}",
+                f"✅ Manual check-in {label}: {name}{games_label}{games_note}",
                 style={"color": "#10b981"},
             )
-            return feedback, "", "", []
+            return feedback, "", "", [], *no_prompt
         except Exception as e:
             logger.exception(f"Manual check-in failed for '{name}': {e}")
+            return warn(f"❌ Manual check-in failed: {e}", "#ef4444")
+
+    def _plan_games_change(record_id, games, settings):
+        """Work out a games change for an existing check-in (no writes).
+
+        Returns {"fields": {...}} to apply directly, {"needs_prompt": True, ...} when the player
+        is already paid and the new expected amount is higher, or {"error": "..."}.
+        """
+        get_fn = getattr(storage_api, "get_checkin_by_record_id", None)
+        record = get_fn(record_id) if callable(get_fn) and record_id else None
+        if not record:
+            return {"error": "could not read the existing check-in; games not changed."}
+        fields = record.get("fields") or {}
+        old_games = fields.get("tournament_games_registered") or []
+        if isinstance(old_games, str):
+            old_games = [g.strip() for g in old_games.split(",") if g.strip()]
+        if set(old_games) == set(games):
+            return {"old_games": old_games}
+        try:
+            per_game = int(settings.get("swish_expected_per_game") or 0)
+        except (TypeError, ValueError):
+            per_game = 0
+        new_expected = len(games) * per_game
+        try:
+            old_amount = int(float(fields.get("payment_amount") or 0))
+        except (TypeError, ValueError):
+            old_amount = 0
+        base = {
+            "old_games": old_games,
+            "new_expected": new_expected,
+            "old_amount": old_amount,
+        }
+        if fields.get("payment_valid") is True and new_expected > old_amount:
+            return {
+                **base,
+                "needs_prompt": True,
+                "pending": {
+                    "record_id": record_id,
+                    "games": list(games),
+                    "old_games": old_games,
+                    "new_expected": new_expected,
+                    "old_amount": old_amount,
+                    # Lets the confirmation detect that the row changed after the question.
+                    "fingerprint": _row_fingerprint(fields),
+                    "event_slug": fields.get("event_slug"),
+                },
+            }
+        return {
+            **base,
+            "fields": {"tournament_games_registered": list(games), "payment_expected": new_expected},
+        }
+
+    def _games_question(name, change):
+        pending = change.get("pending") or change
+        return (
+            f"{name}: spel {', '.join(change['old_games']) or '–'} → "
+            f"{', '.join(pending['games'])}. Nytt förväntat belopp "
+            f"{change['new_expected']} kr, betalat {change['old_amount']} kr."
+        )
+
+    def _log_games_change(auth_state, slug, record_id, name, change, decision):
+        try:
+            storage_api.log_action(
+                {
+                    "user_id": (auth_state or {}).get("user_id", ""),
+                    "user_name": (auth_state or {}).get("user_name", "system"),
+                    "user_email": (auth_state or {}).get("email", ""),
+                },
+                "admin_games_updated",
+                "active_event_data",
+                target_event=slug or "",
+                target_record=record_id,
+                target_player=name,
+                details=json.dumps(
+                    {
+                        "old_games": change.get("old_games"),
+                        "new_games": change.get("games") or (change.get("fields") or {}).get(
+                            "tournament_games_registered"
+                        ),
+                        "new_expected": change.get("new_expected"),
+                        "old_amount": change.get("old_amount"),
+                        "decision": decision,
+                    }
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log for games update: {e}")
+
+    def _resolve_games_payment(choice, pending):
+        """Apply the admin's answer to "Har hen betalat mellanskillnaden?".
+
+        The pending data comes from a browser store, so nothing in it is trusted: the row and
+        settings are read again, the games re-checked against the event whitelist, the amount
+        recomputed from the current price, and a row that changed since the question gets the
+        question again instead of being overwritten (T-029 review).
+        """
+        hidden = {"display": "none"}
+        shown = {"display": "block", "marginTop": "0.75rem"}
+        if not pending or not pending.get("record_id"):
+            return no_update, None, hidden, no_update
+        name = pending.get("name") or "player"
+        if choice == "cancel":
             return (
-                html.Span(f"❌ Manual check-in failed: {e}", style={"color": "#ef4444"}),
-                no_update,
-                no_update,
+                html.Span(f"↩️ {name}: games unchanged.", style={"color": "#9ca3af"}),
+                None,
+                hidden,
                 no_update,
             )
+
+        def refuse(message):
+            return html.Span(message, style={"color": "#f59e0b"}), None, hidden, no_update
+
+        settings = get_active_settings() or {}
+        slug = pending.get("slug")
+        if not slug or settings.get("active_event_slug") != slug:
+            return refuse(f"⚠️ {name}: the active event changed – nothing saved.")
+        games = pending.get("games")
+        allowed = [g for g in (settings.get("default_game") or []) if isinstance(g, str)]
+        if (
+            not isinstance(games, list)
+            or not games
+            or not all(isinstance(g, str) and g in allowed for g in games)
+        ):
+            return refuse(f"⚠️ {name}: those games aren't valid for this event – nothing saved.")
+        games = list(dict.fromkeys(games))
+
+        fresh = _plan_games_change(pending["record_id"], games, settings)
+        if fresh.get("error"):
+            return refuse(f"⚠️ {name}: {fresh['error']}")
+        current = fresh.get("pending") or {}
+        unchanged = (
+            fresh.get("needs_prompt")
+            and current.get("fingerprint") == pending.get("fingerprint")
+            and current.get("event_slug") == slug
+            # A price change means a different amount than the admin saw: ask again.
+            and current.get("new_expected") == pending.get("new_expected")
+        )
+        if not unchanged:
+            if fresh.get("needs_prompt") and current.get("event_slug") == slug:
+                # Ask again with the row's current numbers.
+                return (
+                    html.Span(
+                        f"⚠️ {name} changed since the question – please answer again.",
+                        style={"color": "#f59e0b"},
+                    ),
+                    {**current, "name": name, "slug": slug},
+                    shown,
+                    _games_question(name, fresh),
+                )
+            return refuse(
+                f"⚠️ {name} changed since the question – nothing saved. Run the manual check-in "
+                "again."
+            )
+
+        new_expected = current["new_expected"]  # recomputed from the current price
+        fields = {"tournament_games_registered": games, "payment_expected": new_expected}
+        if choice == "yes":
+            fields["payment_amount"] = new_expected  # stays paid
+            done = f"✅ {name}: games updated, paid amount set to {new_expected} kr."
+        else:
+            fields["payment_valid"] = False
+            done = f"✅ {name}: games updated and marked as unpaid."
+        if not update_checkin(pending["record_id"], fields):
+            return (
+                html.Span(f"❌ Could not update {name}.", style={"color": "#ef4444"}),
+                pending,
+                shown,
+                no_update,
+            )
+        _log_games_change(
+            current_user() or {},
+            slug,
+            pending["record_id"],
+            name,
+            {**current, "games": games},
+            "paid_difference" if choice == "yes" else "marked_unpaid",
+        )
+        return html.Span(done, style={"color": "#10b981"}), None, hidden, no_update
+
+    @app.callback(
+        Output("manual-checkin-feedback", "children", allow_duplicate=True),
+        Output("pending-games-payment", "data", allow_duplicate=True),
+        Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
+        Input("btn-games-paid-yes", "n_clicks"),
+        State("pending-games-payment", "data"),
+        prevent_initial_call=True,
+    )
+    def games_paid_difference_yes(n_clicks, pending):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update
+        return _resolve_games_payment("yes", pending)
+
+    @app.callback(
+        Output("manual-checkin-feedback", "children", allow_duplicate=True),
+        Output("pending-games-payment", "data", allow_duplicate=True),
+        Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
+        Input("btn-games-paid-no", "n_clicks"),
+        State("pending-games-payment", "data"),
+        prevent_initial_call=True,
+    )
+    def games_paid_difference_no(n_clicks, pending):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update
+        return _resolve_games_payment("no", pending)
+
+    @app.callback(
+        Output("manual-checkin-feedback", "children", allow_duplicate=True),
+        Output("pending-games-payment", "data", allow_duplicate=True),
+        Output("games-payment-modal", "style", allow_duplicate=True),
+        Output("games-payment-text", "children", allow_duplicate=True),
+        Input("btn-games-paid-cancel", "n_clicks"),
+        State("pending-games-payment", "data"),
+        prevent_initial_call=True,
+    )
+    def games_paid_difference_cancel(n_clicks, pending):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update
+        return _resolve_games_payment("cancel", pending)
 
     # -------------------------------------------------------------------------
     # Re-check Start.gg - re-validate registration + sync games for selected player
@@ -6333,14 +6753,47 @@ def register_callbacks(app):
             table_rows,
         )
 
+    # Step 1 (T-029): confirm, naming the event to archive and the current active event.
+    @app.callback(
+        Output("confirm-archive-event-dialog", "displayed"),
+        Output("confirm-archive-event-dialog", "message"),
+        Output("pending-archive-target", "data"),
+        Output("archive-feedback", "children", allow_duplicate=True),
+        Input("btn-archive-event-quick", "n_clicks"),
+        Input("btn-archive-event", "n_clicks"),
+        State("event-dropdown", "value"),
+        State("event-dropdown", "options"),
+        State("archive-clear-active-toggle", "value"),
+        prevent_initial_call=True,
+    )
+    def show_archive_confirmation(n_clicks_quick, n_clicks, selected_slug, options, clear_flags):
+        if not n_clicks and not n_clicks_quick:
+            return False, no_update, no_update, no_update
+        if not selected_slug or selected_slug == "__ALL__":
+            return (
+                False,
+                no_update,
+                None,
+                html.Span(
+                    "❌ Select a specific event before archiving.", style={"color": "#ef4444"}
+                ),
+            )
+        clear_active = "clear" in (clear_flags or [])
+        settings = get_active_settings() or {}
+        message = _archive_confirmation_text(selected_slug, clear_active, settings, options)
+        target = {
+            "slug": selected_slug,
+            "clear_active": clear_active,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
+
     @app.callback(
         Output("archive-feedback", "children", allow_duplicate=True),
         Output("event-dropdown", "value", allow_duplicate=True),
         Output("reopen-event-selector", "options"),
-        Input("btn-archive-event-quick", "n_clicks"),
-        Input("btn-archive-event", "n_clicks"),
-        State("event-dropdown", "value"),
-        State("archive-clear-active-toggle", "value"),
+        Input("confirm-archive-event-dialog", "submit_n_clicks"),
+        State("pending-archive-target", "data"),
         State("auth-store", "data"),
         prevent_initial_call=True,
         running=[
@@ -6349,10 +6802,16 @@ def register_callbacks(app):
             (Output("btn-clear-current-event", "disabled"), True, False),
         ],
     )
-    def archive_current_event(n_clicks_quick, n_clicks, selected_slug, clear_flags, auth_state):
+    def archive_current_event(submit_n_clicks, archive_target, auth_state):
         auth_state = current_user() or {}
-        if not n_clicks and not n_clicks_quick:
+        if not submit_n_clicks or not archive_target:
             return no_update, no_update, no_update
+        changed = _active_changed_feedback(archive_target)
+        if changed is not None:
+            return changed, no_update, no_update
+        # Act on exactly what the dialog showed, not on the dropdown's current value.
+        selected_slug = archive_target.get("slug")
+        clear_flags = ["clear"] if archive_target.get("clear_active") else []
 
         if not selected_slug or selected_slug == "__ALL__":
             return (
@@ -6500,21 +6959,60 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     # Reopen archived event and optionally restore active check-ins
     # -------------------------------------------------------------------------
+    # Step 1 (T-029): confirm, naming the event to reopen and the current active event.
+    @app.callback(
+        Output("confirm-reopen-event-dialog", "displayed"),
+        Output("confirm-reopen-event-dialog", "message"),
+        Output("pending-reopen-target", "data"),
+        Output("reopen-feedback", "children", allow_duplicate=True),
+        Input("btn-reopen-event", "n_clicks"),
+        State("reopen-event-selector", "value"),
+        State("reopen-event-selector", "options"),
+        State("reopen-restore-active-toggle", "value"),
+        prevent_initial_call=True,
+    )
+    def show_reopen_confirmation(n_clicks, selected_slug, reopen_options, restore_flags):
+        if not n_clicks:
+            return False, no_update, no_update, no_update
+        if not selected_slug:
+            return (
+                False,
+                no_update,
+                None,
+                html.Span(
+                    "⚠️ Select an archived event from the dropdown first.",
+                    style={"color": "#f59e0b"},
+                ),
+            )
+        restore_active = "restore" in (restore_flags or [])
+        settings = get_active_settings() or {}
+        message = _reopen_confirmation_text(selected_slug, restore_active, settings, reopen_options)
+        target = {
+            "slug": selected_slug,
+            "restore_active": restore_active,
+            "active_slug": settings.get("active_event_slug") or "",
+        }
+        return True, message, target, no_update
+
     @app.callback(
         Output("reopen-feedback", "children"),
         Output("event-dropdown", "options", allow_duplicate=True),
         Output("event-dropdown", "value", allow_duplicate=True),
         Output("reopen-event-selector", "value"),
-        Input("btn-reopen-event", "n_clicks"),
-        State("reopen-event-selector", "value"),
-        State("reopen-restore-active-toggle", "value"),
+        Input("confirm-reopen-event-dialog", "submit_n_clicks"),
+        State("pending-reopen-target", "data"),
         State("auth-store", "data"),
         prevent_initial_call=True,
     )
-    def reopen_archived_event(n_clicks, selected_slug, restore_flags, auth_state):
+    def reopen_archived_event(submit_n_clicks, reopen_target, auth_state):
         auth_state = current_user() or {}
-        if not n_clicks:
+        if not submit_n_clicks or not reopen_target:
             return no_update, no_update, no_update, no_update
+        changed = _active_changed_feedback(reopen_target)
+        if changed is not None:
+            return changed, no_update, no_update, no_update
+        selected_slug = reopen_target.get("slug")
+        restore_flags = ["restore"] if reopen_target.get("restore_active") else []
 
         if not selected_slug:
             return (

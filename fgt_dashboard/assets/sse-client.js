@@ -36,6 +36,25 @@
         console.log('SSE status:', status);
     }
 
+    // T-029: a red banner once SSE has given up, so an admin doesn't trust a stale screen.
+    // Fallback polling keeps running underneath; a click reloads the page.
+    function setStoppedBanner(visible) {
+        let banner = document.getElementById('sse-stopped-banner');
+        if (!visible) {
+            if (banner) banner.remove();
+            return;
+        }
+        if (banner) return;
+        banner = document.createElement('button');
+        banner.type = 'button';
+        banner.id = 'sse-stopped-banner';
+        banner.className = 'sse-stopped-banner';
+        banner.setAttribute('role', 'alert');
+        banner.textContent = 'Live updates stopped – click to reload';
+        banner.addEventListener('click', function() { window.location.reload(); });
+        document.body.appendChild(banner);
+    }
+
     function isTableEditing() {
         const table = document.getElementById('checkins-table');
         if (!table) return false;
@@ -156,6 +175,7 @@
                 console.log('SSE connection opened');
                 reconnectAttempts = 0;
                 stopFallbackPolling();
+                setStoppedBanner(false);
                 updateIndicator('connected');
             };
 
@@ -195,12 +215,15 @@
                     } else {
                         console.log('Max reconnect attempts reached, falling back to polling');
                         startFallbackPolling();
+                        updateIndicator('disconnected');
+                        setStoppedBanner(true);
                     }
                 }
             };
         } catch (err) {
             console.error('Failed to create EventSource:', err);
             startFallbackPolling();
+            setStoppedBanner(true);
         }
     }
 
