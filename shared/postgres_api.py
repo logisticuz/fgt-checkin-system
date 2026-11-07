@@ -1801,8 +1801,15 @@ def get_event_history() -> List[Dict[str, Any]]:
 
 def get_recorded_event_games(event_slug: str) -> List[str]:
     """Read raw game strings for exactly one event, including archived check-ins."""
+    return sorted(
+        get_recorded_event_game_counts(event_slug), key=lambda game: (game.casefold(), game)
+    )
+
+
+def get_recorded_event_game_counts(event_slug: str) -> Dict[str, int]:
+    """Count each raw game once per recorded check-in, without rewriting aliases."""
     if not event_slug or event_slug == "__ALL__":
-        return []
+        return {}
     with _get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT tournament_games_registered FROM active_event_data WHERE event_slug = %s "
@@ -1810,14 +1817,12 @@ def get_recorded_event_games(event_slug: str) -> List[str]:
             "SELECT tournament_games_registered FROM event_archive WHERE event_slug = %s",
             (event_slug, event_slug),
         )
-        games = {
-            game
-            for (raw_games,) in cur.fetchall()
-            if isinstance(raw_games, (list, tuple))
-            for game in raw_games
-            if isinstance(game, str) and game.strip()
-        }
-    return sorted(games, key=lambda game: (game.casefold(), game))
+        counts: Dict[str, int] = {}
+        for (raw_games,) in cur.fetchall():
+            if isinstance(raw_games, (list, tuple)):
+                for game in {name for name in raw_games if isinstance(name, str) and name.strip()}:
+                    counts[game] = counts.get(game, 0) + 1
+    return counts
 
 
 def get_game_aliases() -> Dict[str, str]:
