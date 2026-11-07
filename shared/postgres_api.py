@@ -1830,6 +1830,39 @@ def _canonical_game_breakdown(breakdown, aliases):
     return result
 
 
+def _game_attendances(rows, aliases):
+    """Union recorded canonical games per event/UUID; unlinked rows remain separate units."""
+    units = {}
+    for index, row in enumerate(rows):
+        player = row.get("player_uuid")
+        identity = ("player", player) if player else ("row", row.get("id", index))
+        key = (row["event_slug"], *identity)
+        unit = units.setdefault(
+            key,
+            {
+                "event_slug": row["event_slug"],
+                "games": set(),
+                "game_aliases": {},
+                "metadata_available": False,
+            },
+        )
+        raw_games = row.get("tournament_games_registered")
+        if not isinstance(raw_games, (list, tuple)):
+            continue
+        # One recorded list makes metadata available for this attendance. A missing
+        # duplicate row must not exclude an attendee whose games were recorded elsewhere.
+        unit["metadata_available"] = True
+        for raw in raw_games:
+            canonical = _canonical_game_name(raw, aliases)
+            if not canonical:
+                continue
+            unit["games"].add(canonical)
+            raw = str(raw).strip()
+            if raw.lower() != canonical.lower():
+                unit["game_aliases"].setdefault(canonical, set()).add(raw)
+    return list(units.values())
+
+
 def get_event_game_stats(
     event_slugs: Optional[List[str]] = None,
     start_date: Optional[str] = None,
@@ -1837,7 +1870,7 @@ def get_event_game_stats(
     *,
     aliases: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Aggregate distinct canonical games per archived check-in; never update rows."""
+    """Count games per archived attendance, with the same event/UUID population as participants."""
     aliases = get_game_aliases() if aliases is None else aliases
     conditions, params = [], []
     if event_slugs:
@@ -1852,14 +1885,19 @@ def get_event_game_stats(
     where_sql = "WHERE " + " AND ".join(conditions) if conditions else ""
     with _get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT event_slug, tournament_games_registered FROM event_archive " + where_sql,
+            "SELECT id, event_slug, player_uuid, tournament_games_registered FROM event_archive "
+            + where_sql,
             params,
         )
         rows = cur.fetchall()
+    rows = [
+        dict(zip(("id", "event_slug", "player_uuid", "tournament_games_registered"), row))
+        for row in rows
+    ]
     result = {}
-    for slug, raw_games in rows:
+    for unit in _game_attendances(rows, aliases):
         stats = result.setdefault(
-            slug,
+            unit["event_slug"],
             {
                 "games_breakdown": {},
                 "game_aliases": {},
@@ -1871,29 +1909,22 @@ def get_event_game_stats(
             },
         )
         stats["total_count"] += 1
-        if not isinstance(raw_games, (list, tuple)):
+        if not unit["metadata_available"]:
             stats["unknown_game_count"] += 1
             stats["metadata_complete"] = False
-            continue
-        games = set()
-        for raw in raw_games:
-            canonical = _canonical_game_name(raw, aliases)
-            if not canonical:
-                continue
-            games.add(canonical)
-            raw = str(raw).strip()
-            if raw.lower() != canonical.lower():
-                stats["game_aliases"].setdefault(canonical, set()).add(raw)
+        games = unit["games"]
         stats["total_game_slots"] += len(games)
         stats["multi_game_count"] += len(games) >= 2
         for game in games:
             stats["games_breakdown"][game] = stats["games_breakdown"].get(game, 0) + 1
+        for canonical, labels in unit["game_aliases"].items():
+            stats["game_aliases"].setdefault(canonical, set()).update(labels)
     for stats in result.values():
         stats["games_breakdown"] = dict(
-            sorted(stats["games_breakdown"].items(), key=lambda item: item[0].lower())
+            sorted(stats["games_breakdown"].items(), key=lambda item: (item[0].lower(), item[0]))
         )
         stats["game_aliases"] = {
-            canonical: sorted(labels, key=str.lower)
+            canonical: sorted(labels, key=lambda label: (label.lower(), label))
             for canonical, labels in stats["game_aliases"].items()
         }
     return result
@@ -1951,12 +1982,9 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
         archived_games = game_stats.get(event_slug)
         if archived_games:
             canonical_breakdown = archived_games["games_breakdown"]
-        unknown_game_count = (
-            archived_games["unknown_game_count"]
-            + max(int(total_participants or 0) - archived_games["total_count"], 0)
-            if archived_games
-            else 0
-        )
+        # The canonical participant overlay uses these same attendance units;
+        # stale stored row counts must not invent missing game metadata.
+        unknown_game_count = archived_games["unknown_game_count"] if archived_games else 0
         alias_labels = {
             canonical: set(labels)
             for canonical, labels in (archived_games or {}).get("game_aliases", {}).items()
@@ -2145,7 +2173,7 @@ def get_multi_game_count(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict[str, int]:
-    """Count check-ins with 2+ distinct canonical games in the selected scope."""
+    """Count event/UUID attendances with 2+ distinct canonical games; unlinked rows stay separate."""
     stats = get_event_game_stats(event_slugs, start_date, end_date)
     return {
         "multi_game_count": sum(row["multi_game_count"] for row in stats.values()),
@@ -2906,6 +2934,16 @@ def recompute_event_stats(
         new_ids = sorted(player for player in players if context["first"].get(player) == event_slug)
         returning = len(players) - len(new_ids) if event_date is not None else 0
         stats = compute_event_stats(checkins)
+        games = {}
+        for unit in _game_attendances(checkins, context["game_aliases"]):
+            for game in unit["games"]:
+                games[game] = games.get(game, 0) + 1
+        stats["games_breakdown"] = dict(
+            sorted(games.items(), key=lambda item: (item[0].lower(), item[0]))
+        )
+        stats["most_popular_game"] = (
+            min(games, key=lambda game: (-games[game], game.lower(), game)) if games else None
+        )
         # Archive rows remain immutable facts. Known identities establish one visit;
         # unlinked rows remain separate, flagged attendances until a human links them.
         visits = {}
@@ -2933,7 +2971,7 @@ def recompute_event_stats(
             )
             statuses[status] = statuses.get(status, 0) + 1
         stats["status_breakdown"] = statuses
-        # Stored Games summaries stay on the existing path, owned by T065.
+        # Games and participant numerators share one attendance population (C413).
         requirements = dict(previous.get("requirements_snapshot") or {})
         if event_slug in context["free_events"]:
             requirements["require_payment"] = False
@@ -3117,11 +3155,8 @@ def recompute_player_aggregates(
                     return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
 
                 games = {}
-                for row in rows:
-                    for game in {
-                        _canonical_game_name(raw, context["game_aliases"])
-                        for raw in row["tournament_games_registered"] or []
-                    } - {""}:
+                for unit in _game_attendances(rows, context["game_aliases"]):
+                    for game in unit["games"]:
                         games[game] = games.get(game, 0) + 1
                 games = dict(sorted(games.items()))
                 after = {

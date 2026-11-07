@@ -405,3 +405,16 @@ repair and audit commit atomically; no provider is contacted. Apply refuses any 
 The audit stores every changed field before/after with its archive row id, event slug or player UUID, including whether a new stats row existed. Profile metadata timestamps are not changed by derived repairs.
 Before and after apply, reconcile ALL profile payment totals against archived payments and event revenue. Unassigned money or an off-scope revenue mismatch blocks apply. Counts-only output explains profiles without global first attendance (zero archive rows or only undated visits). Read-only dry-run supports a
 pre-010 database. PROD apply is forbidden until after 2026-11-14 and the user's explicit OK.
+
+
+### Games attendance population (C413)
+
+Games use the same `(event_slug, player_uuid)` attendance units as participants. Each unit
+contributes its DISTINCT canonical games, unioned across that attendee's archive rows using
+the T065 alias map. Per-game counts, total slots, multi-game counts and derived player game
+histories count a game once per attendance. Across events these are player-event visits.
+Rows without a UUID each remain their own unit; names/tags never infer identity.
+A recorded games list on any row makes that attendance's game metadata available; a NULL
+duplicate row does not exclude an attendee whose recorded games contribute to the numerator.
+No archive fact or payment is deleted/rewritten by this grouping. Crossover's explicitly
+labelled "Shared players" remains a separate distinct-person overlap measure.

@@ -1080,3 +1080,115 @@ def test_t065_aliases_drive_expected_game_count_and_derived_player_games(history
         assert conn.execute(
             "SELECT tournament_games_registered FROM event_archive WHERE event_slug='later' LIMIT 1"
         ).fetchone()[0] == ['synthetic alias', 'Synthetic Canonical']
+
+
+@pytest.mark.parametrize(
+    "linked,game_rows,participants,slots,multi,entries,unknown",
+    [
+        (True, [["SF6", "GG"], ["SF6", "GG"]], 1, 2, 1, {"SF6": 1, "GG": 1}, 0),
+        (False, [["SF6", "GG"], ["SF6", "GG"]], 2, 4, 2, {"SF6": 2, "GG": 2}, 0),
+        (True, [["SF6"], ["GG"]], 1, 2, 1, {"SF6": 1, "GG": 1}, 0),
+        (False, [["SF6"], ["GG"]], 2, 2, 0, {"SF6": 1, "GG": 1}, 0),
+        (True, [["SF6", "GG"], None], 1, 2, 1, {"SF6": 1, "GG": 1}, 0),
+        (False, [["SF6", "GG"], None], 2, 2, 1, {"SF6": 1, "GG": 1}, 1),
+    ],
+)
+def test_games_use_same_attendance_population_through_real_insights(
+    pg_db, dashboard, monkeypatch, linked, game_rows, participants, slots, multi, entries, unknown
+):
+    from unittest.mock import Mock
+
+    for alias, canonical in (("sf6", "SF6"), ("gg", "GG")):
+        pg_db.insert("game_aliases", {"alias": alias, "canonical": canonical})
+    if linked:
+        pg_db.insert("players", {"uuid": "one-attendee"})
+    pg_db.insert(
+        "event_stats",
+        {
+            "event_slug": "fightbox",
+            "event_date": "2026-01-01",
+            "archived_at": "2026-01-02",
+            "total_participants": 2,
+            "status_breakdown": {"Ready": 2},
+            "startgg_count": 2,
+            "games_breakdown": {"SF6": 2, "GG": 2},
+            "requirements_snapshot": {"require_membership": False},
+        },
+    )
+    for games in game_rows:
+        pg_db.insert(
+            "event_archive",
+            {
+                "event_slug": "fightbox",
+                "event_date": "2026-01-01",
+                "archived_at": "2026-01-02",
+                "player_uuid": "one-attendee" if linked else None,
+                "tournament_games_registered": games,
+                "status": "Ready",
+                "startgg": True,
+                "payment_amount": 25,
+            },
+        )
+    before = snapshot(pg_db)
+    game_stats = postgres.get_event_game_stats(["fightbox"])["fightbox"]
+    assert game_stats["total_count"] == participants
+    assert game_stats["total_game_slots"] == slots
+    assert game_stats["multi_game_count"] == multi
+    assert game_stats["games_breakdown"] == entries
+    assert game_stats["unknown_game_count"] == unknown
+    assert postgres.get_multi_game_count(["fightbox"]) == {
+        "multi_game_count": multi,
+        "total_count": participants,
+    }
+    event = postgres.recompute_event_stats("fightbox", dry_run=True)
+    assert event["after"]["total_participants"] == participants
+    assert event["after"]["games_breakdown"] == entries
+    assert event["after"]["total_revenue"] == 50
+    history = postgres.get_event_history_dashboard()
+    assert history[0]["unknown_game_count"] == unknown
+    monkeypatch.setattr(
+        dashboard.storage, "get_event_history_dashboard", Mock(return_value=history), raising=False
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_game_aliases", postgres.get_game_aliases, raising=False
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_event_game_stats", postgres.get_event_game_stats, raising=False
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_multi_game_count", postgres.get_multi_game_count, raising=False
+    )
+    result = dashboard.callbacks["update_insights"](
+        "tab-insights", 1, [], "all", [], 10, "", "", None, None
+    )
+    values = {
+        item.component_id: value
+        for item, value in zip(dashboard.definitions["update_insights"]["output"], result)
+    }
+    assert values["insights-kpi-total"] == str(participants)
+    assert values["insights-kpi-avggames"] == f"{slots / (participants - unknown):.1f}"
+    assert values["insights-kpi-multigame"] == f"{multi / (participants - unknown) * 100:.1f}%"
+    assert {row["game"]: row["entries"] for row in values["insights-games-table"]} == entries
+    assert all(float(row["share"].rstrip("%")) <= 100 for row in values["insights-games-table"])
+    if linked:
+        player = postgres.recompute_player_aggregates(dry_run=True)[0]
+        assert player["after"]["game_counts"] == entries
+        assert player["after"]["total_events"] == 1 and player["after"]["total_paid"] == 50
+    assert snapshot(pg_db) == before
+
+
+def test_same_player_games_union_per_event_and_aliases_do_not_duplicate_slots(history):
+    with history.pool.connection() as conn:
+        conn.execute(
+            "UPDATE event_archive SET tournament_games_registered=ARRAY['SF6','STREET FIGHTER 6 TOURNAMENT']"
+        )
+    stats = postgres.get_event_game_stats()
+    assert stats["first"]["games_breakdown"] == {"Street Fighter 6": 1}
+    assert stats["same-day"]["games_breakdown"] == {"Street Fighter 6": 2}
+    player = next(
+        item
+        for item in postgres.recompute_player_aggregates(dry_run=True)
+        if item["player_uuid"] == "a"
+    )
+    assert player["after"]["game_counts"] == {"Street Fighter 6": 3}
+    assert player["after"]["total_paid"] == 45
