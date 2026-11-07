@@ -1335,7 +1335,8 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.Span(
-                                                                "Use for Start.gg players who missed the kiosk check-in.",
+                                                                "Games come from the selected event and its recorded check-ins.",
+                                                                id="manual-games-help",
                                                                 style={
                                                                     "color": COLORS["text_muted"],
                                                                     "fontSize": "0.75rem",

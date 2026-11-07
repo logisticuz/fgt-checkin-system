@@ -190,6 +190,7 @@ def games(storage):
     storage.get_active_settings.return_value = {
         **ACTIVE,
         "default_game": ["Street Fighter 6", "Tekken 8"],
+        "events_json": [{"name": "Street Fighter 6"}, {"name": "Tekken 8"}],
         "swish_expected_per_game": 25,
         "require_payment": True,
     }
