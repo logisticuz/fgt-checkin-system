@@ -209,10 +209,14 @@ def test_orchestrate_records_and_sends_ids_only_for_an_enabled_run(
     assert response.status_code == 200
     stored = pg_db.checkins()[0]
     if engine == "none":
-        assert stored["last_ebas_attempt_id"] is stored["last_startgg_attempt_id"] is None
+        assert (
+            stored["last_ebas_attempt_id"] is stored["last_startgg_attempt_id"] is None
+        )
     else:
         attempt_id = n8n_stub.calls[-1]["json"]["attempt_id"]
-        assert stored["last_ebas_attempt_id"] == stored["last_startgg_attempt_id"] == attempt_id
+        assert stored["last_startgg_attempt_id"] == attempt_id
+        assert stored["last_ebas_attempt_id"] is None
+        assert "personnummer" not in n8n_stub.calls[-1]["json"]
 
 
 def test_late_verified_false_cannot_clear_v2_membership(pg_db):

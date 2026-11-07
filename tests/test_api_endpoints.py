@@ -81,13 +81,15 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
 ):
     monkeypatch.setattr(backend_app.checkin, "INTEGRATION_ENGINE", "n8n")
 
+    monkeypatch.setenv("EBAS_TRANSPORT", "stub")
+
     async def integration_callbacks(request):
         checkin_id = n8n_stub.calls[-1]["json"]["checkin_id"]
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=backend_app.app), base_url="http://testserver"
+            transport=httpx.ASGITransport(app=backend_app.app),
+            base_url="http://testserver",
         ) as callback_client:
             for source, data in (
-                ("ebas", {"member": True}),
                 ("startgg", {"registered": True, "events": ["Test Game"]}),
             ):
                 callback = await callback_client.post(
@@ -103,7 +105,9 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
                 assert callback.status_code == 200
 
     n8n_stub.on_call = integration_callbacks
-    response = app_client.post("/api/checkin/orchestrate", json=make_checkin())
+    response = app_client.post(
+        "/api/checkin/orchestrate", json=make_checkin(personnummer="200001010016")
+    )
     assert response.status_code == 200
     assert response.json()["ready"] is True
     assert response.json()["missing"] == []
@@ -111,6 +115,8 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
     assert len(rows) == 1
     assert rows[0]["status"] == "Ready"
     assert rows[0]["tournament_games_registered"] == ["Test Game"]
+
+    assert "personnummer" not in n8n_stub.calls[-1]["json"]
 
 
 @pytest.mark.db
