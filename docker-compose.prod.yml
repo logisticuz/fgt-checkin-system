@@ -1,7 +1,7 @@
 services:
   # n8n automation server
   n8n:
-    image: n8nio/n8n:stable
+    image: n8nio/n8n:2.4.8@sha256:cae1f28d585a99d9ce9a56f82fbfc99fc100862ffef988d73fa2048d2687b0cc
     # NO ports exposed – only accessible via nginx proxy
     ports:
       - "127.0.0.1:5678:5678"
@@ -94,7 +94,7 @@ services:
     networks: [fgt-net]
 
   nginx:
-    image: nginx:1.27.5
+    image: nginx:1.29.4@sha256:c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec
     ports: ["80:80","443:443"]
     environment:
       - ADMIN_AUTH_COOKIE_TOKEN=${ADMIN_AUTH_COOKIE_TOKEN}

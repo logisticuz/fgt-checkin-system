@@ -101,11 +101,44 @@ def test_dockerfile_copies_and_installs_its_lock_with_a_pinned_python_image(serv
     assert dockerfile.index(f"COPY {copy_source}") < dockerfile.index("RUN pip install")
 
 
-def test_nginx_uses_an_exact_release_tag():
-    compose = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+@pytest.mark.parametrize("name", ["docker-compose.dev.yml", "docker-compose.prod.yml"])
+def test_nginx_uses_the_same_release_index_as_prod(name):
+    compose = (ROOT / name).read_text(encoding="utf-8")
     images = re.findall(r"^\s+image:\s*(nginx:\S+)\s*$", compose, re.MULTILINE)
-    assert len(images) == 1
-    assert re.fullmatch(r"nginx:1\.27\.\d+", images[0])
+    assert images == [
+        "nginx:1.29.4@sha256:"
+        "c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec"
+    ]
+
+
+def test_nginx_smoke_uses_the_reviewed_release_index():
+    smoke = (ROOT / "tests" / "security_smoke.sh").read_text(encoding="utf-8")
+    images = re.findall(r"^\s+(nginx:\S+)\s+>/dev/null$", smoke, re.MULTILINE)
+    expected = (
+        "nginx:1.29.4@sha256:"
+        "c881927c4077710ac4b1da63b83aa163937fb47457950c267d92f7e4dedf4aec"
+    )
+    assert images == [expected, expected]
+
+
+def test_n8n_uses_the_same_release_and_multiarch_index_on_dev_and_prod():
+    expected = (
+        "n8nio/n8n:2.4.8@sha256:"
+        "cae1f28d585a99d9ce9a56f82fbfc99fc100862ffef988d73fa2048d2687b0cc"
+    )
+    for name in ("docker-compose.dev.yml", "docker-compose.prod.yml"):
+        compose = (ROOT / name).read_text(encoding="utf-8")
+        images = re.findall(r"^\s+image:\s*(n8nio/n8n:\S+)\s*$", compose, re.MULTILINE)
+        assert images == [expected]
+        assert not re.search(r":(?:latest|stable)(?:@|$)", images[0])
+
+
+@pytest.mark.parametrize("name", ["docker-compose.dev.yml", "docker-compose.prod.yml"])
+def test_compose_images_do_not_use_latest_or_stable_tags(name):
+    compose = (ROOT / name).read_text(encoding="utf-8")
+    images = re.findall(r"^\s+image:\s*(\S+)\s*$", compose, re.MULTILINE)
+    assert images
+    assert all(not re.search(r":(?:latest|stable)(?:@|$)", image) for image in images)
 
 
 if __name__ == "__main__":
