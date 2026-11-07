@@ -80,6 +80,9 @@
     help_failed: "Please ask a TO for help and we'll sort it out together.",
     help_unknown_title: "We couldn't confirm your registration yet",
     help_unknown: "Please don't register again. Ask a TO to check your membership.",
+    help_manual_title: "Your registration was received – a TO will finish it with you",
+    help_manual: "Please don't register again. A TO will complete your membership with you.",
+    not_owner: "Ask a TO to help you continue.",
     reset_button: "Cancel and clear",
     next_person: "Next person – clear screen",
     previous_pending:
@@ -313,6 +316,12 @@
     if (S.inFlight || !consentsGiven()) return;
     const problems = validateForm();
     if (problems.length) { problems[0].focus(); return; }
+    // T-040: without the check-in's capability token (ownership not verified) the start
+    // would be refused anyway; don't send personal data, point to a TO instead.
+    if (!CHECKIN_ID || !params.get("t")) {
+      showError(t("not_owner"));
+      return;
+    }
 
     const channel = el.form.querySelector('input[name="mv2-channel"]:checked').value;
     const payload = {
@@ -355,6 +364,11 @@
     }
     if (result.data.error_code === "already_member" || result.data.state === "already_member") {
       succeed(true);
+      return;
+    }
+    if (result.data.error_code === "not_owner") {
+      restoreStart();
+      showError(t("not_owner"));
       return;
     }
     if (result.data.error_code === "rate_limited") {
@@ -434,6 +448,13 @@
     handleVerify(result);
   });
 
+  // T-040: the registration was accepted but a TO has to finish it (e.g. the check-in row is
+  // gone: error_code "checkin_missing"). Terminal: no new code, no retry, polling stops.
+  function isManualReview(data) {
+    return !!data && (data.state === "manual_review" || data.error_code === "manual_review" ||
+      data.error_code === "checkin_missing");
+  }
+
   function handleVerify(result) {
     // No answer, or a server error: Sverok may or may not have the registration. Never let
     // the person retry blindly; ask the backend instead.
@@ -445,6 +466,7 @@
     const code = data.error_code;
     if (data.state === "submitted") { succeed(false); return; }
     if (data.state === "already_member" || code === "already_member") { succeed(true); return; }
+    if (isManualReview(data)) { showHelp("help_manual_title", "help_manual"); return; }
     if (data.state === "submitting") { startPolling(t("submitting")); return; }
     if (data.state === "outcome_unknown" || code === "outcome_unknown") {
       startPolling(t("checking"));
@@ -454,7 +476,10 @@
       showHelp("help_locked_title", "help_locked");
       return;
     }
-    if (code === "failed") { showHelp("help_failed_title", "help_failed"); return; }
+    if (code === "failed" || data.state === "failed") {
+      showHelp("help_failed_title", "help_failed");
+      return;
+    }
     // Everything below was rejected before Sverok: nothing to resume after a reload.
     forgetAttempt();
     if (code === "expired") { backToCode(t("expired"), { resendNow: true }); return; }
@@ -498,6 +523,7 @@
       return;
     }
     if (data.error_code === "locked") { showHelp("help_locked_title", "help_locked"); return; }
+    if (isManualReview(data)) { showHelp("help_manual_title", "help_manual"); return; }
     if (data.error_code === "rate_limited") {
       countdown(el.resend, result.retryAfter || 30, "resend_wait", resendReady);
     } else {
@@ -550,6 +576,7 @@
       const data = (result && result.data) || {};
       if (data.state === "submitted") { succeed(false); return; }
       if (data.state === "already_member") { succeed(true); return; }
+      if (isManualReview(data)) { showHelp("help_manual_title", "help_manual"); return; }
       if (data.state === "failed" || data.error_code === "failed") {
         showHelp("help_failed_title", "help_failed");
         return;

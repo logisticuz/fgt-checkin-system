@@ -17,7 +17,9 @@ from tests.test_status_templates import app_templates  # noqa: F401  (pytest fix
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 BASE_URL = "http://kiosk.test"
-REGISTER_URL = BASE_URL + "/register?name=Synthetic%20Player&ebas=true&event=synthetic-event"
+REGISTER_BASE = BASE_URL + "/register?name=Synthetic%20Player&ebas=true&event=synthetic-event"
+# T-040: membership start needs the check-in capability (checkin_id + t, T-035).
+REGISTER_URL = REGISTER_BASE + "&checkin_id=chk-test&t=tok-test"
 DESKTOP = {"width": 1280, "height": 800}
 TABLET = {"width": 820, "height": 1180}
 

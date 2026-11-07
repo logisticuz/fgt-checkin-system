@@ -131,7 +131,9 @@ def query(page):
 
 
 def test_checkin_to_register_carries_id_into_v2_start_payload(site):
-    page, api, _ = site(orchestrate={**NOT_READY, "checkin_id": CHECKIN_ID})
+    page, api, _ = site(
+        orchestrate={**NOT_READY, "checkin_id": CHECKIN_ID, "status_token": "tok-x"}
+    )
     check_in(page)
     page.wait_for_url("**/register?**")
     params = query(page)
@@ -166,12 +168,13 @@ def test_register_url_is_unchanged_without_an_id(site):
 
 def test_ready_checkin_goes_to_status_with_id_and_member_link_keeps_it(site):
     page, _, _ = site(
-        orchestrate={"ready": True, "checkin_id": CHECKIN_ID}, require_membership=False
+        orchestrate={"ready": True, "checkin_id": CHECKIN_ID, "status_token": "tok-x"},
+        require_membership=False,
     )  # the "Join as Member" offer only shows when membership is optional
     check_in(page)
     page.wait_for_url("**/status/**")
     assert urlparse(page.url).path == "/status/Synthetic%20Player"
-    assert query(page) == {"checkin_id": CHECKIN_ID}
+    assert query(page) == {"checkin_id": CHECKIN_ID, "t": "tok-x"}
 
     href = page.get_attribute("a.support-link", "href")
     assert href.startswith(
@@ -239,13 +242,20 @@ def wait_for_status_page(page, calls):
 @pytest.mark.parametrize("incoming", [ENCODED_ID, None], ids=["with-id", "without-id"])
 def test_register_continue_keeps_id_on_the_way_to_status(site, incoming):
     page, api, calls = site()
-    page.goto(REGISTER + (f"&checkin_id={incoming}" if incoming else ""))
-    become_member_v2(page, api)
+    if incoming:
+        page.goto(REGISTER + f"&checkin_id={incoming}&t=tok-x")
+        become_member_v2(page, api)
+    else:
+        # T-040: without a check-in id/token the membership start can't run (T-035), so the
+        # legacy no-id case goes straight to Continue (nothing missing).
+        page.goto("/register?name=Synthetic%20Player&event=synthetic-event")
     page.wait_for_selector("#section-final:not(.hidden)")
     page.click("#btn-final-checkin")
     url = wait_for_status_page(page, calls)
     assert urlparse(url).path == "/status/Synthetic%20Player"
-    assert dict(parse_qsl(urlparse(url).query)) == ({"checkin_id": CHECKIN_ID} if incoming else {})
+    assert dict(parse_qsl(urlparse(url).query)) == (
+        {"checkin_id": CHECKIN_ID, "t": "tok-x"} if incoming else {}
+    )
 
 
 @pytest.mark.parametrize("kiosk", [False, True], ids=["web", "kiosk"])
@@ -254,10 +264,12 @@ def test_v2_membership_only_redirect_keeps_id(site, kiosk):
     page.goto("/register?name=Synthetic%20Player&membership_only=true")
     if kiosk:
         page.evaluate("sessionStorage.setItem('kioskMode', 'true')")
-    page.goto(f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}")
+    page.goto(
+        f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}&t=tok-x"
+    )
     become_member_v2(page, api)
     url = wait_for_status_page(page, calls)  # after the 2 s success message
-    expected = {"checkin_id": CHECKIN_ID, **({"kiosk": "true"} if kiosk else {})}
+    expected = {"checkin_id": CHECKIN_ID, "t": "tok-x", **({"kiosk": "true"} if kiosk else {})}
     assert dict(parse_qsl(urlparse(url).query)) == expected
     if kiosk:
         assert urlparse(url).query.startswith("kiosk=true&")
@@ -265,10 +277,12 @@ def test_v2_membership_only_redirect_keeps_id(site, kiosk):
 
 def test_legacy_membership_only_redirect_keeps_id(site):
     page, _, calls = site(membership_flow="legacy", ebas_register={"success": True})
-    page.goto(f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}")
+    page.goto(
+        f"/register?name=Synthetic%20Player&membership_only=true&checkin_id={ENCODED_ID}&t=tok-x"
+    )
     page.click("#pnr-toggle-manual")
     page.fill("#pnr-manual-input", synthetic_personnummer())
     page.fill("#phone-ebas", "0700000000")
     page.click("#btn-register-ebas")
     url = wait_for_status_page(page, calls)
-    assert dict(parse_qsl(urlparse(url).query)) == {"checkin_id": CHECKIN_ID}
+    assert dict(parse_qsl(urlparse(url).query)) == {"checkin_id": CHECKIN_ID, "t": "tok-x"}

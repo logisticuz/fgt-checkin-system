@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e.conftest import DESKTOP, REGISTER_URL, TABLET, synthetic_personnummer
+from tests.e2e.conftest import DESKTOP, REGISTER_BASE, REGISTER_URL, TABLET, synthetic_personnummer
 
 pytestmark = pytest.mark.e2e
 
@@ -20,8 +20,8 @@ CODE_SENT = {
 }
 SUBMITTED = {"ok": True, "state": "submitted"}
 UNKNOWN = {"ok": True, "state": "outcome_unknown"}
-URL_A = REGISTER_URL + "&checkin_id=checkin-A"
-URL_B = REGISTER_URL + "&checkin_id=checkin-B"
+URL_A = REGISTER_BASE + "&checkin_id=checkin-A&t=tok-A"
+URL_B = REGISTER_BASE + "&checkin_id=checkin-B&t=tok-B"
 
 
 def wait_for(page, condition, timeout_ms=3000):
@@ -88,8 +88,8 @@ def test_happy_path_continues_check_in(kiosk):
         "accepted_privacy": True,
         "bylaws_version": "2026-11-06",
         "privacy_version": "2026-11-06-ebas+app-v1",
-        "checkin_id": None,
-        "status_token": None,  # T-034: sent with the attempt (T-035 requires it)
+        "checkin_id": "chk-test",
+        "status_token": "tok-test",  # binds the attempt to the check-in (T-034/T-035)
     }
     assert text(page, "#mv2-destination") == "We sent a code by text message to +46******12."
     assert page.evaluate("document.activeElement.id") == "mv2-code"
@@ -241,7 +241,7 @@ def test_outcome_unknown_polls_until_submitted(kiosk):
     enter_code(page)
     page.wait_for_selector("#mv2-step-busy:not([hidden])")
     assert text(page, "#mv2-busy-text") == "We're checking your registration…"
-    assert stored_attempt(page) == {"attempt_id": ATTEMPT, "checkin_id": None}
+    assert stored_attempt(page) == {"attempt_id": ATTEMPT, "checkin_id": "chk-test"}
 
     page.clock.run_for(4_900)
     assert api.calls["status"] == []
@@ -319,11 +319,23 @@ def test_same_person_reload_resumes_polling(kiosk):
 
 
 def test_reload_without_a_checkin_id_does_not_resume(kiosk):
-    page, api = kiosk()
-    to_pending(page, api)
+    page, _ = kiosk(url=REGISTER_BASE)
+    page.evaluate(
+        "sessionStorage.setItem('mv2_attempt_id', JSON.stringify("
+        "{attempt_id: 'att-old', checkin_id: null}))"
+    )
     page.reload()
     page.wait_for_selector("#mv2-step-form:not([hidden])")
     assert stored_attempt(page) is None
+
+
+def test_start_without_the_capability_points_to_a_to_and_sends_nothing(kiosk):
+    page, api = kiosk(url=REGISTER_BASE)  # legacy link: no check-in id or token
+    fill_details(page)
+    page.click("#mv2-start")
+    page.wait_for_selector("#mv2-error:not([hidden])")
+    assert text(page, "#mv2-error") == "Ask a TO to help you continue."
+    assert api.calls["start"] == []
 
 
 @pytest.mark.parametrize("via_back_link", [True, False], ids=["back-link", "direct"])
@@ -482,3 +494,12 @@ def test_capture_state_screens(kiosk, viewport, request):
     page.click("#mv2-start")
     page.wait_for_selector("#mv2-error:not([hidden])")
     shot(page, "12-rate-limited")
+
+
+def test_unverified_ownership_shows_only_the_to_notice(kiosk):
+    page, api = kiosk(url=REGISTER_BASE + "&checkin_id=chk-test")  # id but no token
+    page.wait_for_function("document.getElementById('messages').textContent.length > 0")
+    assert page.inner_text("#messages") == "Ask a TO to help you continue"
+    assert not page.is_visible("#section-ebas")
+    assert not page.is_visible("#section-final")
+    assert api.calls["start"] == []

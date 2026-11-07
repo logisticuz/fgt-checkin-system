@@ -473,6 +473,10 @@
     // nor needed. Don't offer "become a member" and don't mark it as done; a TO will help.
     const membershipUnknown =
       !membershipOnly && REQUIRE_MEMBERSHIP && params.get("membership") === "unknown";
+    // T-040 (T-038 contract): no capability token for this check-in (ownership unverified).
+    // Games save and membership start need it, so a TO has to help instead.
+    const ownershipUnverified = params.get("ownership") === "unverified" ||
+      Boolean(params.get("checkin_id") && !params.get("t"));
     const state = {
       // Show eBas section if: membership_only mode OR (membership required AND player needs it)
       needsEbas: membershipOnly || (REQUIRE_MEMBERSHIP && !membershipUnknown && params.get("ebas") === "true"),
@@ -581,6 +585,14 @@
 
     // Initialize UI based on state
     function initUI() {
+      if (ownershipUnverified) {
+        // Show only the TO message: no sections, no Continue, no name-based status lookups.
+        state.needsEbas = false;
+        state.needsStartgg = false;
+        document.querySelector(".status-summary").style.display = "none";
+        showMessage("Ask a TO to help you continue", "info");
+        return;
+      }
       // Special handling for membership_only mode (voluntary member signup from Ready page)
       if (state.membershipOnly) {
         // Hide the status summary - they're already checked in
@@ -742,6 +754,15 @@
         }
       }
 
+      // T-040 (T-038): the legacy registration is also bound to this check-in's capability.
+      // Without it, send nothing (no personal data) and point to a TO.
+      const ownedCheckinId = params.get("checkin_id") || "";
+      const ownedToken = params.get("t") || "";
+      if (!ownedCheckinId || !ownedToken) {
+        showMessage("Ask a TO to help you continue", "error");
+        return;
+      }
+
       const controls = Array.from(document.querySelectorAll("#section-ebas input, #section-ebas select, #section-ebas button"));
       const disabledStates = controls.map(control => control.disabled);
       controls.forEach(control => { control.disabled = true; });
@@ -758,7 +779,10 @@
         const response = await fetch(`/api/ebas/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ personnummer: pnr, email, telephone: phone, tag, slug })
+          body: JSON.stringify({
+            personnummer: pnr, email, telephone: phone, tag, slug,
+            checkin_id: ownedCheckinId, status_token: ownedToken,
+          })
         });
 
         let data = await response.json();
@@ -842,6 +866,12 @@
 
       if (!checkinId) {
         showMessage("We couldn't link this to your check-in. Please go back and check in again, or ask a TO.", "error");
+        setButtonLoading(btn, false);
+        return;
+      }
+      if (!statusToken) {
+        // T-036 requires the capability token for this request.
+        showMessage("Ask a TO to help you continue", "error");
         setButtonLoading(btn, false);
         return;
       }

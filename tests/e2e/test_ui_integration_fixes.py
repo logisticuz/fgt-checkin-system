@@ -160,7 +160,7 @@ def test_games_are_saved_with_the_checkin_id(site):
 )
 def test_games_save_errors_show_the_server_text_as_text(site, body, expected):
     page, _ = site(games_reply=(400, body))
-    page.goto(REGISTER + "&checkin_id=chk-a")
+    page.goto(REGISTER + "&checkin_id=chk-a&t=tok-chk-a")
     page.check("#game-1")
     page.click("#btn-confirm-games")
     page.wait_for_selector("#messages .message.error")

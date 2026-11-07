@@ -96,3 +96,25 @@ def test_unknown_membership_reaches_the_status_page(app_templates):  # noqa: F81
     pending = render(app_templates, "status_pending.html")
     assert 'get("membership") === "unknown"' in pending
     assert "? Membership: unknown – a TO will help" in pending
+
+
+def test_t040_ownership_unverified_and_legacy_capability(app_templates):  # noqa: F811
+    checkin = render(app_templates, "checkin.html", kiosk=False, membership_flow="v2")
+    assert 'data.ownership === "unverified" || (data.checkin_id && !data.status_token)' in checkin
+    register = render(app_templates, "register.html", membership_flow="legacy")
+    assert "const ownershipUnverified" in register
+    assert "checkin_id: ownedCheckinId, status_token: ownedToken" in register
+    assert register.count('"Ask a TO to help you continue"') >= 3  # page, games, legacy POST
+
+
+def test_t040_manual_review_is_terminal_in_the_v2_script():
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parents[1] / "backend" / "static" / "js" / "membership_v2.js"
+    ).read_text(encoding="utf-8")
+    assert (
+        script.count('if (isManualReview(data)) { showHelp("help_manual_title", "help_manual")')
+        == 3
+    )
+    assert "Your registration was received – a TO will finish it with you" in script
