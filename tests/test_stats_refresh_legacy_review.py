@@ -82,6 +82,42 @@ def test_null_source_legacy_copies_cannot_be_matched_by_identity_guessing(pg_db)
     assert snapshot(pg_db) == before
 
 
+@pytest.mark.parametrize("action", ["reopen", "end"])
+def test_mixed_legacy_copy_with_retained_checkin_uuid_refuses_without_duplicating_42(pg_db, action):
+    legacy_retained(pg_db)
+    retained_uuid = "00000000-0000-4000-8000-000000000042"
+    with pg_db.pool.connection() as conn:
+        conn.execute(
+            "UPDATE event_archive SET source_record_id=NULL,checkin_uuid=%s "
+            "WHERE event_slug='fightbox-2' AND source_record_id='legacy-a'",
+            (retained_uuid,),
+        )
+        conn.execute(
+            "UPDATE active_event_data SET checkin_uuid=%s WHERE record_id='legacy-a'",
+            (retained_uuid,),
+        )
+        assert conn.execute(
+            "SELECT count(*),sum(payment_amount) FROM event_archive WHERE event_slug='fightbox-2'"
+        ).fetchone() == (2, Decimal("67"))
+        active_before = conn.execute(
+            "SELECT to_jsonb(a) FROM active_event_data a ORDER BY record_id"
+        ).fetchall()
+    before = snapshot(pg_db)
+    with pytest.raises(postgres.ArchiveError, match="reopened before the update.*re-open"):
+        if action == "reopen":
+            postgres.reopen_event("fightbox-2", user=ACTOR)
+        postgres.archive_event("fightbox-2", clear_active=True, user=ACTOR)
+    assert snapshot(pg_db) == before
+    with pg_db.pool.connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT to_jsonb(a) FROM active_event_data a ORDER BY record_id"
+            ).fetchall()
+            == active_before
+        )
+        assert conn.execute("SELECT count(*) FROM event_edit_context").fetchone()[0] == 0
+
+
 def test_recovered_legacy_mirror_keeps_genuinely_unmapped_null_source_facts(pg_db):
     legacy_retained(pg_db)
     pg_db.insert("event_archive", {"event_slug": "fightbox-2", "payment_amount": 11})

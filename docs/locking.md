@@ -68,7 +68,9 @@ IDs through the separate restore map. Prices govern expected amounts only.
 The mirror is persisted/rebuilt even when active rows are retained (clear_active=false).
 For pre-011 retained drafts without a context, reopen and END recover links only from
 exact active record IDs matching archived source IDs. Unmapped NULL-source facts stay
-untouched when verified links exist. Missing/nonunique source links are ambiguous and
+untouched only when every active ID is source-linked; any unmapped active ID makes a
+mixed reconstruction ambiguous (including an exact retained checkin_uuid).
+Missing/nonunique source links are ambiguous and
 refuse END (and reopen with existing rows) without changing facts; the message directs
 the TO to clear the draft, re-open the archive, and reapply corrections. An explicitly
 additive draft can instead be opened with restore_active=false before adding new rows.

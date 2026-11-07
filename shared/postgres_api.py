@@ -4585,13 +4585,20 @@ def _legacy_mirror_links(archive_rows, active_ids):
         for row in archive_rows
         if row.get("source_record_id") in active_ids
     ]
+    linked_ids = {link["active_id"] for link in links}
+    # A NULL-source fact may be an unmapped active copy. Its archive-only status
+    # cannot be established while any active ID remains outside the verified map.
     if archive_rows and (
         not links
         or any(
             row.get("source_record_id") is not None and row["source_record_id"] not in active_ids
             for row in archive_rows
         )
-        or len({link["active_id"] for link in links}) != len(links)
+        or len(linked_ids) != len(links)
+        or (
+            active_ids - linked_ids
+            and any(row.get("source_record_id") is None for row in archive_rows)
+        )
     ):
         raise ArchiveError(
             "This event was reopened before the update; clear its active draft and re-open "
