@@ -212,6 +212,10 @@ def test_registration_page_waits_without_resubmitting(scenario):
     harness = r"""
 const assert = require('node:assert/strict');
 const scenario = process.argv[1];
+const checkinId = '00000000-0000-4000-8000-000000000042';
+const statusToken = 'synthetic-legacy-status-capability';
+const window = { location: { search: `?checkin_id=${checkinId}&t=${statusToken}` } };
+const params = new URLSearchParams(window.location.search);
 let now = 0, submit, posts = 0, polls = 0;
 const messages = [], delays = [], elements = new Map();
 function element(id) {
@@ -249,6 +253,9 @@ async function fetch(url, options) {
   assert(controls.every(control => control.disabled));
   if (options && options.method === 'POST') {
     posts++;
+    const body = JSON.parse(options.body);
+    assert.equal(body.checkin_id, checkinId);
+    assert.equal(body.status_token, statusToken);
     if (scenario === 'error_text') return { status: 400, json: async () => ({ message: '<img src=x onerror=alert(1)>' }) };
     return { status: 202, json: async () => ({ success: true, state: 'processing' }) };
   }
