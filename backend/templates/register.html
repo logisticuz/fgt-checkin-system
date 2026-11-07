@@ -446,9 +446,11 @@
     }
 
     // Kiosk mode - check sessionStorage (set by /kiosk page)
-    const KIOSK_MODE = sessionStorage.getItem("kioskMode") === "true";
-    // T-062: kiosk navigation replaces history entries (URL ?kiosk=true counts too).
-    const KIOSK_NAV = KIOSK_MODE || CheckinHygiene.isKioskPage(false);
+    // T-062: the session flag OR ?kiosk=true (a direct kiosk URL in a fresh tab). The flag is
+    // re-set so every page after this one in the tab knows it's on the kiosk.
+    const KIOSK_MODE = CheckinHygiene.isKioskPage(false);
+    if (KIOSK_MODE) sessionStorage.setItem("kioskMode", "true");
+    const KIOSK_NAV = KIOSK_MODE;
     // Requests a kiosk idle return must cancel (the next person must not get late answers).
     const pendingSaves = new Set();
     function trackedSignal() {

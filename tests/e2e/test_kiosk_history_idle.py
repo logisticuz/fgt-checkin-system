@@ -52,7 +52,7 @@ def site(browser, app_templates):  # noqa: F811
     def open_site(
         flow="legacy", hold_games=False, clock=False, viewport=TABLET, require_membership=False
     ):
-        calls = {"pages": [], "games": [], "held": [], "failed": []}
+        calls = {"pages": [], "games": [], "held": [], "failed": [], "order": []}
         base = {
             "membership_flow": flow,
             "membership_year": 2026,
@@ -85,6 +85,7 @@ def site(browser, app_templates):  # noqa: F811
             query = dict(parse_qsl(url.query))
             if url.path in ("/", "/kiosk", "/register") or url.path.startswith("/status/"):
                 calls["pages"].append(route.request.url)
+                calls["order"].append(("page", url.path))
             if url.path in ("/", "/kiosk"):
                 return page_html(route, "checkin.html", {**base, "kiosk": url.path == "/kiosk"})
             if url.path == "/register":
@@ -126,7 +127,10 @@ def site(browser, app_templates):  # noqa: F811
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on(
             "requestfailed",
-            lambda request: calls["failed"].append(request.url)
+            lambda request: (
+                calls["failed"].append(request.url),
+                calls["order"].append(("games-failed", request.failure)),
+            )
             if "/api/player/games" in request.url
             else None,
         )
@@ -260,8 +264,26 @@ def test_any_interaction_restarts_the_idle_timer(site):
     assert page.locator("#kiosk-idle-warning").is_hidden()
 
 
+RECORD_ABORTS = """
+(function () {
+  const realFetch = window.fetch;
+  window.fetch = function (input, init) {
+    const url = String(input && input.url ? input.url : input);
+    if (init && init.signal && url.indexOf("/api/player/games") !== -1) {
+      // Fires only for an explicit controller.abort(), never for a page unload.
+      init.signal.addEventListener("abort", function () {
+        sessionStorage.setItem("__games_aborted", "1");
+      });
+    }
+    return realFetch.apply(this, arguments);
+  };
+})();
+"""
+
+
 def test_idle_return_aborts_a_pending_games_save(site):
     page, calls = site(clock=True, hold_games=True)
+    page.add_init_script(RECORD_ABORTS)
     kiosk_check_in(page)
     page.locator("text=Street Fighter 6").first.click()
     page.click("text=Confirm Selection")
@@ -270,13 +292,11 @@ def test_idle_return_aborts_a_pending_games_save(site):
             break
         page.wait_for_timeout(20)
     assert calls["held"], "games PATCH was not sent"
+    assert page.evaluate("sessionStorage.getItem('__games_aborted')") is None
     page.clock.run_for(91_000)
     page.wait_for_url("**/kiosk")
-    for _ in range(100):
-        if calls["failed"]:
-            break
-        page.wait_for_timeout(20)
-    assert calls["failed"], "the pending games save was not aborted"
+    # The idle return aborted it itself (an AbortSignal abort), not just the page unload.
+    assert page.evaluate("sessionStorage.getItem('__games_aborted')") == "1"
 
 
 def test_v2_membership_step_keeps_its_own_idle_handling(site):
@@ -337,3 +357,187 @@ def test_v2_membership_only_success_redirect(site, kiosk):
         assert "/register" not in page.url
     else:
         assert history_length(page) == start + 1  # normal mode unchanged
+
+
+# --- Review fixes (T-062 CHANGES) ---------------------------------------------------------
+
+
+def test_v2_success_hands_idle_back_to_the_register_page(site):
+    """Review #2: after an ordinary v2 success the register page idles home without a touch."""
+    page, _ = site(flow="v2", clock=True, require_membership=True)
+    page.goto("/kiosk")
+    page.goto(REGISTER_KIOSK.replace("&checkin_id", "&ebas=true&checkin_id"))
+    page.fill("#mv2-pnr", synthetic_personnummer())
+    page.fill("#mv2-email", "player@example.invalid")
+    page.fill("#mv2-phone", "0700000000")
+    page.check("#mv2-consent-bylaws")
+    page.check("#mv2-consent-privacy")
+    page.click("#mv2-start")
+    page.wait_for_function("document.body.innerText.includes('already a member')")
+    page.clock.run_for(5_000)  # v2 hides its section; no further interaction from here
+    assert "/register" in page.url
+    page.clock.run_for(100_000)
+    page.wait_for_url("**/kiosk")
+
+
+DIRECT_KIOSK = (
+    "/register?name=Synthetic%20Kiosk&startgg=true&event=synthetic-event&tag=pw-kiosk"
+    "&kiosk=true&checkin_id=chk-k&t=tok-chk-k"
+)
+
+
+def test_direct_kiosk_url_keeps_kiosk_mode_on_continue_and_back(site):
+    """Review #3: a fresh tab opened straight on a kiosk register URL stays a kiosk flow."""
+    page, _ = site(clock=True)
+    page.goto(DIRECT_KIOSK)  # no /kiosk visit first: no session flag yet
+    assert page.get_attribute("#back-link", "href") == "/kiosk"
+    start = history_length(page)
+    page.click("#btn-final-checkin")
+    page.wait_for_url("**/status/**")
+    status = dict(parse_qsl(urlparse(page.url).query))
+    assert status.get("kiosk") == "true" and status.get("t") == "tok-chk-k"
+    assert history_length(page) == start  # replaced
+    page.wait_for_selector("#kiosk-back:not(.hidden)")  # the status page knows it is a kiosk
+    page.clock.run_for(16_000)
+    page.wait_for_url("**/kiosk")
+
+
+@pytest.mark.parametrize("path", ["/", "/kiosk"], ids=["normal", "kiosk"])
+def test_late_written_personal_storage_is_purged_before_the_redirect(site, path):
+    """Review #4: phone/personal id written after load never reach the register page."""
+    page, _ = site()
+    page.goto(path)
+    page.fill("#namn", NAME)
+    page.fill("#telefon", PHONE)
+    page.fill("#tag", TAG)
+    if page.locator("#consent").count():
+        page.check("#consent")
+    page.evaluate(
+        "localStorage.setItem('telefon', '0709999999');"
+        "localStorage.setItem('personnummer', '189001019802')"
+    )
+    page.click(".btn-submit")
+    page.wait_for_url("**/register?**")
+    assert page.evaluate("localStorage.getItem('telefon')") is None
+    assert page.evaluate("localStorage.getItem('personnummer')") is None
+
+
+# --- Review #1: real back/forward cache ---------------------------------------------------
+# page.route() and Playwright's default --disable-back-forward-cache both keep BFCache off, so
+# this test serves the real templates from a loopback HTTP server to a BFCache-enabled Chromium.
+
+
+@pytest.fixture(scope="module")
+def bfcache_browser(browser):
+    # A second Chromium from the same Playwright instance (one sync loop per thread).
+    chromium = browser.browser_type.launch(
+        channel="chromium", ignore_default_args=["--disable-back-forward-cache"]
+    )
+    yield chromium
+    chromium.close()
+
+
+@pytest.fixture
+def loopback_site(app_templates):  # noqa: F811
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    base = {
+        "membership_flow": "legacy",
+        "membership_year": 2026,
+        "n8n_token": "",
+        "sse_token": "",
+        "collect_acquisition_source": False,
+        "require_membership": False,
+        "require_payment": False,
+        "require_startgg": True,
+        "offer_membership": False,
+        "is_member": False,
+        "games": [{"id": "1", "name": "Street Fighter 6"}],
+        "swish_number": "000 000 00 00",
+        "swish_expected_per_game": 25,
+        "tag": TAG,
+        "event_slug": "synthetic-event",
+        "event_name": "Synthetic Event",
+        "status": {},
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def send(self, body, kind, status=200):
+            data = body if isinstance(body, bytes) else body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            url = urlparse(self.path)
+            if url.path in ("/", "/kiosk"):
+                html = app_templates.get_template("checkin.html").render(
+                    {**base, "kiosk": url.path == "/kiosk"}
+                )
+                return self.send(html, "text/html; charset=utf-8")
+            if url.path == "/register":
+                html = app_templates.get_template("register.html").render({**base, "name": NAME})
+                return self.send(html, "text/html; charset=utf-8")
+            if url.path.startswith("/static/"):
+                file = BACKEND_DIR / url.path.lstrip("/")
+                if file.is_file():
+                    kind = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+                    return self.send(file.read_bytes(), kind)
+                return self.send("", "text/plain", 404)
+            if url.path.startswith("/api/checkin/") and url.path.endswith("/status"):
+                return self.send(json.dumps(ID_STATUS), "application/json")
+            if url.path.startswith("/api/"):
+                return self.send(json.dumps({"member": False}), "application/json")
+            return self.send("", "text/plain", 404)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+RECORD_PAGESHOW = """
+window.addEventListener("pageshow", function (e) {
+  var seen = JSON.parse(sessionStorage.getItem("__pageshow") || "[]");
+  seen.push([location.pathname, e.persisted]);
+  sessionStorage.setItem("__pageshow", JSON.stringify(seen));
+});
+"""
+
+
+def test_bfcache_back_then_forward_never_restores_the_previous_player(
+    bfcache_browser, loopback_site
+):
+    context = bfcache_browser.new_context(viewport=TABLET, base_url=loopback_site)
+    context.add_init_script(RECORD_PAGESHOW)
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto("/kiosk")
+        page.goto(REGISTER_KIOSK)  # a pushed, stamped player page (the worst case)
+        page.wait_for_selector("#back-link")
+        # A BFCache restore fires pageshow but no load event: only wait for the commit.
+        page.go_back(wait_until="commit")  # restores the kiosk start (from BFCache)
+        page.wait_for_url("**/kiosk", wait_until="commit")
+        page.wait_for_timeout(300)
+        page.go_forward(wait_until="commit")  # tries to bring back the player page
+        page.wait_for_timeout(1000)
+        page.wait_for_url("**/kiosk", wait_until="commit")
+        assert page.url.endswith("/kiosk"), page.url
+        assert "tok-" not in page.url
+        seen = page.evaluate("JSON.parse(sessionStorage.getItem('__pageshow') || '[]')")
+        assert ["/kiosk", True] in seen, f"BFCache was not exercised: {seen}"
+    finally:
+        context.close()
+    assert not errors, errors

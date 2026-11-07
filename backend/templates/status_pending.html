@@ -557,7 +557,8 @@
     };
 
     // Kiosk mode - check URL param OR sessionStorage (persists through redirects)
-    const KIOSK_MODE = {{ kiosk | default(false) | tojson }} || sessionStorage.getItem("kioskMode") === "true";
+    // Server flag, ?kiosk=true or the tab's kiosk flag (T-062: one effective kiosk flag).
+    const KIOSK_MODE = CheckinHygiene.isKioskPage({{ kiosk | default(false) | tojson }});
     if (KIOSK_MODE) {
       document.getElementById("kiosk-back").classList.remove("hidden");
 

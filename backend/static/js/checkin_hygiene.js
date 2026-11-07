@@ -142,6 +142,7 @@
     const shouldRun = options.shouldRun || function () { return true; };
     let warnTimer = null;
     let tick = null;
+    let waitTimer = null;
     let deadline = 0;
 
     const bar = document.createElement("div");
@@ -180,6 +181,7 @@
     function leave() {
       clearInterval(tick);
       clearTimeout(warnTimer);
+      clearTimeout(waitTimer);
       if (options.onLeave) {
         try { options.onLeave(); } catch (e) { /* never block the return */ }
       }
@@ -188,9 +190,16 @@
 
     function restart() {
       clearTimeout(warnTimer);
+      clearTimeout(waitTimer);
       clearInterval(tick);
       bar.hidden = true;
-      if (!shouldRun()) return;
+      if (!shouldRun()) {
+        // Another component owns idle handling right now (the v2 step). Check back every
+        // second, so the full idle period starts as soon as control is handed back, even if
+        // nobody touches the screen.
+        waitTimer = setTimeout(restart, 1000);
+        return;
+      }
       deadline = now() + idleMs;
       warnTimer = setTimeout(function () {
         if (!shouldRun()) { restart(); return; }

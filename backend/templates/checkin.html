@@ -611,6 +611,7 @@
 
     function leaveTo(url) {
       clearFields();  // so a Back/bfcache restore can't show this person's details
+      CheckinHygiene.purgePersonalStorage();  // in every mode, right before the redirect
       // Kiosk: replace this history entry (T-062), so Back never leads to a player page.
       CheckinHygiene.navigate(url, KIOSK_MODE);
     }
@@ -620,6 +621,11 @@
       // A new kiosk start: older kiosk player pages left in history now send Back home.
       CheckinHygiene.markKioskStart();
       CheckinHygiene.replaceKioskLinks();
+      // A kiosk start restored from the back/forward cache is a new start too, so a later
+      // Forward can't bring back the previous player's page (T-062 review).
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted) CheckinHygiene.markKioskStart();
+      });
     }
 
     // Form submission
