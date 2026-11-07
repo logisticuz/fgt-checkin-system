@@ -13,7 +13,7 @@ import requests
 import status_api
 from psycopg.types.json import Jsonb
 
-from tests.fixtures import make_checkin
+from tests.fixtures import SYNTHETIC_PERSONNUMMER, make_checkin
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +144,7 @@ def test_provider_error_logs_never_include_body_or_contact_sentinels(
                 "status_token": capability_token(row["record_id"]),
                 "tag": row["tag"],
                 "slug": row["event_slug"],
-                "personnummer": "0" * 12,
+                "personnummer": SYNTHETIC_PERSONNUMMER,
             },
         )
         assert response.status_code == 202

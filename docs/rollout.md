@@ -10,11 +10,15 @@ Use this order for an authorized deployment: **backup → preflight → apply �
 3. Resolve 002's duplicate precondition manually, then apply reviewed migrations with
    `python -m shared.migrate apply`. The first preflight may report pending files; it never applies them.
    A failed later migration can leave earlier files committed, so a partial run is not deployment-ready.
-4. Re-run preflight and require exit 0, confirming all files (including 001-004) are applied.
-5. Deploy the services only after that successful gate and perform the DEV smoke checks.
+4. Re-run preflight and require exit 0, confirming all files (including 001-006) are applied.
+5. Rebuild and deploy `backend` and `fgt_dashboard` together only after that successful gate,
+   then perform the DEV smoke checks. Both services use the shared TO membership update;
+   both must run the release that resolves legacy registration guards.
 
 `FGT_MIGRATIONS_ENABLED=0` is **not compatible with the new code on an old schema**.
 Archive needs 003's `source_record_id`; callback tracking and membership provenance need 004.
+Legacy registration guards and TO member edits require 006's `legacy_register_attempts` table.
+Apply 006 before either service starts the new code; a TO member toggle otherwise fails.
 `MEMBERSHIP_FLOW=legacy` does not remove those schema requirements.
 If startup migrations are disabled operationally, migrations still must be applied and the
 preflight must pass before the new writers start. Keep services using the prior release while

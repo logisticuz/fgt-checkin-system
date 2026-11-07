@@ -6,7 +6,8 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.e2e.conftest import BACKEND_DIR, BASE_URL, REGISTER_URL, TABLET, synthetic_personnummer
+from tests.e2e.conftest import BACKEND_DIR, BASE_URL, REGISTER_URL, TABLET
+from tests.fixtures import SYNTHETIC_PERSONNUMMER
 
 pytestmark = pytest.mark.e2e
 
@@ -39,7 +40,9 @@ def legacy_page(browser, register_html):
             if path == "/api/ebas/register":
                 state["posts"].append(route.request.post_data_json)
                 return route.fulfill(
-                    status=status, content_type="application/json", body=json.dumps(reply)
+                    status=status,
+                    content_type="application/json",
+                    body=reply if isinstance(reply, str) else json.dumps(reply),
                 )
             if path.startswith("/api/checkin/") and path.endswith("/status"):
                 state["polls"].append(route.request.url)
@@ -58,7 +61,7 @@ def legacy_page(browser, register_html):
         page.clock.install()
         page.goto(REGISTER_URL)
         page.click("#pnr-toggle-manual")
-        page.fill("#pnr-manual-input", synthetic_personnummer())
+        page.fill("#pnr-manual-input", SYNTHETIC_PERSONNUMMER)
         page.fill("#email-ebas", "synthetic@example.invalid")
         page.fill("#phone-ebas", "0000000000")
         return page, state
@@ -82,8 +85,54 @@ def test_unknown_is_to_help_without_retry_or_second_post(legacy_page):
     page.dispatch_event("#btn-register-ebas", "click")
     page.clock.run_for(30_000)
     assert len(state["posts"]) == 1
+    assert not state["polls"]
     assert page.evaluate("state.needsEbas") is True
     assert "Membership registered!" not in page.inner_text("#messages")
+
+
+@pytest.mark.parametrize(
+    "status,reply,expected",
+    [
+        (
+            410,
+            {"error_code": "flow_v2", "user_message": "Please use the membership step."},
+            "Please use the membership step.",
+        ),
+        (
+            503,
+            {
+                "error_code": "flow_off",
+                "user_message": "Membership registration is handled by a TO today.",
+            },
+            "Membership registration is handled by a TO today.",
+        ),
+        (403, {"detail": "Private authorization diagnostic"}, "Please ask a TO for help."),
+        (404, {"raw_response": "Private upstream body"}, "Please ask a TO for help."),
+        (400, {"detail": "Private validation diagnostic"}, "Please ask a TO for help."),
+        (503, "<html>Private proxy error</html>", "Please ask a TO for help."),
+        (
+            200,
+            {"error_code": "registration_not_started", "raw_response": "Private upstream body"},
+            "Please ask a TO for help.",
+        ),
+    ],
+)
+def test_non_submit_errors_show_whitelisted_or_neutral_copy(legacy_page, status, reply, expected):
+    page, state = legacy_page(reply, status)
+    page.click("#btn-register-ebas")
+    page.wait_for_function(
+        "expected => document.getElementById('messages').textContent.includes(expected)",
+        arg=expected,
+    )
+    message = page.inner_text("#messages")
+    assert "may have gone through" not in message
+    assert "Private" not in message
+    assert page.is_disabled("#btn-register-ebas")
+    assert page.evaluate("state.needsEbas") is True
+    page.dispatch_event("#btn-register-ebas", "click")
+    page.clock.run_for(30_000)
+    assert len(state["posts"]) == 1
+    assert not state["polls"]
 
 
 def test_verified_rejection_shows_text_field_errors_and_allows_retry(legacy_page):

@@ -10,9 +10,9 @@ import httpx
 import pytest
 
 from shared import postgres_api as postgres
+from tests.fixtures import SYNTHETIC_PERSONNUMMER
 
 ROOT = Path(__file__).resolve().parents[1]
-SYNTHETIC_PERSONNUMMER = "000000000000"
 ACCEPTED = {"success": True, "state": "registered", "registered": True, "member": True}
 PENDING = {"success": False, "state": "local_sync_pending", "provider_accepted": True}
 REJECTED = {
@@ -74,6 +74,114 @@ def test_existing_member_returns_canonical_success_without_submitting(legacy_con
         assert response.json()["already_member"] is True
         assert response.json()["member"] is True
         assert response.json()["state"] == "registered"
+        assert n8n_stub.calls == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.db
+def test_member_snapshot_changed_by_to_cannot_bypass_personnummer_validation(
+    legacy_context, pg_db, n8n_stub, monkeypatch
+):
+    backend, row, payload = legacy_context
+    # The initial read was true, then the TO cleared membership before the locked claim.
+    monkeypatch.setattr(
+        backend.ebas_legacy,
+        "get_checkin_by_record_id",
+        lambda record_id: {"fields": {**row, "member": True}},
+    )
+    payload.pop("personnummer")
+
+    async def scenario():
+        async with asgi_client(backend) as client:
+            response = await client.post("/api/ebas/register", json=payload)
+        assert response.status_code == 400
+        assert attempt(pg_db, row["record_id"]) is None
+        assert n8n_stub.calls == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "personnummer",
+    [
+        None,
+        False,
+        123456789,
+        "",
+        "123456789",
+        "000000000000",
+        SYNTHETIC_PERSONNUMMER[:-1] + "3",
+        SYNTHETIC_PERSONNUMMER + "0",
+    ],
+)
+def test_invalid_personnummer_never_claims_a_guard_or_submits(
+    legacy_context, pg_db, n8n_stub, caplog, personnummer
+):
+    backend, row, payload = legacy_context
+
+    async def scenario():
+        async with asgi_client(backend) as client:
+            response = await client.post(
+                "/api/ebas/register", json={**payload, "personnummer": personnummer}
+            )
+            assert response.status_code == 400
+            assert attempt(pg_db, row["record_id"]) is None
+            assert n8n_stub.calls == []
+            if isinstance(personnummer, str) and personnummer:
+                assert personnummer not in response.text and personnummer not in caplog.text
+            valid_retry = await client.post("/api/ebas/register", json=payload)
+            assert valid_retry.json()["state"] == "local_sync_pending"
+            assert len(n8n_stub.calls) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "personnummer",
+    [
+        SYNTHETIC_PERSONNUMMER,
+        SYNTHETIC_PERSONNUMMER[-10:],
+        SYNTHETIC_PERSONNUMMER[:8] + "-" + SYNTHETIC_PERSONNUMMER[8:],
+    ],
+)
+def test_valid_personnummer_formats_reach_one_submission(legacy_context, n8n_stub, personnummer):
+    backend, _, payload = legacy_context
+
+    async def scenario():
+        async with asgi_client(backend) as client:
+            response = await client.post(
+                "/api/ebas/register", json={**payload, "personnummer": personnummer}
+            )
+        assert response.json()["state"] == "local_sync_pending"
+        assert len(n8n_stub.calls) == 1
+        assert n8n_stub.calls[0]["json"]["personnummer"] == personnummer.replace("-", "")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.db
+def test_stale_in_flight_after_restart_shows_unknown_without_releasing_guard(
+    legacy_context, pg_db, n8n_stub
+):
+    backend, row, payload = legacy_context
+    postgres.claim_legacy_registration(row["record_id"], row["event_slug"])
+    with pg_db.pool.connection() as connection:
+        connection.execute(
+            "UPDATE legacy_register_attempts SET started_at=clock_timestamp()-interval '100 days' WHERE checkin_id=%s",
+            (row["record_id"],),
+        )
+
+    async def scenario():
+        async with asgi_client(backend) as client:
+            response = await client.post("/api/ebas/register", json=payload)
+        assert response.status_code == 202
+        assert response.json()["state"] == "outcome_unknown"
+        assert "a TO will check" in response.json()["user_message"]
+        assert response.json()["retry_allowed"] is False
+        assert attempt(pg_db, row["record_id"])["state"] == "in_flight"
         assert n8n_stub.calls == []
 
     asyncio.run(scenario())
@@ -190,7 +298,7 @@ def test_unknown_outcomes_remain_durable_and_never_echo_private_inputs(
                 )
             monkeypatch.setattr(backend.ebas_legacy, "_ebas_registration_tasks", set())
             second = await client.post("/api/ebas/register", json=payload)
-            assert second.json()["state"] == "processing"
+            assert second.json()["state"] == "outcome_unknown"
             assert len(n8n_stub.calls) == 1
             assert SYNTHETIC_PERSONNUMMER not in first.text
 
@@ -343,7 +451,7 @@ def test_unknown_tombstone_survives_archive_and_reopen(legacy_context, pg_db, n8
             assert pg_db.checkins()[0]["record_id"] == row["record_id"]
             assert (await client.post("/api/ebas/register", json=payload)).json()[
                 "state"
-            ] == "processing"
+            ] == "outcome_unknown"
             assert len(n8n_stub.calls) == 1
 
     asyncio.run(scenario())
@@ -484,7 +592,9 @@ def test_failed_guard_write_sends_nothing_and_failed_completion_write_keeps_guar
     async def scenario():
         async with asgi_client(backend) as client:
             response = await client.post("/api/ebas/register", json=payload)
-            assert response.json()["state"] == "outcome_unknown"
+            assert response.status_code == 503
+            assert response.json()["state"] == "not_submitted"
+            assert "may have gone through" not in response.json()["user_message"]
             assert n8n_stub.calls == []
             monkeypatch.setattr(postgres, "claim_legacy_registration", original)
             monkeypatch.setattr(postgres, "finish_legacy_registration", failed)
@@ -546,7 +656,7 @@ function element(id) {
   return elements.get(id);
 }
 const btn = element('btn-register-ebas');
-element('pnr-ebas').value = '000000000000';
+element('pnr-ebas').value = process.argv[2];
 element('email-ebas').value = 'player@example.invalid';
 element('phone-ebas').value = '0000000000';
 const controls = [btn, element('pnr-ebas'), element('email-ebas'), element('phone-ebas')];
@@ -623,7 +733,7 @@ async function fetch(url, options) {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run(
-        [node, "-e", harness + registration + assertions, scenario],
+        [node, "-e", harness + registration + assertions, scenario, SYNTHETIC_PERSONNUMMER],
         capture_output=True,
         text=True,
         timeout=10,

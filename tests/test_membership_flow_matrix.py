@@ -11,6 +11,7 @@ from membership_api import BYLAWS_VERSION, PRIVACY_VERSION
 from status_api import capability_token
 
 from shared import membership_flow
+from tests.fixtures import SYNTHETIC_PERSONNUMMER
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOWS = ("legacy", "v2", "off")
@@ -44,7 +45,7 @@ def test_membership_mode_route_matrix(
         "status_token": capability_token(row["record_id"]),
         "tag": row["tag"],
         "slug": row["event_slug"],
-        "personnummer": "000000000000",
+        "personnummer": SYNTHETIC_PERSONNUMMER,
         "email": row["email"],
         "telephone": row["telephone"],
     }

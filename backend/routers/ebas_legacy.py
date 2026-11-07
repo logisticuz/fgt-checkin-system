@@ -1,6 +1,7 @@
 """Legacy registration: durable submission guard and explicit, whitelisted outcomes."""
 
 import re
+from datetime import datetime, timezone
 
 from app_state import (
     EBAS_REGISTER_TIMEOUT_SECONDS,
@@ -24,6 +25,7 @@ from app_state import (
 )
 from fastapi import APIRouter
 from status_api import verify_capability
+from validation import sanitize_personnummer, validate_personnummer
 
 from shared import postgres_api
 from shared.ebas_client import _private_transport_logging
@@ -254,6 +256,17 @@ async def ebas_register(request: Request):
             status_code=403, detail="Check-in authorization does not match the target"
         )
 
+    # Validate the untruncated input before committing any submission guard.
+    raw_personnummer = body.get("personnummer")
+    valid, validation_error = (
+        validate_personnummer(raw_personnummer)
+        if isinstance(raw_personnummer, str)
+        else (False, "Personal ID is required")
+    )
+    if not valid and fields.get("member") is not True:
+        raise HTTPException(status_code=400, detail=validation_error)
+    personnummer = sanitize_personnummer(raw_personnummer) if valid else ""
+
     # Forward to n8n eBas Register v2
     n8n_payload = {
         "checkin_id": checkin_id,
@@ -265,12 +278,19 @@ async def ebas_register(request: Request):
     }
 
     try:
-        claimed = postgres_api.claim_legacy_registration(
-            checkin_id, slug, can_submit=bool(personnummer)
-        )
+        # An already-member lookup may omit the PNR, but a concurrent TO edit
+        # must never turn that lookup into an unvalidated provider submission.
+        claimed = postgres_api.claim_legacy_registration(checkin_id, slug, can_submit=valid)
     except Exception:
         logger.warning("integration_error code=ebas_registration_storage_unavailable status=none")
-        return _held_registration("outcome_unknown")
+        return _ebas_registration_response(
+            503,
+            success=False,
+            state="not_submitted",
+            error_code="registration_not_started",
+            retry_allowed=False,
+            user_message="Registration could not start. Please ask a TO for help.",
+        )
     if claimed.get("member") is True:
         return _ebas_registration_response(
             200,
@@ -284,11 +304,16 @@ async def ebas_register(request: Request):
     if claimed["state"] == "missing":
         raise HTTPException(status_code=404, detail="Player not found in active event")
     if claimed["state"] == "invalid_input":
-        raise HTTPException(status_code=400, detail="Personnummer is required")
+        raise HTTPException(status_code=400, detail=validation_error or "Personal ID is required")
     if claimed["state"] != "claimed":
-        return _held_registration(
-            "local_sync_pending" if claimed["state"] == "accepted" else "processing"
-        )
+        held_state = "outcome_unknown"
+        if claimed["state"] == "accepted":
+            held_state = "local_sync_pending"
+        elif claimed["state"] == "in_flight" and claimed.get("started_at"):
+            age = (datetime.now(timezone.utc) - claimed["started_at"]).total_seconds()
+            if age < EBAS_REGISTER_TIMEOUT_SECONDS:
+                held_state = "processing"
+        return _held_registration(held_state)
     n8n_payload["tag"] = claimed["tag"]
     task = asyncio.create_task(_submit_legacy_ebas(checkin_id, claimed["started_at"], n8n_payload))
     _ebas_registration_tasks.add(task)
