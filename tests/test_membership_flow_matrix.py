@@ -79,7 +79,7 @@ def test_disabled_legacy_flow_rejects_before_body_or_storage(
     def unexpected_storage(*args):
         raise AssertionError("A disabled legacy flow must not access storage")
 
-    monkeypatch.setattr(backend_app, "get_checkin_by_tag", unexpected_storage)
+    monkeypatch.setattr(backend_app.ebas_legacy, "get_checkin_by_tag", unexpected_storage)
     response = handler_client.post("/api/ebas/register", content="not JSON")
     assert response.status_code == status
     assert n8n_stub.calls == []

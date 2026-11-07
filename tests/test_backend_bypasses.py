@@ -76,6 +76,7 @@ def test_missing_or_invalid_internal_token_warns_but_still_succeeds(
     app_client, pg_db, backend_app, monkeypatch, caplog, kind, supplied
 ):
     monkeypatch.setattr(backend_app, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setattr(backend_app.app_state, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
     headers = {"X-Internal-Token": supplied} if supplied is not None else None
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=backend_app.logger.name):
@@ -98,6 +99,7 @@ def test_correct_internal_token_succeeds_without_warning(
     app_client, pg_db, backend_app, monkeypatch, caplog, kind
 ):
     monkeypatch.setattr(backend_app, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setattr(backend_app.app_state, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=backend_app.logger.name):
         response, _ = internal_call(app_client, pg_db, kind, {"X-Internal-Token": SYNTHETIC_TOKEN})
@@ -111,6 +113,7 @@ def test_unconfigured_token_warns_once_at_startup_and_skips_request_warnings(
 ):
     pg_db.seed_settings()
     monkeypatch.setattr(backend_app, "INTERNAL_API_TOKEN", None)
+    monkeypatch.setattr(backend_app.app_state, "INTERNAL_API_TOKEN", None)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=backend_app.logger.name):
         with TestClient(backend_app.app) as client:
@@ -124,6 +127,7 @@ def test_unconfigured_token_warns_once_at_startup_and_skips_request_warnings(
 
 def test_configured_token_has_no_startup_warning(backend_app, monkeypatch, caplog):
     monkeypatch.setattr(backend_app, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
+    monkeypatch.setattr(backend_app.app_state, "INTERNAL_API_TOKEN", SYNTHETIC_TOKEN)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=backend_app.logger.name):
         with TestClient(backend_app.app):

@@ -158,9 +158,23 @@ def backend_app(monkeypatch, block_network, n8n_stub):
     # main.py resolves its static/template directories relative to the working directory.
     monkeypatch.chdir(ROOT / "backend")
     backend = importlib.import_module("backend.main")
-    monkeypatch.setattr(backend, "INTEGRATION_ENGINE", "none")
     upstream = httpx.AsyncClient(transport=httpx.MockTransport(n8n_stub.handle_async))
-    monkeypatch.setattr(backend, "httpx_client", upstream)
+    modules = (
+        backend,
+        backend.app_state,
+        backend.admin,
+        backend.checkin,
+        backend.ebas_legacy,
+        backend.integrations,
+        backend.pages,
+        backend.sse,
+        backend.system,
+    )
+    for module in modules:
+        if hasattr(module, "INTEGRATION_ENGINE"):
+            monkeypatch.setattr(module, "INTEGRATION_ENGINE", "none")
+        if hasattr(module, "httpx_client"):
+            monkeypatch.setattr(module, "httpx_client", upstream)
     try:
         yield backend
     finally:
