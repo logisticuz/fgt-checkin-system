@@ -52,6 +52,13 @@ def archived(database, slug):
     return [r for r in table_rows(database, "event_archive") if r["event_slug"] == slug]
 
 
+def attended(database, uuid):
+    """T-015: total_events is the number of distinct archived events of that profile."""
+    return len(
+        {r["event_slug"] for r in table_rows(database, "event_archive") if r["player_uuid"] == uuid}
+    )
+
+
 def actions(database):
     return [r["action"] for r in table_rows(database, "audit_log")]
 
@@ -142,7 +149,9 @@ def test_phone_digits_is_the_validation_normaliser():
         assert postgres._phone_digits(value) == sanitize_phone(value)
 
 
-def test_undoing_a_dismissal_brings_the_live_suggestion_back(archive_db, event, kenji):  # noqa: F811
+def test_undoing_a_dismissal_brings_the_live_suggestion_back(
+    archive_db, event, kenji
+):  # noqa: F811
     """Review P2#7: a cached "no candidate" is re-checked when "Not same" is undone."""
     record = check_in(event, "pw-kenjj")
     decide(record, kenji["uuid"], "not_same")
@@ -336,16 +345,17 @@ def test_a_failed_audit_rolls_the_whole_decision_back(
 # --- archive: the decision lives in merge_log (survives edits, reopen, other rows) ---------------
 
 
-def test_archive_keeps_the_merged_into_profile_and_its_identity(archive_db, event, kenji):  # noqa: F811
+def test_archive_keeps_the_merged_into_profile_and_its_identity(
+    archive_db, event, kenji
+):  # noqa: F811
     record = check_in(event, "pw-kenjj", name="Synthetic Typo Name", phone="0700000399")
     decide(record, kenji["uuid"], "keep_candidate")
-    before = player(archive_db, kenji["uuid"])["total_events"]
     archive(event)
     rows = archived(archive_db, event)
     assert [r["player_uuid"] for r in rows] == [kenji["uuid"]]
     assert rows[0]["tag"] == "pw-kenjj"  # today's tag on the archived row
     kept = player(archive_db, kenji["uuid"])
-    assert kept["total_events"] == before + 1
+    assert kept["total_events"] == attended(archive_db, kenji["uuid"]) == 1  # T-015 recompute
     assert (kept["tag"], kept["name"], kept["telephone"], kept["email"]) == (
         kenji["tag"],
         kenji["name"],
@@ -365,7 +375,8 @@ def test_an_identity_edited_after_the_decision_is_matched_as_edited(
     postgres.update_checkin(record, {"tag": "pw-other"})  # any writer: TO edit, re-check-in…
     archive(event)
     assert [r["player_uuid"] for r in archived(archive_db, event)] == [other["uuid"]]
-    assert player(archive_db, kenji["uuid"])["total_events"] == kenji["total_events"]
+    assert attended(archive_db, kenji["uuid"]) == 0  # nothing archived to kenji
+    assert player(archive_db, kenji["uuid"])["total_events"] == 0
 
 
 def test_a_new_email_on_the_row_keeps_the_decision_by_tag(archive_db, event, kenji):  # noqa: F811
@@ -412,7 +423,11 @@ def test_other_rows_of_the_merged_profile_follow_it(archive_db, event, kenji):  
 def test_a_name_only_decision_survives_archive_and_reopen(archive_db, event, kenji):  # noqa: F811
     """Round 2 P2#1: no tag/email to match by; the decision covers the row itself."""
     archive_db.seed_checkin(
-        event_slug=event, record_id="rec-name-only", name="Synthetic Kenji", tag=None, email=None,
+        event_slug=event,
+        record_id="rec-name-only",
+        name="Synthetic Kenji",
+        tag=None,
+        email=None,
         telephone=None,
     )
     decide("rec-name-only", kenji["uuid"], "keep_candidate")
@@ -432,7 +447,11 @@ def test_a_name_only_decision_survives_archive_and_reopen(archive_db, event, ken
 def test_a_name_only_not_same_survives_archive_and_reopen(archive_db, event, kenji):  # noqa: F811
     """Round 3 P2#1: the row stays on the TO's distinct profile; the candidate stays gone."""
     archive_db.seed_checkin(
-        event_slug=event, record_id="rec-not-same", name="Synthetic Kenji", tag=None, email=None,
+        event_slug=event,
+        record_id="rec-not-same",
+        name="Synthetic Kenji",
+        tag=None,
+        email=None,
         telephone=None,
     )
     assert "rec-not-same" in postgres.refresh_live_duplicate_hints(event)
@@ -447,12 +466,17 @@ def test_a_name_only_not_same_survives_archive_and_reopen(archive_db, event, ken
     assert postgres.refresh_live_duplicate_hints(event) == {}  # not suggested again
     archive(event)
     assert {r["player_uuid"] for r in archived(archive_db, event)} == {stub}
-    assert player(archive_db, kenji["uuid"])["total_events"] == kenji["total_events"]
+    assert attended(archive_db, kenji["uuid"]) == 0  # nothing archived to kenji
+    assert player(archive_db, kenji["uuid"])["total_events"] == 0
 
 
 def test_undoing_the_not_same_releases_the_row(archive_db, event, kenji):  # noqa: F811
     archive_db.seed_checkin(
-        event_slug=event, record_id="rec-undo", name="Synthetic Kenji", tag=None, email=None,
+        event_slug=event,
+        record_id="rec-undo",
+        name="Synthetic Kenji",
+        tag=None,
+        email=None,
         telephone=None,
     )
     decide("rec-undo", kenji["uuid"], "not_same")
@@ -472,7 +496,11 @@ def test_a_confirmed_row_never_overwrites_the_chosen_profile(archive_db, event):
             "UPDATE players SET tag = NULL, email = NULL WHERE uuid = %s", (alice["uuid"],)
         )
     archive_db.seed_checkin(
-        event_slug=event, record_id="rec-alicf", name="Synthetic Alicf", tag=None, email=None,
+        event_slug=event,
+        record_id="rec-alicf",
+        name="Synthetic Alicf",
+        tag=None,
+        email=None,
         telephone="0700000202",
     )
     assert "rec-alicf" in postgres.refresh_live_duplicate_hints(event)
@@ -484,9 +512,7 @@ def test_a_confirmed_row_never_overwrites_the_chosen_profile(archive_db, event):
     assert archived(archive_db, event)[0]["name"] == "Synthetic Alicf"  # today's on the row
 
 
-def test_undoing_a_merge_drops_a_later_not_same_proof_for_its_rows(
-    archive_db, event  # noqa: F811
-):
+def test_undoing_a_merge_drops_a_later_not_same_proof_for_its_rows(archive_db, event):  # noqa: F811
     """Round 4 P2 (exact repro): tagged row A -> Keep B -> Not same vs C -> Undo -> archive A."""
     alpha = seed_player(archive_db, "pw-alpha", name="Synthetic Alpha", telephone="0700000302")
     other = seed_player(archive_db, "pw-alpah", name="Synthetic Alpha", telephone="0700000303")
@@ -501,14 +527,17 @@ def test_undoing_a_merge_drops_a_later_not_same_proof_for_its_rows(
     proofs = [r["confirmed_rows"] or {} for r in dismissals]
     assert all(record not in proof for proof in proofs)  # removed with the Undo
     audit = [
-        r for r in table_rows(archive_db, "audit_log") if r["action"] == "decision_proofs_invalidated"
+        r
+        for r in table_rows(archive_db, "audit_log")
+        if r["action"] == "decision_proofs_invalidated"
     ]
     assert len(audit) == 1
     assert json.loads(audit[0]["details"])["merge_id"] == merged["merge_id"]
 
     archive(event)
     assert [r["player_uuid"] for r in archived(archive_db, event)] == [stub]
-    assert player(archive_db, alpha["uuid"])["total_events"] == alpha["total_events"]
+    assert attended(archive_db, alpha["uuid"]) == 0  # nothing archived to B
+    assert player(archive_db, alpha["uuid"])["total_events"] == 0
 
 
 def test_archive_ignores_a_proof_reached_through_an_undone_merge(archive_db, event):  # noqa: F811
@@ -542,8 +571,12 @@ def test_undo_keeps_proofs_of_rows_that_never_moved(
     (R -> A, made before or after the merge) survives the Undo and archive keeps R on A."""
     b = seed_player(archive_db, "pw-kenji-b", name="Synthetic Kenji", telephone="0700000312")
     archive_db.seed_checkin(
-        event_slug=event, record_id="rec-keep-side", name="Synthetic Kenji", tag=None,
-        email=None, telephone=None,
+        event_slug=event,
+        record_id="rec-keep-side",
+        name="Synthetic Kenji",
+        tag=None,
+        email=None,
+        telephone=None,
     )
     if not_same_first:
         decide("rec-keep-side", kenji["uuid"], "not_same")  # creates A, proof R -> A
@@ -602,7 +635,8 @@ def test_an_automatic_link_keeps_the_old_archive_matching(archive_db, event):  #
     archive_db.seed_checkin(event_slug=event, tag="pw-second", player_uuid=first["uuid"])
     archive(event)
     assert [r["player_uuid"] for r in archived(archive_db, event)] == [second["uuid"]]
-    assert player(archive_db, first["uuid"])["total_events"] == first["total_events"]
+    assert attended(archive_db, first["uuid"]) == 0  # the stale automatic link is ignored
+    assert player(archive_db, first["uuid"])["total_events"] == 0
 
 
 def test_archive_without_a_merge_match_behaves_exactly_as_before(
