@@ -87,6 +87,39 @@ def _is_dev_tools_owner(auth_state=None) -> bool:
     return bool(user and user.get("is_dev"))
 
 
+def _event_expected_payment(settings, games, slug=None):
+    """Historical tariff basis is a snapshot fact, never inferred from the settings field name."""
+    from decimal import Decimal
+
+    read = getattr(storage_api, "get_event_payment_policy", None)
+    policy = read(slug or settings.get("active_event_slug")) if callable(read) else None
+    if not isinstance(policy, dict):
+        policy = {}
+    tariff = policy.get("event_price") or settings.get("event_price") or {}
+    if policy.get("require_payment") is False:
+        return 0
+    basis = tariff.get("basis")
+    if basis in {"person", "per_person", "game", "per_game"}:
+        count = 1
+        if basis in {"game", "per_game"}:
+            alias_reader = getattr(storage_api, "get_game_aliases", None)
+            aliases = alias_reader() if callable(alias_reader) else {}
+            aliases = aliases if isinstance(aliases, dict) else {}
+            count = len(
+                {
+                    aliases.get(str(game).strip().lower(), str(game).strip())
+                    for game in games
+                    if str(game).strip()
+                }
+            )
+        expected = Decimal(str(tariff["amount"])) * count
+    elif policy.get("historical"):
+        return None
+    else:
+        expected = Decimal(str(settings.get("swish_expected_per_game") or 0)) * max(len(games), 1)
+    return int(expected) if expected == expected.to_integral_value() else float(expected)
+
+
 def format_action_label(action: str) -> str:
     """Render friendly action names for the audit table."""
     if not action:
@@ -2268,6 +2301,143 @@ def register_callbacks(app):
             return visible, hidden, hidden
 
     @app.callback(
+        Output("insights-attention-title", "children"),
+        Output("insights-attention-list", "children"),
+        Input("tabs", "value"),
+        Input("btn-insights-refresh", "n_clicks"),
+        Input("insights-attention-refresh", "data"),
+        Input("duplicates-feedback", "children"),
+        Input("archive-feedback", "children"),
+    )
+    def load_stats_attention(selected_tab, _refresh, _resolved, _duplicates=None, _archive=None):
+        if selected_tab != "tab-insights":
+            raise PreventUpdate
+        read = getattr(storage_api, "get_stats_attention", None)
+        if read is None:
+            return "Things to check", "Unavailable on this data backend."
+        try:
+            queue = read()
+        except Exception:
+            logger.warning("Could not load statistics attention items")
+            return "Things to check", "Could not load the list. Refresh to try again."
+        owner = _is_dev_tools_owner()
+        items = []
+        button_style = {
+            "fontSize": "0.75rem",
+            "padding": "0.15rem 0.4rem",
+            "color": COLORS["accent_blue"],
+            "background": "transparent",
+            "border": f"1px solid {COLORS['border']}",
+            "borderRadius": "4px",
+            "cursor": "pointer",
+        }
+        labels = {
+            "acknowledge": "Acknowledge",
+            "not_recorded": "Mark not recorded",
+            "retry": "Recompute now",
+        }
+        for item in queue["issues"][:5]:
+            children = [
+                html.Span(
+                    f"{(item.get('event_name') or item.get('event_slug')) + ': ' if item.get('event_slug') not in (None, '*') else ''}{item['label']} "
+                )
+            ]
+            if item["action"] == "duplicates":
+                children.append(
+                    html.Button(
+                        "Open Duplicates",
+                        n_clicks=0,
+                        style=button_style,
+                        id={"type": "stats-attention-duplicates", "key": item["key"]},
+                    )
+                )
+            elif owner:
+                children.append(
+                    html.Button(
+                        labels[item["action"]],
+                        n_clicks=0,
+                        disabled=item["action"] == "retry" and queue.get("refresh_blocked", False),
+                        title=queue.get("refresh_tooltip", "") if item["action"] == "retry" else "",
+                        style=button_style,
+                        id={
+                            "type": "stats-attention-action",
+                            "key": item["key"],
+                            "fingerprint": item["fingerprint"],
+                            "action": item["action"],
+                        },
+                    )
+                )
+            items.append(html.Li(children))
+        content = html.Ul(items) if items else "Nothing needs checking."
+        if queue["count"] > 5:
+            content = html.Div(
+                [content, html.Small("Showing 5 items. Resolve these or refresh to see more.")]
+            )
+        return f"Things to check ({queue['count']})", content
+
+    @app.callback(
+        Output("insights-attention-feedback", "children"),
+        Output("insights-attention-refresh", "data"),
+        Output("btn-insights-refresh", "n_clicks"),
+        Input(
+            {"type": "stats-attention-action", "key": ALL, "fingerprint": ALL, "action": ALL},
+            "n_clicks",
+        ),
+        State("auth-store", "data"),
+        State("btn-insights-refresh", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def resolve_stats_attention(clicks, _client_auth, refresh_clicks=0):
+        if not any(clicks or []):
+            raise PreventUpdate
+        user = current_user() or {}
+        if not _is_dev_tools_owner():
+            return "Only the owner can resolve these items.", no_update, no_update
+        item = ctx.triggered_id
+        if not isinstance(item, dict):
+            raise PreventUpdate
+        try:
+            result = storage_api.resolve_stats_attention(
+                item["key"], item["fingerprint"], action=item["action"], user=user
+            )
+        except (ValueError, PermissionError) as error:
+            return str(error), no_update, no_update
+        except Exception:
+            logger.warning("Statistics attention action failed")
+            return "Could not save the resolution. Refresh to try again.", no_update, no_update
+        message = (
+            "Statistics still need an update. Try again after the problem is resolved."
+            if result.get("stale")
+            else "Saved."
+        )
+        return message, datetime.now(timezone.utc).isoformat(), (refresh_clicks or 0) + 1
+
+    @app.callback(
+        Output("insights-subtabs", "value"),
+        Input({"type": "stats-attention-duplicates", "key": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_attention_duplicates(clicks):
+        if not any(clicks or []):
+            raise PreventUpdate
+        return "duplicates"
+
+    @app.callback(
+        Output("btn-recompute-event-stats", "disabled"),
+        Output("btn-recompute-event-stats", "title"),
+        Input("tabs", "value"),
+        Input("settings-output", "children"),
+        Input("archive-feedback", "children"),
+        Input("reopen-feedback", "children"),
+    )
+    def update_recompute_admission(_tab, _settings=None, _archive=None, _reopen=None):
+        read = getattr(storage_api, "get_stats_refresh_admission", None)
+        admission = read() if callable(read) else {}
+        if not isinstance(admission, dict):
+            admission = {}
+        return bool(admission.get("blocked")), admission.get("tooltip", "")
+
+    @app.callback(
         Output("insights-games-table", "columns"),
         Input("insights-games-table", "data"),
         State("insights-games-table", "columns"),
@@ -2935,7 +3105,7 @@ def register_callbacks(app):
 
             table_rows.append(
                 {
-                    "event_display_name": ev.get("event_display_name") or ev.get("event_slug", ""),
+                    "event_display_name": (ev.get("event_display_name") or ev.get("event_slug", "")) + (" · Summary only (no rows)" if ev.get("summary_only") else ""),
                     "event_slug": ev_slug,
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
@@ -5861,21 +6031,20 @@ def register_callbacks(app):
         # Payment toggle should also set payment_amount/payment_expected so revenue is tracked.
         if col_id == "payment_valid" and stored_fields:
             settings = get_active_settings() or {}
-            try:
-                per_game = int(settings.get("swish_expected_per_game") or 0)
-            except Exception:
-                per_game = 0
-
             raw_games = stored_fields.get("tournament_games_registered")
-            if isinstance(raw_games, list):
-                game_count = len([g for g in raw_games if str(g or "").strip()])
-            elif isinstance(raw_games, str):
-                game_count = len([g for g in raw_games.split(",") if str(g or "").strip()])
-            else:
-                game_count = 0
-
-            expected_amount = per_game * max(game_count, 1)
-            if new_val:
+            games = (
+                raw_games
+                if isinstance(raw_games, list)
+                else (
+                    [g.strip() for g in raw_games.split(",") if g.strip()]
+                    if isinstance(raw_games, str)
+                    else []
+                )
+            )
+            expected_amount = _event_expected_payment(settings, games, stored_fields.get("event_slug"))
+            if expected_amount is None:
+                pass
+            elif new_val:
                 # Mark as paid: set amount to expected so archive revenue is correct.
                 update_data["payment_expected"] = expected_amount
                 update_data["payment_amount"] = expected_amount
@@ -6315,13 +6484,17 @@ def register_callbacks(app):
             old_games = [g.strip() for g in old_games.split(",") if g.strip()]
         if set(old_games) == set(games):
             return {"old_games": old_games}
+        new_expected = _event_expected_payment(settings, games, fields.get("event_slug"))
+        if new_expected is None:
+            return {
+                "old_games": old_games,
+                "new_expected": fields.get("payment_expected"),
+                "old_amount": fields.get("payment_amount"),
+                "fields": {"tournament_games_registered": list(games)},
+            }
         try:
-            per_game = int(settings.get("swish_expected_per_game") or 0)
-        except (TypeError, ValueError):
-            per_game = 0
-        new_expected = len(games) * per_game
-        try:
-            old_amount = int(float(fields.get("payment_amount") or 0))
+            old_amount = float(fields.get("payment_amount") or 0)
+            old_amount = int(old_amount) if old_amount.is_integer() else old_amount
         except (TypeError, ValueError):
             old_amount = 0
         base = {
@@ -7601,14 +7774,10 @@ def register_callbacks(app):
         if not n_clicks:
             return no_update
         if not _is_dev_tools_owner():
-            return html.Span(
-                "❌ Unauthorized: dev tools are owner-only.", style={"color": "#ef4444"}
-            )
+            return html.Span("❌ Unauthorized: dev tools are owner-only.", style={"color": "#ef4444"})
 
         if not selected_slug or selected_slug == "__ALL__":
-            return html.Span(
-                "❌ Select a specific event first.", style={"color": "#ef4444"}
-            )
+            return html.Span("❌ Select a specific event first.", style={"color": "#ef4444"})
 
         recompute_fn = getattr(storage_api, "recompute_event_stats", None)
         if not recompute_fn:
@@ -7618,6 +7787,17 @@ def register_callbacks(app):
             )
 
         try:
+            refresh = getattr(storage_api, "refresh_archive_stats", None)
+            if callable(refresh):
+                refreshed = refresh(user=auth_state)
+                if refreshed.get("deferred"):
+                    return html.Span("Runs after the event is archived", style={"color": "#f59e0b"})
+                if refreshed.get("stale"):
+                    return html.Span(
+                        "Statistics need an update. Retry after the problem is resolved.",
+                        style={"color": "#f59e0b"},
+                    )
+                return html.Span("Statistics recomputed.", style={"color": "#10b981"})
             result = recompute_fn(
                 selected_slug,
                 user={

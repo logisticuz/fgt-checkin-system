@@ -23,6 +23,18 @@ def archive_db(pg_db):
 
 
 @pytest.fixture
+def isolated_stats_locks(archive_db, monkeypatch):
+    """Canonical baseline refresh must not defer because another worker owns a global test key."""
+    from tests import test_lock_coverage as locks
+    from tests.test_stats_recompute import _StatsLockCursor
+
+    connections = locks._LockConnections(archive_db)
+    monkeypatch.setattr(locks, "_Cursor", _StatsLockCursor)
+    monkeypatch.setattr(archive_db, "pool", connections)
+    monkeypatch.setattr(postgres, "_get_pool", lambda: connections)
+
+
+@pytest.fixture
 def event(archive_db):
     slug = "test-archive-" + uuid.uuid4().hex
     archive_db.seed_settings(active_event_slug=slug, event_date="2026-11-07")
@@ -88,6 +100,8 @@ def test_rearchiving_the_same_active_ids_upserts_without_duplicate_rows(archive_
 def test_legacy_archive_rows_without_source_ids_are_never_replaced(archive_db, event):
     legacy_id = seed_archive(archive_db, event_slug=event, tag="legacy-test", payment_amount=99)
     legacy = table_rows(archive_db, "event_archive")[0]
+    # Declare an additive draft while the unmapped historical rows are untouched.
+    postgres.reopen_event(event, restore_active=False)
     archive_db.seed_checkin(event_slug=event)
     archive(event)
     archive(event)
@@ -100,17 +114,19 @@ def test_legacy_archive_rows_without_source_ids_are_never_replaced(archive_db, e
 def test_archive_failure_rolls_back_players_archive_and_active_changes(
     archive_db, event, monkeypatch
 ):
-    archive_db.seed_checkin(event_slug=event)
     seed_archive(archive_db, event_slug=event, tag="legacy-test")
+    postgres.reopen_event(event, restore_active=False)
+    archive_db.seed_checkin(event_slug=event)
     before = {
         table: table_rows(archive_db, table)
         for table in ("active_event_data", "event_archive", "players", "event_stats")
     }
 
-    def fail_stats(*args):
+    def fail_archive(*args, **kwargs):
         raise RuntimeError("Synthetic failure after copying rows")
 
-    monkeypatch.setattr(postgres, "compute_event_stats", fail_stats)
+    # Factual archive failures remain atomic; T067 separately degrades stats-only failures.
+    monkeypatch.setattr(postgres, "_finish_archive_edit", fail_archive)
     with pytest.raises(RuntimeError, match="Synthetic failure"):
         archive(event, clear_active=True)
     assert {table: table_rows(archive_db, table) for table in before} == before
@@ -335,8 +351,9 @@ def merge_data(archive_db):
 
 
 def test_undo_latest_unchanged_merge_restores_exact_rows_profiles_and_totals(
-    archive_db, merge_data
+    archive_db, merge_data, isolated_stats_locks
 ):
+    assert postgres.refresh_archive_stats()["stale"] is False
     before = {
         table: table_rows(archive_db, table)
         for table in ("players", "event_archive", "active_event_data")

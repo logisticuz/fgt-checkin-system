@@ -1932,6 +1932,18 @@ def create_layout():
                                                     "marginBottom": "0.75rem",
                                                 },
                                             ),
+                                            html.Details(
+                                                id="insights-attention-box",
+                                                style={"marginBottom": "0.75rem", "fontSize": "0.82rem",
+                                                       "background": COLORS["bg_card"], "padding": "0.55rem 0.75rem",
+                                                       "border": f"1px solid {COLORS['border']}", "borderRadius": "8px"},
+                                                children=[
+                                                    html.Summary(id="insights-attention-title", children="Things to check"),
+                                                    html.Div(id="insights-attention-list"),
+                                                    html.Div(id="insights-attention-feedback", role="status"),
+                                                    dcc.Store(id="insights-attention-refresh", data=0),
+                                                ],
+                                            ),
                                             dcc.Tabs(
                                                 id="insights-subtabs",
                                                 value="players",
