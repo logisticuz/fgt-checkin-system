@@ -431,7 +431,7 @@ def _verify_claim(attempt_id, code):
         return _reply(state="submitting")
     if status == "already_submitted":
         _update_member(attempt)
-        return _reply(ok=True, state="submitted")
+        return _state_response(store.get_attempt(attempt_id))
     if status == "invalid_code":
         latest = store.get_attempt(attempt_id)
         tries = max(0, 5 - _field(latest, "verify_attempts", 5))
@@ -502,17 +502,24 @@ async def _cleanup_loop():
 
 
 def _pending_reconciles():
-    with postgres_api._get_pool().connection() as connection:
-        rows = connection.execute(
-            "SELECT attempt.id FROM membership_attempts attempt "
-            "LEFT JOIN active_event_data checkin ON checkin.record_id = attempt.checkin_id "
-            "AND checkin.event_slug = attempt.event_slug "
-            "WHERE attempt.state = 'outcome_unknown' OR "
-            "(attempt.state = 'submitted' AND checkin.record_id IS NOT NULL "
-            "AND checkin.member IS NOT TRUE) "
-            "ORDER BY attempt.last_reconciled_at NULLS FIRST, attempt.id LIMIT 10"
+    with postgres_api._get_pool().connection() as connection, connection.transaction():
+        uncertain = connection.execute(
+            "SELECT id FROM membership_attempts WHERE state = 'outcome_unknown' "
+            "ORDER BY last_reconciled_at NULLS FIRST, created_at, id LIMIT 10"
         ).fetchall()
-    return [str(row[0]) for row in rows]
+        unresolved = connection.execute(
+            "SELECT id FROM membership_attempts WHERE state = 'submitted' "
+            "AND member_link_reconciled_at IS NULL "
+            "ORDER BY last_reconciled_at NULLS FIRST, created_at, id LIMIT 10 FOR UPDATE SKIP LOCKED"
+        ).fetchall()
+        if unresolved:
+            # Claim a fair place in the next cycle even if the subsequent link write fails.
+            connection.execute(
+                "UPDATE membership_attempts SET last_reconciled_at = clock_timestamp() "
+                "WHERE id = ANY(%s)",
+                ([item[0] for item in unresolved],),
+            )
+    return [str(item[0]) for item in [*uncertain, *unresolved]]
 
 
 def _recovery_timeout():

@@ -11,6 +11,7 @@ import pytest
 from shared import membership_store as store, postgres_api as postgres
 from tests.fixtures import make_checkin
 from tests.test_membership_endpoints import (
+    PNR,
     api,
     isolated_membership,
     member_client,
@@ -389,12 +390,25 @@ def test_submit_with_deleted_associated_checkin_needs_manual_review(
         )
 
 
-def test_standalone_membership_still_submits_without_a_checkin(
-    member_client, membership_db, sender
+def test_existing_standalone_membership_still_submits_without_a_checkin(
+    member_client, membership_db
 ):
-    attempt_id, _ = start_attempt(member_client, membership_db, checkin_id=None)
+    # T-035 requires ownership for new public starts; preexisting standalone attempts still finish.
+    attempt_id = store.create_attempt(
+        pnr=PNR,
+        contact="synthetic@example.invalid",
+        channel="email",
+        event_slug="test-standalone",
+        checkin_id=None,
+        code="123456",
+        bylaws_version="test",
+        privacy_version="test",
+        email="synthetic@example.invalid",
+        phone="+46701234567",
+        year=api._today().year,
+    )
     result = member_client.post(
-        "/api/membership/verify", json={"attempt_id": attempt_id, "code": sender.calls[-1]["code"]}
+        "/api/membership/verify", json={"attempt_id": attempt_id, "code": "123456"}
     )
     assert result.json()["state"] == "submitted"
 

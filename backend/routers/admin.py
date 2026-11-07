@@ -248,7 +248,6 @@ async def admin_bulk_recheck_startgg():
 
     checkins = get_checkins(slug=active_slug)
     requirements = compute_requirements(settings)
-    per_game = settings.get("swish_expected_per_game") or 0
 
     n8n_url = f"{N8N_INTERNAL}/webhook/startgg/check"
     n8n_headers = {"Content-Type": "application/json"}
@@ -308,14 +307,18 @@ async def admin_bulk_recheck_startgg():
                 result_data["email"] = startgg_email
                 emails_found += 1
 
-            apply_fn(
+            applied = apply_fn(
                 checkin_id=record_id,
                 source="startgg",
                 ok=True,
                 data=result_data,
                 state=result_state,
                 attempt_id=attempt_id,
+                recompute_payment_expected=True,
             )
+
+            if applied.get("state") == "stale_rejected":
+                continue
 
             # Recompute status
             updated = get_by_id(record_id)
@@ -328,9 +331,6 @@ async def admin_bulk_recheck_startgg():
             ready, _ = compute_ready_and_missing(status_dict, requirements)
             final_status = "Ready" if ready else "Pending"
             update_checkin(record_id, {"status": final_status})
-
-            if per_game and isinstance(events, list):
-                update_checkin(record_id, {"payment_expected": len(events) * per_game})
 
             checked += 1
 

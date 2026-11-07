@@ -9,3 +9,6 @@ ALTER TABLE active_event_data ADD COLUMN IF NOT EXISTS member_source TEXT
     CHECK (member_source IN ('v2', 'to', 'ebas_check'));
 ALTER TABLE event_archive ADD COLUMN IF NOT EXISTS member_source TEXT
     CHECK (member_source IN ('v2', 'to', 'ebas_check'));
+
+-- A submitted receipt stays recoverable until its member link or TO override is acknowledged.
+ALTER TABLE membership_attempts ADD COLUMN IF NOT EXISTS member_link_reconciled_at TIMESTAMPTZ;

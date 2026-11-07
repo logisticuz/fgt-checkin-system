@@ -92,7 +92,13 @@ def test_orchestrate_recomputes_status_after_real_integration_callbacks(
             ):
                 callback = await callback_client.post(
                     "/api/integration/result",
-                    json={"checkin_id": checkin_id, "source": source, "ok": True, "data": data},
+                    json={
+                        "checkin_id": checkin_id,
+                        "source": source,
+                        "ok": True,
+                        "data": data,
+                        "attempt_id": n8n_stub.calls[-1]["json"]["attempt_id"],
+                    },
                 )
                 assert callback.status_code == 200
 
