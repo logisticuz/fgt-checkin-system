@@ -534,6 +534,38 @@ def test_archive_ignores_a_proof_reached_through_an_undone_merge(archive_db, eve
             assert postgres._confirmed_row_survivor(cursor, row) is None
 
 
+@pytest.mark.parametrize("not_same_first", [True, False], ids=["not-same-first", "merge-first"])
+def test_undo_keeps_proofs_of_rows_that_never_moved(
+    archive_db, event, kenji, not_same_first  # noqa: F811
+):
+    """Round 5 P2: name-only R; "Keep check-in A vs B" never moves R, so R's Not-same proof
+    (R -> A, made before or after the merge) survives the Undo and archive keeps R on A."""
+    b = seed_player(archive_db, "pw-kenji-b", name="Synthetic Kenji", telephone="0700000312")
+    archive_db.seed_checkin(
+        event_slug=event, record_id="rec-keep-side", name="Synthetic Kenji", tag=None,
+        email=None, telephone=None,
+    )
+    if not_same_first:
+        decide("rec-keep-side", kenji["uuid"], "not_same")  # creates A, proof R -> A
+        merged = decide("rec-keep-side", b["uuid"], "keep_checkin")  # B into A; R stays
+    else:
+        merged = decide("rec-keep-side", b["uuid"], "keep_checkin")  # creates A, B into A
+        decide("rec-keep-side", kenji["uuid"], "not_same")  # proof R -> A
+    profile_a = merged["keep_uuid"]
+    assert row_of(archive_db, "rec-keep-side")["player_uuid"] == profile_a
+    entry = [r for r in table_rows(archive_db, "merge_log") if r["id"] == merged["merge_id"]][0]
+    assert "rec-keep-side" not in (entry["moved_active_ids"] or [])  # R never moved
+    postgres.undo_merge(int(merged["merge_id"]))
+    assert row_of(archive_db, "rec-keep-side")["player_uuid"] == profile_a
+
+    dismissals = table_rows(archive_db, "player_duplicate_dismissals")
+    proofs = [r["confirmed_rows"] or {} for r in dismissals]
+    assert any(p.get("rec-keep-side", {}).get("player") == profile_a for p in proofs)
+    assert "decision_proofs_invalidated" not in actions(archive_db)
+    archive(event)
+    assert [r["player_uuid"] for r in archived(archive_db, event)] == [profile_a]
+
+
 def test_the_decision_records_the_rows_it_covers(archive_db, event, kenji):  # noqa: F811
     record = check_in(event, "pw-kenjj")
     result = decide(record, kenji["uuid"], "keep_candidate")

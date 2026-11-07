@@ -3778,12 +3778,12 @@ def _confirmed_row_survivor(cur, checkin: Dict[str, Any]) -> Optional[str]:
             (record_id, record_id, current),
         )
         for decided_at, chosen in cur.fetchall():
-            # Defence in depth: a proof pointing at a profile the row only reached through
-            # a merge that is now undone does not count.
-            if chosen and _has_confirmed_rows(cur, "merge_log"):
+            # Defence in depth: a proof pointing at a profile the row only reached by being
+            # MOVED there in a merge that is now undone does not count.
+            if chosen:
                 cur.execute(
-                    "SELECT undone FROM merge_log WHERE keep_uuid = %s AND confirmed_rows ? %s "
-                    "ORDER BY id DESC LIMIT 1",
+                    "SELECT undone FROM merge_log WHERE keep_uuid = %s "
+                    "AND %s = ANY(moved_active_ids) ORDER BY id DESC LIMIT 1",
                     (chosen, record_id),
                 )
                 via = cur.fetchone()
@@ -6113,11 +6113,13 @@ def undo_merge(
 
 
 def _invalidate_proofs_after_undo(cur, entry: Dict[str, Any], user: Dict[str, Any]) -> None:
-    """T-068: once a merge is undone, later decision proofs for the check-ins it covered
-    that point at its survivor no longer hold (e.g. a "Not same" made while the row was on
-    the kept profile). Remove them in the undo's transaction and audit what was removed;
+    """T-068: once a merge is undone, later decision proofs for the check-ins it MOVED
+    (moved_active_ids: their uuid went from the removed profile to the survivor) that point
+    at its survivor no longer hold (e.g. a "Not same" made while the row was on the kept
+    profile). Rows that kept their uuid (the kept side, e.g. the clicked row of "Keep A")
+    are untouched. Remove them in the undo's transaction and audit what was removed;
     archive then matches those rows normally again (which finds the restored profile)."""
-    covered = sorted((entry.get("confirmed_rows") or {}).keys())
+    covered = sorted(entry.get("moved_active_ids") or [])
     if not covered:
         return
     merge_id, survivor = entry["id"], entry["keep_uuid"]
