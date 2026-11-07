@@ -1856,11 +1856,13 @@ def get_event_game_stats(
                 "total_count": 0,
                 "multi_game_count": 0,
                 "total_game_slots": 0,
+                "unknown_game_count": 0,
                 "metadata_complete": True,
             },
         )
         stats["total_count"] += 1
         if not isinstance(raw_games, (list, tuple)):
+            stats["unknown_game_count"] += 1
             stats["metadata_complete"] = False
             continue
         games = set()
@@ -1937,8 +1939,14 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
 
         canonical_breakdown = _canonical_game_breakdown(games_breakdown, aliases)
         archived_games = game_stats.get(event_slug)
-        if archived_games and archived_games["metadata_complete"]:
+        if archived_games:
             canonical_breakdown = archived_games["games_breakdown"]
+        unknown_game_count = (
+            archived_games["unknown_game_count"]
+            + max(int(total_participants or 0) - archived_games["total_count"], 0)
+            if archived_games
+            else 0
+        )
         alias_labels = {
             canonical: set(labels)
             for canonical, labels in (archived_games or {}).get("game_aliases", {}).items()
@@ -1952,7 +1960,7 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
             if canonical_breakdown
             else (
                 (_canonical_game_name(most_popular_game, aliases) or None)
-                if not archived_games or not archived_games["metadata_complete"]
+                if not archived_games
                 else None
             )
         )
@@ -1972,6 +1980,7 @@ def get_event_history_dashboard() -> List[Dict[str, Any]]:
                 "returning_players": returning_players,
                 "retention_rate": retention_rate,
                 "games_breakdown": canonical_breakdown,
+                "unknown_game_count": unknown_game_count,
                 "game_aliases": {
                     key: sorted(value, key=str.lower) for key, value in alias_labels.items()
                 },

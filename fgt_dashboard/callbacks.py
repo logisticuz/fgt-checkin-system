@@ -2199,6 +2199,7 @@ def register_callbacks(app):
             weighted_retention_den = 0
             top_game_counts = {}
             slots = 0
+            unknown_games = 0
             new_players = 0
             returning_players = 0
             startgg_registered_total = 0
@@ -2208,6 +2209,7 @@ def register_callbacks(app):
             for ev in event_rows:
                 ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
                 total += ev_total
+                unknown_games += min(max(_as_int(ev.get("unknown_game_count")), 0), ev_total)
                 total_revenue += _as_float(ev.get("total_revenue"))
                 member_count += _as_int(ev.get("member_count"))
                 guest_count += _as_int(ev.get("guest_count"))
@@ -2267,6 +2269,8 @@ def register_callbacks(app):
                 ),
                 "top_game_counts": top_game_counts,
                 "slots": slots,
+                "unknown_games": unknown_games,
+                "game_participants": max(total - unknown_games, 0),
                 "startgg_registered_total": startgg_registered_total,
                 "checked_in_total": checked_in_total,
                 "no_show_total": no_show_total,
@@ -2475,8 +2479,11 @@ def register_callbacks(app):
         )
         retention = metrics["retention"]
         slots = _as_int(metrics.get("slots"))
-        avg_games = (slots / metrics["total"]) if metrics["total"] > 0 else 0.0
-        multigame_pct = (multi_game_count / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+        game_participants = metrics["game_participants"]
+        avg_games = (slots / game_participants) if game_participants > 0 else 0.0
+        multigame_pct = (
+            (multi_game_count / game_participants * 100) if game_participants > 0 else 0.0
+        )
         new_players = _as_int(metrics.get("new_players"))
         returning_players = _as_int(metrics.get("returning_players"))
         noshow_rate = _as_float(metrics.get("no_show_rate"))
@@ -2682,8 +2689,8 @@ def register_callbacks(app):
         avggames_delta = _fmt_delta(
             avg_games,
             (
-                (_as_int(prev_metrics.get("slots")) / prev_metrics["total"])
-                if prev_metrics and prev_metrics["total"] > 0
+                (_as_int(prev_metrics.get("slots")) / prev_metrics["game_participants"])
+                if prev_metrics and prev_metrics["game_participants"] > 0
                 else None
             ),
             "count1",
@@ -2691,14 +2698,21 @@ def register_callbacks(app):
         multigame_delta = _fmt_delta(
             multigame_pct,
             (
-                (prev_multi_game_count / prev_metrics["total"] * 100)
+                (prev_multi_game_count / prev_metrics["game_participants"] * 100)
                 if (
-                    prev_metrics and prev_metrics["total"] > 0 and prev_multi_game_count is not None
+                    prev_metrics
+                    and prev_metrics["game_participants"] > 0
+                    and prev_multi_game_count is not None
                 )
                 else None
             ),
             "pp",
         )
+        if metrics["unknown_games"]:
+            known_games_note = f"Known games only; unknown: {metrics['unknown_games']} check-ins"
+            slots_delta = known_games_note
+            avggames_delta = known_games_note
+            multigame_delta = known_games_note
         new_delta = _fmt_delta(
             new_players,
             _as_int(prev_metrics.get("new_players")) if prev_metrics else None,
@@ -3167,6 +3181,8 @@ def register_callbacks(app):
                 }
             )
         games_title = f"Game distribution ({len(games_rows)} shown)"
+        if metrics["unknown_games"]:
+            games_title += f" • unknown games: {metrics['unknown_games']} check-ins"
 
         # Game trend figure (top games across selected events)
         trend_events = sorted(
@@ -3377,8 +3393,8 @@ def register_callbacks(app):
             table_rows,
             earnings_rows,
             str(slots),
-            f"{avg_games:.1f}",
-            f"{multigame_pct:.1f}%",
+            "-" if metrics["unknown_games"] and not game_participants else f"{avg_games:.1f}",
+            "-" if metrics["unknown_games"] and not game_participants else f"{multigame_pct:.1f}%",
             str(new_players),
             str(returning_players),
             f"{noshow_rate:.1f}%",
@@ -3571,14 +3587,29 @@ def register_callbacks(app):
         crossover_rows = crossover_rows or []
         events_rows = events_rows or []
         options = [{"label": "All games", "value": "all"}]
+        aliases = {}
+        try:
+            aliases_fn = getattr(storage_api, "get_game_aliases", None)
+            loaded_aliases = aliases_fn() if aliases_fn else {}
+            if isinstance(loaded_aliases, dict):
+                aliases = {
+                    str(key).strip().lower(): str(value).strip()
+                    for key, value in loaded_aliases.items()
+                }
+        except Exception:
+            logger.warning("Failed to load game aliases for attendance filter")
 
         seen = set()
 
+        def _canonical_name(name):
+            raw = str(name or "").strip()
+            return aliases.get(raw.lower(), raw)
+
         def _add_option(game_name: Any):
-            game = str(game_name or "").strip()
-            if not game or game in seen or game == "-":
+            game = _canonical_name(game_name)
+            if not game or game.lower() in seen or game == "-":
                 return
-            seen.add(game)
+            seen.add(game.lower())
             options.append({"label": game, "value": game})
 
         for row in games_rows:
@@ -3599,14 +3630,14 @@ def register_callbacks(app):
 
         # Fallback canonical games so dropdown never collapses to only "All games".
         for fallback_game in [
-            "SSBU Singles",
-            "STREET FIGHTER 6 TOURNAMENT",
-            "TEKKEN 8 TOURNAMENT",
+            "Super Smash Bros. Ultimate",
+            "Street Fighter 6",
+            "TEKKEN 8",
         ]:
             _add_option(fallback_game)
 
         valid_values = {str(o.get("value")) for o in options}
-        selected_value = str(current_value or "all")
+        selected_value = _canonical_name(current_value or "all")
         if selected_value not in valid_values:
             selected_value = "all"
 

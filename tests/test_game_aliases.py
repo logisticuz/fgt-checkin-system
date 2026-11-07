@@ -194,6 +194,92 @@ def test_games_overview_and_alias_notes_use_canonical_names(history, dashboard, 
     assert facts(history) == before
 
 
+@pytest.mark.parametrize(
+    "known_games, other_games, unknown, expected_games, average, multi_share",
+    [
+        (["SF6", "SF6 TOURNAMENT"], None, 1, {SF6: 1}, "1.0", "0.0%"),
+        (["SF6", "SF6 TOURNAMENT"], [], 0, {SF6: 1}, "0.5", "0.0%"),
+        (["SF6", "SF6 TOURNAMENT", GG], None, 1, {SF6: 1, GG: 1}, "2.0", "100.0%"),
+        (None, None, 2, {}, "-", "-"),
+        ([], None, 1, {}, "0.0", "0.0%"),
+    ],
+    ids=["mixed-null", "known-empty", "mixed-multigame", "all-unknown", "empty-and-null"],
+)
+def test_unknown_game_rows_preserve_known_dedup_and_report_coverage(
+    archive_db,
+    dashboard,
+    monkeypatch,
+    known_games,
+    other_games,
+    unknown,
+    expected_games,
+    average,
+    multi_share,
+):
+    for games in (known_games, other_games):
+        seed_archive(archive_db, event_slug="event-a", tournament_games_registered=games)
+    archive_db.insert(
+        "event_stats",
+        {
+            "event_slug": "event-a",
+            "total_participants": 2,
+            "games_breakdown": {"SF6": 1, "SF6 TOURNAMENT": 1},
+            "most_popular_game": "SF6",
+        },
+    )
+    before = facts(archive_db)
+    stats = postgres.get_event_game_stats(["event-a"])["event-a"]
+    assert stats["games_breakdown"] == expected_games
+    assert stats["unknown_game_count"] == unknown
+    assert stats["total_game_slots"] == sum(expected_games.values())
+    assert stats["metadata_complete"] is (unknown == 0)
+    event = postgres.get_event_history_dashboard()[0]
+    assert event["games_breakdown"] == expected_games
+    assert event["unknown_game_count"] == unknown
+    if expected_games:
+        assert event["most_popular_game"] in expected_games
+    else:
+        assert event["most_popular_game"] is None
+    wire_reads(dashboard, monkeypatch)
+    output = insights(dashboard)
+    assert {
+        row["game"]: row["entries"] for row in output[("insights-games-table", "data")]
+    } == expected_games
+    assert output[("insights-kpi-total", "children")] == "2"
+    assert output[("insights-kpi-avggames", "children")] == average
+    assert output[("insights-kpi-multigame", "children")] == multi_share
+    if unknown:
+        assert f"unknown games: {unknown} check-ins" in output[("insights-games-title", "children")]
+        assert (
+            f"unknown: {unknown} check-ins" in output[("insights-kpi-avggames-delta", "children")]
+        )
+    assert facts(archive_db) == before
+
+
+@pytest.mark.parametrize(
+    "selected, expected", [("sf6", SF6), ("Doubles", DOUBLES), ("absent", "all")]
+)
+def test_top_players_dropdown_deduplicates_canonical_games_and_restores_alias_selection(
+    history, dashboard, monkeypatch, selected, expected
+):
+    wire_reads(dashboard, monkeypatch)
+    options, value = dashboard.callbacks["sync_top_players_game_filter_options"](
+        [{"game": SF6}, {"game": "SF6 TOURNAMENT"}, {"game": "Doubles"}],
+        [{"game_a": "GUILTY GEAR STRIVE", "game_b": "STREET FIGHTER 6 TOURNAMENT"}],
+        [{"top_game": "SSBU SINGLES"}, {"top_game": "t8"}],
+        selected,
+    )
+    expected_names = {"all", SF6, GG, SMASH, DOUBLES, "TEKKEN 8"}
+    assert {option["value"] for option in options} == expected_names
+    assert len(options) == len(expected_names)
+    assert all(option["label"] == option["value"] for option in options[1:])
+    assert value == expected
+    fallback_options, _ = dashboard.callbacks["sync_top_players_game_filter_options"](
+        [], [], [], "all"
+    )
+    assert {option["value"] for option in fallback_options} == {"all", SF6, SMASH, "TEKKEN 8"}
+
+
 def test_alias_note_markdown_treats_unknown_labels_as_text(history, dashboard, monkeypatch):
     wire_reads(dashboard, monkeypatch)
     unsafe = "[bracket](https://example.invalid) <img> *game*"
