@@ -4042,6 +4042,24 @@ class ArchiveError(ValueError):
     """Archiving cannot complete without discarding or guessing event data."""
 
 
+def _merge_archive_fingerprints_match(conn, players, expected, *, lock=False):
+    """Accept pre-013 hashes only while the added arrival time remains unknown."""
+    rows = conn.execute(
+        """SELECT id, md5(to_jsonb(a)::text),
+                  CASE WHEN to_jsonb(a)->>'checked_in_at' IS NULL
+                       THEN md5((to_jsonb(a) - 'checked_in_at')::text) END
+           FROM event_archive a WHERE player_uuid = ANY(%s) ORDER BY id"""
+        + (" FOR UPDATE" if lock else ""),
+        (players,),
+    ).fetchall()
+    if not isinstance(expected, list) or len(rows) != len(expected):
+        return False
+    return all(
+        recorded == [row_id, current] or (legacy is not None and recorded == [row_id, legacy])
+        for (row_id, current, legacy), recorded in zip(rows, expected)
+    )
+
+
 def _merge_refresh_baseline(conn):
     """Only extend an unchanged newest undo fingerprint across our own derived writes."""
     row = conn.execute(
@@ -4059,17 +4077,15 @@ def _merge_refresh_baseline(conn):
     ).fetchall()
     if profiles != [(keep, after.get("player"))]:
         return None
-    for table, key, field in (
-        ("event_archive", "id", "archive"),
-        ("active_event_data", "record_id", "active"),
-    ):
-        rows = conn.execute(
-            f"SELECT {key}, md5(to_jsonb(t)::text) FROM {table} t "
-            f"WHERE player_uuid = ANY(%s) ORDER BY {key}",
-            ([keep, removed],),
-        ).fetchall()
-        if [list(value) for value in rows] != after.get(field):
-            return None
+    if not _merge_archive_fingerprints_match(conn, [keep, removed], after.get("archive")):
+        return None
+    rows = conn.execute(
+        "SELECT record_id, md5(to_jsonb(t)::text) FROM active_event_data t "
+        "WHERE player_uuid = ANY(%s) ORDER BY record_id",
+        ([keep, removed],),
+    ).fetchall()
+    if [list(value) for value in rows] != after.get("active"):
+        return None
     return merge_id, keep, before
 
 
@@ -7276,12 +7292,9 @@ def undo_merge(
             )
             if cur.fetchall() != [(keep_uuid, after.get("player"))]:
                 raise ValueError("Players changed after this merge")
-            cur.execute(
-                """SELECT id, md5(to_jsonb(a)::text) FROM event_archive a
-                   WHERE player_uuid = ANY(%s) ORDER BY id FOR UPDATE""",
-                ([keep_uuid, remove_uuid],),
-            )
-            if [list(row) for row in cur.fetchall()] != after.get("archive"):
+            if not _merge_archive_fingerprints_match(
+                conn, [keep_uuid, remove_uuid], after.get("archive"), lock=True
+            ):
                 raise ValueError("Player archive rows changed after this merge")
             cur.execute(
                 """SELECT record_id, md5(to_jsonb(a)::text) FROM active_event_data a
