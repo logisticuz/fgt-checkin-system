@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.conftest import BACKEND_DIR, BASE_URL, TABLET, synthetic_personnummer
 
@@ -332,3 +333,68 @@ def test_storage_is_purged_right_before_the_redirect(checkin):
     page.click(".btn-submit")
     page.wait_for_selector("#next-page")
     assert page.evaluate("localStorage.length") == 0
+
+
+# --- Tag hint (T-047) --------------------------------------------------------------------
+
+HINT = "Use exactly the same tag as on Start.gg"
+VIEWPORTS = {
+    "mobile-375x812": ({"width": 375, "height": 812}, "/"),
+    "desktop-1280x800": ({"width": 1280, "height": 800}, "/"),
+    "kiosk-tablet-820x1180": (TABLET, "/kiosk"),
+}
+
+
+def hint_shot(page, name):
+    folder = screens_dir()
+    if folder:
+        folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / f"{name}.png"), full_page=True, animations="disabled")
+
+
+@pytest.mark.parametrize("view", list(VIEWPORTS), ids=list(VIEWPORTS))
+def test_tag_hint_is_visible_quiet_and_linked(checkin, view):
+    viewport, path = VIEWPORTS[view]
+    page, _ = checkin([(200, NOT_READY)], path=path, viewport=viewport)
+    hint_shot(page, f"T-047-{view}")  # before the asserts, so a baseline run still captures it
+    hint = page.locator("#tag-hint")
+    assert hint.is_visible() and hint.inner_text() == HINT
+    expect(page.locator("#tag")).to_have_accessible_description(HINT)
+
+    box = page.evaluate(
+        """() => {
+          const hint = document.getElementById('tag-hint');
+          const tag = document.getElementById('tag').getBoundingClientRect();
+          const next = document.getElementById('personnummer-group').getBoundingClientRect();
+          const r = hint.getBoundingClientRect();
+          const css = getComputedStyle(hint);
+          return {top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height,
+                  line: parseFloat(css.lineHeight), color: css.color,
+                  tagBottom: tag.bottom, tagLeft: tag.left, tagRight: tag.right,
+                  nextTop: next.top, scroll: document.documentElement.scrollWidth,
+                  width: window.innerWidth};
+        }"""
+    )
+    # One line, directly under the field, inside its column, before the next field.
+    assert box["height"] <= box["line"] * 1.2, box
+    assert 0 <= box["top"] - box["tagBottom"] <= 12, box
+    assert box["left"] >= box["tagLeft"] - 1 and box["right"] <= box["tagRight"] + 1, box
+    assert box["bottom"] <= box["nextTop"], box
+    assert box["scroll"] <= box["width"], "horizontal overflow"
+    assert box["color"] == "rgb(154, 164, 174)", box  # muted, never error red
+
+
+def test_tag_hint_stays_quieter_than_a_validation_error(checkin):
+    page, _ = checkin(
+        [(400, {"detail": {"errors": ["Tag too long"]}})], viewport={"width": 375, "height": 812}
+    )
+    fill_basics(page)
+    page.click(".btn-submit")
+    page.wait_for_selector("#error-container.show")
+    hint_shot(page, "T-047-mobile-375x812-with-error")
+    colors = page.evaluate(
+        """() => [getComputedStyle(document.getElementById('tag-hint')).color,
+                  getComputedStyle(document.querySelector('#error-container')).color]"""
+    )
+    assert colors[0] != colors[1]
+    assert page.inner_text("#tag-hint") == HINT  # the hint never turns into an error message
