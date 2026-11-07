@@ -293,6 +293,26 @@ def test_security_headers_and_tls_only_hsts(public):
             )
 
 
+@pytest.mark.parametrize(
+    ("filename", "hostname"),
+    [
+        ("nginx.conf", "www.checkin.fgctrollhattan.se"),
+        ("nginx.conf", "admin.fgctrollhattan.se"),
+        ("nginx.dev.conf", "localhost"),
+    ],
+)
+def test_favicon_is_an_exact_quiet_no_content_response(filename, hostname):
+    config = parse((ROOT / filename).read_text(encoding="utf-8"))
+    block = server(config, hostname)
+    selected = next(
+        children for words, children in block if words == ["location", "=", "/favicon.ico"]
+    )
+    assert directives(selected, "return") == [["204"]]
+    assert directives(selected, "access_log") == [["off"]]
+    assert not directives(selected, "proxy_pass")
+    assert not directives(selected, "auth_basic")
+
+
 def test_prod_auth_cookie_oauth_renewal_and_optional_siblings():
     text = (ROOT / "nginx.conf").read_text(encoding="utf-8")
     config = parse(text)
@@ -379,6 +399,10 @@ def test_dev_only_dash_exceptions_never_leak_to_prod():
         ("/auth/me", "synthetic", 200, False),
         ("/api/events/stream", "synthetic", 200, False),
         ("/api/events/stream/child", "synthetic", 200, False),
+        ("/favicon.ico", "", 204, False),
+        ("/favicon.ico", "synthetic", 204, False),
+        ("/future-open-route", "synthetic", 200, False),
+        ("/assets/new-open-asset", "synthetic", 200, False),
     ],
 )
 def test_bypass_cookie_requires_success_on_a_basic_gated_route(path, user, status, issues_cookie):
@@ -407,6 +431,8 @@ def test_bypass_cookie_requires_success_on_a_basic_gated_route(path, user, statu
         == ["map", "$admin_basic_cookie_path:$remote_user:$status", "$admin_auth_set_cookie"]
     )
     eligible = map_value(path_map, path)
+    assert directives(path_map, "default") == [["0"]]
+    assert directives(path_map, "/favicon.ico") == [["0"]]
     assert bool(map_value(cookie_map, f"{eligible}:{user}:{status}")) == issues_cookie
 
 

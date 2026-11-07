@@ -173,6 +173,16 @@ docker exec "$gateway" nginx -t
 docker exec "$gateway" nginx -s reload
 public=www.checkin.fgctrollhattan.se
 admin=admin.fgctrollhattan.se
+for host in "$public" "$admin"; do request 204 "$host" /favicon.ico GET; done
+if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+    echo 'Anonymous favicon must not issue an admin bypass cookie' >&2; exit 1
+fi
+request 204 "$admin" /favicon.ico GET --user synthetic:wrong-password \
+    --cookie-jar "$(native_path "$scratch/favicon-cookies")"
+if tr -d '\r' < "$scratch/headers" | grep -Eiq '^Set-Cookie: fgc_admin_auth='; then
+    echo 'Favicon must not mint an admin cookie from invalid Basic headers' >&2; exit 1
+fi
+request 401 "$admin" / GET --cookie "$(native_path "$scratch/favicon-cookies")"
 for path in "${denied[@]}" /api/events/stream /admin/ /_dash-layout /assets/style.css; do
     request 404 "$public" "$path" GET; security_headers
 done
@@ -341,6 +351,7 @@ finally:
 
 dev_connection = http.client.HTTPConnection(sys.argv[2], 80, timeout=8)
 try:
+    assert send(dev_connection, "/favicon.ico", host_header="localhost") == 204
     pages = [send(dev_connection, "/kiosk", host_header="localhost") for _ in range(200)]
     assert 429 in pages, Counter(pages)
     callbacks = [send(dev_connection, "/_dash-update-component", "POST", host_header="localhost") for _ in range(200)]

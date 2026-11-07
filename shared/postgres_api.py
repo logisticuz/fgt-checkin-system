@@ -357,6 +357,16 @@ def update_settings(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str
     if not columns:
         return None
 
+    # Slug-only selection must not carry names from a different event.
+    if fields and "active_event_slug" in fields:
+        for name_field in ("event_display_name", "tournament_name"):
+            if name_field not in fields:
+                columns.append(
+                    f"{name_field} = CASE WHEN active_event_slug IS DISTINCT FROM %s "
+                    f"THEN NULL ELSE {name_field} END"
+                )
+                values.append(_settings_value("active_event_slug", fields["active_event_slug"]))
+
     values.append(record_id_int)
 
     columns_out = None
@@ -3667,7 +3677,9 @@ def archive_event(
                     cur.execute(
                         """
                         UPDATE settings
-                        SET active_event_slug = NULL
+                        SET active_event_slug = NULL,
+                            event_display_name = NULL,
+                            tournament_name = NULL
                         WHERE is_active = true
                           AND active_event_slug = %s
                         """,
@@ -3802,7 +3814,8 @@ def reopen_event(
                     UPDATE settings
                     SET is_active = true,
                         active_event_slug = %s,
-                        event_display_name = COALESCE(NULLIF(%s, ''), event_display_name),
+                        event_display_name = NULLIF(%s, ''),
+                        tournament_name = NULLIF(%s, ''),
                         event_date = COALESCE(%s::date, event_date),
                         startgg_event_url = NULL,
                         events_json = NULL,
@@ -3811,6 +3824,7 @@ def reopen_event(
                     """,
                     (
                         event_slug,
+                        event_display_name or "",
                         event_display_name or "",
                         event_date_value,
                         settings_id,

@@ -103,17 +103,17 @@ def test_ready_page_hides_all_success_ui_until_the_id_confirms(app_templates):  
     tags = SUCCESS_TAGS.findall(html)
     assert len(tags) == 7  # ✓, Ready, heading, tag, thank-you, games, member offer
     assert all(tag.endswith(" hidden>") for tag in tags), tags
-    assert "<audio id=\"readySound\">" in html  # no autoplay before confirmation
+    assert "<audio" not in html  # visual confirmation does not request a missing sound
     assert "Confirming your check-in…" in html
 
 
-def test_ready_page_without_capability_shows_success_and_sound_as_before(
+def test_ready_page_without_capability_shows_success_without_a_missing_sound(
     app_templates,
 ):  # noqa: F811
     html = render(app_templates, "status_ready.html", games=["G"])
     tags = SUCCESS_TAGS.findall(html)
     assert tags and not any(" hidden" in tag for tag in tags)
-    assert "<audio id=\"readySound\" autoplay>" in html
+    assert "<audio" not in html and "clear.mp3" not in html
     assert "status-check-notice\"" not in html.split("</style>")[1]
 
 

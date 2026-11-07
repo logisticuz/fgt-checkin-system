@@ -324,20 +324,10 @@
     </footer>
   </div>
 
-  <audio id="readySound"{% if not (checkin_id and status_token) %} autoplay{% endif %}>
-    <source src="/static/clear.mp3" type="audio/mpeg">
-  </audio>
-
   <script>
-    const audioEl = document.getElementById("readySound");
-    audioEl.volume = 0.7;
-    audioEl.addEventListener("error", () => {
-      console.warn("Could not play confirmation sound");
-    });
-
 {% if checkin_id and status_token %}
     // T-032: the server may still pick this template by name. With a capability, every success
-    // signal (✓, Ready, heading, tag, games, sound) stays hidden until the id lookup positively
+    // signal (✓, Ready, heading, tag, games) stays hidden until the id lookup positively
     // confirms ready; any other outcome shows a warning instead.
     (async function confirmById() {
       const notice = document.getElementById("status-check-notice");
@@ -349,7 +339,6 @@
       const reveal = () => {
         document.querySelectorAll("[data-success]").forEach((el) => { el.hidden = false; });
         notice.hidden = true;
-        audioEl.play().catch(() => { /* autoplay may be blocked; the visual is enough */ });
       };
       const unconfirmed = "We couldn't confirm your check-in right now – ask a TO.";
       let res;
