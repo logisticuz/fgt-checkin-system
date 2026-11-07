@@ -2257,7 +2257,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Returning",
+                                                                "Returning visits",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -2437,7 +2437,7 @@ def create_layout():
                                                                 },
                                                             ),
                                                             html.P(
-                                                                "Retention",
+                                                                "Familiar faces",
                                                                 style=STYLES["stat_label"],
                                                             ),
                                                             html.P(
@@ -3361,8 +3361,12 @@ def create_layout():
                                                                         "id": "total_revenue",
                                                                     },
                                                                     {
-                                                                        "name": "Retention %",
+                                                                        "name": "Familiar faces %",
                                                                         "id": "retention_rate",
+                                                                    },
+                                                                    {
+                                                                        "name": "Came back from previous (same series) %",
+                                                                        "id": "same_series_return_rate",
                                                                     },
                                                                     {
                                                                         "name": "Start.gg Accounts (excl guests) %",

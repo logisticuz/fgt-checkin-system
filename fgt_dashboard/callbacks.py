@@ -2191,6 +2191,9 @@ def register_callbacks(app):
             total = 0
             total_revenue = 0.0
             member_count = 0
+            member_base = 0
+            membership_unknown = False
+            member_data_missing = False
             guest_count = 0
             startgg_count = 0
             startgg_account_count = 0
@@ -2205,13 +2208,22 @@ def register_callbacks(app):
             startgg_registered_total = 0
             checked_in_total = 0
             no_show_total = 0
+            no_show_unknown = False
 
             for ev in event_rows:
                 ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
                 total += ev_total
                 unknown_games += min(max(_as_int(ev.get("unknown_game_count")), 0), ev_total)
                 total_revenue += _as_float(ev.get("total_revenue"))
-                member_count += _as_int(ev.get("member_count"))
+                membership = (ev.get("requirements_snapshot") or {}).get("require_membership")
+                if membership is True:
+                    if (ev.get("requirements_snapshot") or {}).get("member_data_recorded") is False:
+                        member_data_missing = True
+                    else:
+                        member_count += _as_int(ev.get("member_count"))
+                        member_base += ev_total
+                elif membership is None:
+                    membership_unknown = True
                 guest_count += _as_int(ev.get("guest_count"))
                 startgg_count += _as_int(ev.get("startgg_count"))
                 new_players += _as_int(ev.get("new_players"))
@@ -2225,9 +2237,8 @@ def register_callbacks(app):
                 if isinstance(status_breakdown, dict):
                     ready_count += _as_int(status_breakdown.get("Ready"))
 
-                retention_val = _as_float(ev.get("retention_rate"))
-                if ev_total > 0:
-                    weighted_retention_sum += retention_val * ev_total
+                if ev.get("retention_rate") is not None and ev_total > 0:
+                    weighted_retention_sum += _as_float(ev.get("retention_rate")) * ev_total
                     weighted_retention_den += ev_total
 
                 breakdown = ev.get("games_breakdown")
@@ -2239,12 +2250,13 @@ def register_callbacks(app):
                         top_game_counts[game] = top_game_counts.get(game, 0) + cnt
                         slots += cnt
 
-                # No-show aggregation (prefer player count, fall back to slot count)
-                reg_players = _as_int(ev.get("startgg_registered_players"))
-                reg_slots = _as_int(ev.get("startgg_registered_count"))
-                startgg_registered_total += reg_players or reg_slots
-                checked_in_total += _as_int(ev.get("checked_in_count"))
-                no_show_total += _as_int(ev.get("no_show_count"))
+                # Slots cannot supply a unique-person no-show denominator.
+                if ev.get("startgg_registered_players") is None or ev.get("no_show_count") is None:
+                    no_show_unknown = True
+                else:
+                    startgg_registered_total += _as_int(ev.get("startgg_registered_players"))
+                    checked_in_total += _as_int(ev.get("checked_in_count"))
+                    no_show_total += _as_int(ev.get("no_show_count"))
 
             no_show_rate_agg = (
                 (no_show_total / startgg_registered_total * 100)
@@ -2256,6 +2268,9 @@ def register_callbacks(app):
                 "total": total,
                 "revenue": total_revenue,
                 "member_count": member_count,
+                "member_base": member_base,
+                "membership_unknown": membership_unknown,
+                "member_data_missing": member_data_missing,
                 "guest_count": guest_count,
                 "startgg_count": startgg_count,
                 "startgg_account_count": startgg_account_count,
@@ -2265,7 +2280,7 @@ def register_callbacks(app):
                 "retention": (
                     (weighted_retention_sum / weighted_retention_den)
                     if weighted_retention_den > 0
-                    else 0.0
+                    else None
                 ),
                 "top_game_counts": top_game_counts,
                 "slots": slots,
@@ -2274,7 +2289,7 @@ def register_callbacks(app):
                 "startgg_registered_total": startgg_registered_total,
                 "checked_in_total": checked_in_total,
                 "no_show_total": no_show_total,
-                "no_show_rate": no_show_rate_agg,
+                "no_show_rate": None if no_show_unknown else no_show_rate_agg,
             }
 
         table_rows = []
@@ -2369,12 +2384,18 @@ def register_callbacks(app):
         for ev in selected_events:
             ev_total = _as_int(ev.get("total_participants") or ev.get("participants"))
             ev_checked_in = _as_int(ev.get("checked_in_count"))
-            ev_registered = _as_int(ev.get("startgg_registered_players")) or _as_int(
-                ev.get("startgg_registered_count")
-            )
+            ev_registered = _as_int(ev.get("startgg_registered_players"))
+            membership = (ev.get("requirements_snapshot") or {}).get("require_membership")
             ev_member_rate = (
                 (_as_int(ev.get("member_count")) / ev_total * 100) if ev_total > 0 else 0.0
             )
+            member_text = (
+                f"{ev_member_rate:.0f}%"
+                if membership is True
+                else "– (not required)" if membership is False else "– (unknown)"
+            )
+            if membership is True and (ev.get("requirements_snapshot") or {}).get("member_data_recorded") is False:
+                member_text = "– (not recorded)"
             ev_startgg_rate = (
                 (
                     max(_as_int(ev.get("startgg_count")) - _as_int(ev.get("guest_count")), 0)
@@ -2430,19 +2451,28 @@ def register_callbacks(app):
                     "event_slug": ev_slug,
                     "event_date": ev.get("event_date") or "",
                     "total_participants": ev_total,
-                    "no_show_rate": round(ev_no_show_rate, 1),
-                    "no_show_count": ev_no_show,
-                    "event_quality": f"{quality_level} [{quality_rank}] ({event_quality_score:.0f})",
+                    "no_show_rate": (
+                        round(ev_no_show_rate, 1) if ev.get("no_show_rate") is not None else "–"
+                    ),
+                    "no_show_count": ev_no_show if ev.get("no_show_count") is not None else "–",
+                    "event_quality": (
+                        f"{quality_level} [{quality_rank}] ({event_quality_score:.0f})"
+                        if ev.get("retention_rate") is not None and ev.get("no_show_rate") is not None else "–"
+                    ),
                     "checked_in_vs_registered": (
-                        f"{ev_checked_in}/{ev_registered}"
-                        if ev_registered > 0
-                        else "-"
+                        f"{ev_checked_in}/{ev_registered}" if ev_registered > 0 else "-"
                     ),
                     "top_game": _normalize_game_name(ev.get("most_popular_game")) or "-",
                     "total_revenue": f"{ev_revenue:.0f} kr",
-                    "member_rate": f"{ev_member_rate:.0f}%",
+                    "member_rate": member_text,
                     "startgg_rate": f"{ev_startgg_rate:.0f}%",
-                    "retention_rate": f"{retention_rate:.0f}%",
+                    "retention_rate": (
+                        f"{retention_rate:.0f}%" if ev.get("retention_rate") is not None else "–"
+                    ),
+                    "same_series_return_rate": (
+                        f"{_as_float(ev.get('same_series_return_rate')):.0f}%"
+                        if ev.get("same_series_return_rate") is not None else "–"
+                    ),
                     "manual_count": manual_count,
                     "manual_share": f"{manual_pct:.0f}%" if ev_total > 0 else "-",
                 }
@@ -2475,8 +2505,17 @@ def register_callbacks(app):
             (metrics["ready_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
         )
         member_rate = (
-            (metrics["member_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
+            metrics["member_count"] / metrics["member_base"] * 100
+            if metrics["member_base"] > 0 and not metrics["membership_unknown"] and not metrics["member_data_missing"]
+            else None
         )
+        member_text = (
+            f"{member_rate:.0f}%"
+            if member_rate is not None
+            else "– (unknown)" if metrics["membership_unknown"] else "– (not required)"
+        )
+        if metrics["member_data_missing"]:
+            member_text = "– (not recorded)"
         guest_rate = (
             (metrics["guest_count"] / metrics["total"] * 100) if metrics["total"] > 0 else 0.0
         )
@@ -2494,7 +2533,7 @@ def register_callbacks(app):
         )
         new_players = _as_int(metrics.get("new_players"))
         returning_players = _as_int(metrics.get("returning_players"))
-        noshow_rate = _as_float(metrics.get("no_show_rate"))
+        noshow_rate = metrics.get("no_show_rate")
         manual_total_count = sum(_as_int(v.get("total_count")) for v in manual_by_event.values())
         manual_total_manual = sum(_as_int(v.get("manual_count")) for v in manual_by_event.values())
         manual_share = (
@@ -2508,7 +2547,7 @@ def register_callbacks(app):
             top_game_text = ""
 
         def _fmt_delta(curr, prev, unit="count"):
-            if prev is None:
+            if curr is None or prev is None:
                 return "—"
             diff = curr - prev
             if diff > 0:
@@ -2664,8 +2703,11 @@ def register_callbacks(app):
         member_delta = _fmt_delta(
             member_rate,
             (
-                (prev_metrics["member_count"] / prev_metrics["total"] * 100)
-                if prev_metrics and prev_metrics["total"] > 0
+                (prev_metrics["member_count"] / prev_metrics["member_base"] * 100)
+                if prev_metrics
+                and prev_metrics["member_base"] > 0
+                and not prev_metrics["membership_unknown"]
+                and not prev_metrics["member_data_missing"]
                 else None
             ),
             "pp",
@@ -2738,7 +2780,7 @@ def register_callbacks(app):
         )
         noshow_delta = _fmt_delta(
             noshow_rate,
-            _as_float(prev_metrics.get("no_show_rate")) if prev_metrics else None,
+            prev_metrics.get("no_show_rate") if prev_metrics else None,
             "pp",
         )
         manual_delta = _fmt_delta(manual_share, prev_manual_share, "pp")
@@ -2775,7 +2817,7 @@ def register_callbacks(app):
         checked_in_total = metrics.get("checked_in_total", 0)
         no_show_total = metrics.get("no_show_total", 0)
         no_show_rate = metrics.get("no_show_rate", 0.0)
-        if reg_total > 0:
+        if reg_total > 0 and no_show_rate is not None:
             checked_rate = (checked_in_total / reg_total) * 100
             heads_up_text = (
                 f"Player coverage: {checked_in_total}/{reg_total} ({checked_rate:.0f}%)."
@@ -3017,13 +3059,13 @@ def register_callbacks(app):
                     )
 
                 funnel_cards = [
-                    _funnel_card("New", funnel_new, "#34d399"),
-                    _funnel_card("Returning", funnel_returning, "#fb923c"),
+                    _funnel_card("New (unique)", funnel_new, "#34d399"),
+                    _funnel_card("Returning (unique)", funnel_returning, "#fb923c"),
                     _funnel_card("Core (6m)", funnel_core, "#22c55e"),
                     _funnel_card("Churned (8m)", funnel_churned, "#f87171"),
                 ]
                 funnel_note = (
-                    "New: first-time players | Returning: 2+ total events | "
+                    "First attendance uses event date. Cohorts overlap across events. Returning KPI counts visits; funnel counts unique people. | "
                     "Core: 3+ distinct events in rolling 6 months | "
                     "Churned: no attendance in 8 months (global)"
                 )
@@ -3378,10 +3420,10 @@ def register_callbacks(app):
             str(metrics["total"]),
             f"{metrics['revenue']:.0f} kr",
             f"{ready_rate:.0f}%",
-            f"{member_rate:.0f}%",
+            member_text,
             f"{guest_rate:.0f}%",
             f"{startgg_rate:.0f}%",
-            f"{retention:.0f}%",
+            f"{retention:.0f}%" if retention is not None else "–",
             unique_text,
             total_delta,
             revenue_delta,
@@ -3410,7 +3452,7 @@ def register_callbacks(app):
             "-" if metrics["unknown_games"] and not game_participants else f"{multigame_pct:.1f}%",
             str(new_players),
             str(returning_players),
-            f"{noshow_rate:.1f}%",
+            f"{noshow_rate:.1f}%" if metrics.get("no_show_rate") is not None else "–",
             f"{manual_share:.1f}%",
             checkin_speed_value,
             duration_value,
@@ -4327,16 +4369,16 @@ def register_callbacks(app):
         help_map = {
             "insights-card-total": "Participants: total participant entries in selected period/scope.",
             "insights-card-ready": "Ready Rate: ready participants divided by total participants at archive time.",
-            "insights-card-member": "Member Rate: members divided by total participants.",
+            "insights-card-member": "Member Rate: members at requirement-enabled events divided by their participants. Disabled: not required; missing historic requirement: unknown; explicitly missing membership observations: not recorded.",
             "insights-card-guest": "Guest Share: guests divided by total participants.",
             "insights-card-startgg": "Start.gg Account Rate (excl guests): (startgg_count - guest_count) divided by total participants.",
-            "insights-card-retention": "Retention: returning-player share, weighted by event size.",
+            "insights-card-retention": "Familiar faces: returning visits divided by unique participant visits. Same-series return in the event table measures the previous FightBox/FightNight cohort coming back; first-in-series and collaborations have no baseline.",
             "insights-card-revenue": "Total Revenue: summed event revenue in selected scope.",
             "insights-card-slots": "Checked-in Slots: total game entries for checked-in participants (3 games = 3 slots).",
             "insights-card-avggames": "Avg Games / Player: total slots divided by total participants.",
             "insights-card-multigame": "Multi-Game Players: share of participants playing 2+ games.",
-            "insights-card-new": "New Players: first-time participants in selected scope.",
-            "insights-card-returning": "Returning: players who attended at least one previous event.",
+            "insights-card-new": "New Players: unique players whose first dated archived event is in the selected scope.",
+            "insights-card-returning": "Returning visits: one visit per player per event after their first dated archived event. The funnel counts unique returning people.",
             "insights-card-coreplayers": "Core Players: players with 3+ distinct events in the rolling 6-month window.",
             "insights-card-lifetime": "Player Lifetime: average total events attended by players in selected scope.",
             "insights-card-growth": "Growth Rate: unique attendee growth vs previous period of same length.",
@@ -7080,7 +7122,19 @@ def register_callbacks(app):
             )
 
         try:
-            rows = scan_fn() or []
+            scan = scan_fn() or {}
+            if isinstance(scan, dict):
+                grouped = {}
+                for section in ("data_errors", "deviations"):
+                    for issue in scan.get(section, []):
+                        slug = issue.get("event_slug") or "(player aggregates)"
+                        grouped.setdefault(slug, []).append(f"{section}: {issue['kind']}")
+                rows = [
+                    {"event_slug": slug, "warnings_count": len(warnings), "warnings": warnings}
+                    for slug, warnings in sorted(grouped.items())
+                ]
+            else:
+                rows = scan
         except Exception as e:
             logger.exception(f"Integrity scan failed: {e}")
             return html.Span(f"❌ Integrity scan failed: {e}", style={"color": "#ef4444"}), []
