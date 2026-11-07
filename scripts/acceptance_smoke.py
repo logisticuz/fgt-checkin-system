@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -321,6 +322,58 @@ def security_headers(response):
     return True
 
 
+def anonymous_login_landing(response):
+    markers = (
+        "_dash-",
+        "dash_renderer",
+        "dash_table",
+        "dash-table",
+        "datatable",
+        "players-table",
+        "sse-token-store",
+        "requirements-store",
+        "events-map-store",
+        "checkin_id",
+        "player_uuid",
+        "payment_valid",
+    )
+
+    class Landing(HTMLParser):
+        login = False
+        data = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag in {"script", "table"}:
+                self.data = True
+            for _, value in attrs:
+                if value and any(marker in value.casefold() for marker in markers):
+                    self.data = True
+            href = dict(attrs).get("href")
+            if tag != "a" or not href:
+                return
+            try:
+                target = response.url.join(href)
+            except httpx.InvalidURL:
+                return
+            if (
+                target.host == response.url.host
+                and target.port == response.url.port
+                and target.scheme == response.url.scheme
+                and not target.userinfo
+                and target.path in {"/auth/login", "/admin/auth/login"}
+            ):
+                self.login = True
+
+    body = response.text
+    parser = Landing()
+    parser.feed(body)
+    return (
+        parser.login
+        and not parser.data
+        and not any(marker in body.casefold() for marker in markers)
+    )
+
+
 def readonly(
     client, base, *, admin_base=None, meetup_base=None, membercard_base=None, profile="prod"
 ):
@@ -364,6 +417,10 @@ def readonly(
                         or target.path != "/admin/auth/login"
                     ):
                         passed, detail = False, detail + "; unexpected OAuth redirect"
+                elif (
+                    admin and response.status_code == 200 and not anonymous_login_landing(response)
+                ):
+                    passed, detail = False, detail + "; not an anonymous login landing page"
             results.append(Check(name, passed, detail))
         except SmokeError as error:
             results.append(Check(name, False, str(error)))
@@ -376,7 +433,7 @@ def readonly(
         probe("deny " + name, base, path, 404)
     if profile == "dev":
         probe("DEV Dash SSE token gate", base, "/api/events/stream", 401, admin=True)
-        probe("DEV admin OAuth", admin_base, "/", 302, admin=True, oauth=True)
+        probe("DEV admin OAuth", admin_base, "/", (200, 302), admin=True, oauth=True)
         for name, path in DEV_DASH_PATHS.items():
             probe(name, base, path, (200, 302), oauth=True)
     else:

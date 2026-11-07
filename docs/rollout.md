@@ -322,8 +322,10 @@ python scripts/acceptance_smoke.py --mode readonly --profile dev \
   --base http://localhost:8088 --admin-base http://localhost:8088/admin
 ```
 
-DEV expects `/admin/` to redirect to application OAuth with 302 and no Basic gate,
-and the root Dash layout/dependencies/assets to be reachable (200 or the same OAuth
+DEV expects `/admin/` to show the anonymous login landing page (200 with a local
+`/auth/login` link and no dashboard data markers/scripts/tables), or redirect to
+`/admin/auth/login` with 302. Neither response may have a Basic gate or Set-Cookie.
+The root Dash layout/dependencies/assets must be reachable (200 or the same OAuth
 302). Only DEV's explicit `/api/events/stream` exception expects token-gated 401;
 PROD's public host must return 404 there. The admin SSE path is token-gated 401
 with no Set-Cookie in both profiles. Every other internal public path must be

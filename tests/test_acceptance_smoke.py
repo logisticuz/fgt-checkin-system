@@ -531,3 +531,39 @@ def test_prod_profile_rejects_public_token_gate_and_admin_sse_cookie():
         )
     failed = {check.name for check in checks if check.passed is False}
     assert failed == {"deny public SSE", "admin SSE token gate"}
+
+
+@pytest.mark.parametrize(
+    "body,accepted",
+    [
+        ("<a href='/admin/auth/login'>Login with Start.gg</a>", True),
+        ('<a href="/auth/login">Login</a>', True),
+        ("<p>/auth/login</p>", False),
+        ("<a href='https://outside.invalid/auth/login'>Login</a>", False),
+        ("<a href='/auth/login'>Login</a><script id='_dash-config'>private</script>", False),
+        ("<a href='/auth/login'>Login</a><div id='sse-token-store'>private</div>", False),
+        (
+            "<a href='/auth/login'>Login</a><table id='players-table'><tr>private</tr></table>",
+            False,
+        ),
+        ('<a href="/auth/login">Login</a><pre>{"checkin_id":"private"}</pre>', False),
+        ("<a href='/auth/login'>Login</a><div id='&#95;dash-app-content'>private</div>", False),
+    ],
+)
+def test_dev_admin_200_only_accepts_anonymous_landing_without_data(body, accepted, capsys):
+    def handler(request):
+        path = request.url.path
+        if path == "/admin/":
+            return httpx.Response(200, headers=HEADERS, text=body)
+        if path in {"/api/events/stream", "/admin/api/events/stream"}:
+            return httpx.Response(401, headers=HEADERS)
+        if path in smoke.INTERNAL_PATHS.values():
+            return httpx.Response(404, headers=HEADERS)
+        return httpx.Response(200, headers=HEADERS)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        checks = smoke.readonly(client, DEV, profile="dev")
+    landing = next(check for check in checks if check.name == "DEV admin OAuth")
+    assert landing.passed is accepted
+    smoke.print_checks(checks)
+    assert "private" not in capsys.readouterr().out
