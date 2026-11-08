@@ -81,11 +81,14 @@ the remaining HTTP/backend/n8n time. Only the shipped synthetic identity catalog
 The mock event writes `event_date=2026-11-14`, a free price, membership required,
 Start.gg admission optional and games SSBU/SF6/T8/Strive. It confirms a duplicate, archives,
 reopens, adds two manual backfills and checks arrival-time preservation and fresh statistics.
-Default mode snapshots, runs and reports; n8n/runtime always restore. `--restore-after`
+Default mode snapshots, runs and reports; n8n/runtime restoration is always attempted. `--restore-after`
 also restores Postgres before releasing the lock. `--snapshot` only creates backups;
 `--restore <backup-directory>/postgres.dump` explicitly restores both data stores.
 `--target` accepts only localhost/127.0.0.1:8088; `--duration` and `--seed` control the rush.
 The default compose source is sibling `wt/devstack`; its files are read and never edited.
+Each recovery stage is reported independently. Plain services start only after data, original
+flow IDs, engine `none` and container cleanup are verified; failed recovery requests all writers
+to stop and exits nonzero. Explicit `--restore` uses the same checks and writes a separate report.
 
 ## Contact
 

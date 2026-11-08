@@ -5,7 +5,7 @@ import hashlib
 import io
 import json
 import sys
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 
 import httpx
@@ -368,3 +368,269 @@ def test_latency_trace_refuses_live_transport(settings, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="non-production stub"):
         server.install_latency_trace(settings, path)
     assert not path.exists()
+
+
+@pytest.fixture
+def recovery(tmp_path, monkeypatch):
+    """Exercise real recovery control flow; no Docker, subprocess or HTTP may escape."""
+    hub = tmp_path / "hub"
+    (hub / "reports").mkdir(parents=True)
+    directory = hub / "backups" / "T074-synthetic"
+    manifest = {
+        "project": "fgt-dev",
+        "volume": "synthetic-volume",
+        "image": "synthetic-python",
+        "baseline": {"archive_rows": 316, "revenue": 2325.0},
+        "active_ids": ["original-a", "original-b"],
+        "run_id": "synthetic",
+    }
+
+    def seed_backup(path):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (path / "postgres.dump").write_bytes(b"synthetic snapshot")
+
+    seed_backup(directory)
+
+    class FakeDocker:
+        def __init__(self):
+            self.fail = set()
+            self.calls = []
+            self.temps = ["sim-one", "sim-two"]
+            self.started = True
+            self.restoring = False
+            self.offline_ids = manifest["active_ids"][:]
+            self.live_ids = manifest["active_ids"][:]
+            self.engine = "none"
+            self.live_engine = "none"
+            self.totals = manifest["baseline"].copy()
+            self.live_totals = manifest["baseline"].copy()
+
+        def run(self, *args, **kwargs):
+            self.calls.append(args)
+            operation = "other"
+            if args[0] == "stop":
+                operation = "stop_" + args[1]
+                self.restoring = True
+                self.started = False
+            elif "pg_restore" in args:
+                operation = "postgres_restore"
+            elif args[0] == "run" and args[-1] == rehearsal.RESTORE_VOLUME:
+                operation = "n8n_restore"
+            elif args[0] == "compose":
+                operation = "plain_configuration" if "--no-start" in args else "plain_runtime_start"
+                if any("override.json" in str(arg) for arg in args):
+                    operation = "rehearsal_start"
+                if operation == "plain_runtime_start":
+                    self.started = True
+            elif args[0] == "rm":
+                operation = "remove_" + args[-1]
+            if operation in self.fail:
+                raise RuntimeError("synthetic operation failure")
+            if args[0] == "rm":
+                self.temps.remove(args[-1])
+            if args[0] == "ps":
+                return "\n".join(self.temps).encode()
+            if args[:3] == ("exec", rehearsal.NGINX, "cat"):
+                return (ROOT / "nginx.dev.conf").read_bytes()
+            return b""
+
+        def metadata(self):
+            return manifest["volume"]
+
+        def baseline(self):
+            return self.live_totals if self.started and self.restoring else self.totals
+
+        def restored_active_ids(self, _manifest):
+            return self.offline_ids
+
+        def configured_engine(self):
+            return self.engine
+
+        def active_flows(self):
+            return [{"id": value} for value in self.live_ids]
+
+        def environment(self, _name):
+            return {"INTEGRATION_ENGINE": self.live_engine}
+
+        def health(self, name):
+            self.calls.append((name,))
+            if self.restoring and name in self.fail:
+                raise RuntimeError("synthetic health failure")
+
+    fake = FakeDocker()
+    monkeypatch.setattr(rehearsal, "HUB", hub)
+    monkeypatch.setattr(rehearsal, "Docker", lambda: fake)
+    monkeypatch.setattr(rehearsal, "shared_lock", nullcontext)
+    monkeypatch.setattr(
+        rehearsal, "wait_health", lambda *args, **kwargs: fake.health("backend_health")
+    )
+    monkeypatch.setattr(rehearsal, "wait_n8n", lambda *args, **kwargs: fake.health("n8n_health"))
+    monkeypatch.setattr(
+        rehearsal, "snapshot", lambda client, path: (seed_backup(path) or manifest, [])
+    )
+    monkeypatch.setattr(rehearsal, "write_override", lambda client, path: path / "override.json")
+    monkeypatch.setattr(rehearsal, "start_simulators", lambda *args: [])
+    monkeypatch.setattr(rehearsal, "publish_simulated_flows", lambda *args: [])
+    monkeypatch.setattr(rehearsal, "guard_environment", lambda *args: None)
+    monkeypatch.setattr(rehearsal, "guard_flows", lambda *args: None)
+    monkeypatch.setattr(rehearsal, "run_rush", lambda *args, report, **kwargs: report)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Unexpected real process or network call")
+
+    monkeypatch.setattr(rehearsal.subprocess, "run", unexpected)
+    monkeypatch.setattr(rehearsal.subprocess, "Popen", unexpected)
+    monkeypatch.setattr(rehearsal, "urlopen", unexpected)
+    return fake, directory, manifest, hub
+
+
+def test_pg_restore_failure_still_restores_n8n_volume(recovery):
+    fake, directory, _, _ = recovery
+    fake.fail.add("postgres_restore")
+    steps = {}
+    assert rehearsal.restore_data(fake, directory, steps=steps) is False
+    assert steps["postgres_restore"]["status"] == "failed"
+    assert steps["n8n_restore"]["status"] == "passed"
+    assert any(args[0] == "run" and args[-1] == rehearsal.RESTORE_VOLUME for args in fake.calls)
+
+
+@pytest.mark.parametrize("service", [rehearsal.BACKEND, "fgt-dev-fgt_dashboard-1", rehearsal.N8N])
+def test_stop_failure_does_not_skip_other_stops_or_restore_with_active_writers(recovery, service):
+    fake, directory, _, _ = recovery
+    fake.fail.add("stop_" + service)
+    steps = {}
+    assert rehearsal.restore_data(fake, directory, steps=steps) is False
+    assert all(
+        ("stop", name) in fake.calls
+        for name in (rehearsal.BACKEND, "fgt-dev-fgt_dashboard-1", rehearsal.N8N)
+    )
+    assert steps["postgres_restore"]["status"] == "blocked"
+    assert not any("pg_restore" in args for args in fake.calls)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "postgres_restore",
+        "n8n_restore",
+        "backend_health",
+        "n8n_health",
+        "plain_configuration",
+        "plain_runtime_start",
+        "remove_sim-one",
+    ],
+)
+def test_main_always_attempts_independent_cleanup_and_writes_failure_report(recovery, failure):
+    fake, _, _, hub = recovery
+    fake.fail.add(failure)
+    assert rehearsal.main(["--restore-after", "--duration", "0"]) == 1
+    reports = list((hub / "reports").glob("*.md"))
+    assert len(reports) == 1
+    text = reports[0].read_text(encoding="utf-8")
+    assert "Result: FAIL" in text and "Restoration stages:" in text
+    assert ("rm", "-f", "sim-one") in fake.calls and ("rm", "-f", "sim-two") in fake.calls
+    assert any(args[0] == "compose" and "--no-start" in args for args in fake.calls)
+    assert not fake.started
+    if failure == "postgres_restore":
+        assert "| n8n_restore | passed |" in text
+        assert not any(
+            args[0] == "compose"
+            and "--no-start" not in args
+            and "override.json" not in " ".join(map(str, args))
+            for args in fake.calls
+        )
+    if failure == "backend_health":
+        assert ("n8n_health",) in fake.calls
+    rehearsal.guard_report(text)
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "pre_baseline",
+        "live_baseline",
+        "pre_flows",
+        "live_flows",
+        "pre_engine",
+        "live_engine",
+        "temporary",
+    ],
+)
+def test_explicit_restore_rejects_wrong_postconditions_even_when_health_is_good(
+    recovery, mismatch, capsys
+):
+    fake, directory, _, hub = recovery
+    if mismatch == "pre_baseline":
+        fake.totals = {"archive_rows": 999, "revenue": 0}
+    if mismatch == "live_baseline":
+        fake.live_totals = {"archive_rows": 999, "revenue": 0}
+    if mismatch == "pre_flows":
+        fake.offline_ids = ["unexpected"]
+    if mismatch == "live_flows":
+        fake.live_ids = ["unexpected"]
+    if mismatch == "pre_engine":
+        fake.engine = "n8n"
+    if mismatch == "live_engine":
+        fake.live_engine = "n8n"
+    if mismatch == "temporary":
+        fake.fail.add("remove_sim-one")
+    assert rehearsal.main(["--restore", str(directory / "postgres.dump")]) == 1
+    assert "restore verified" not in capsys.readouterr().out
+    report = next((hub / "reports").glob("T-074-restore-*.md")).read_text(encoding="utf-8")
+    assert "Result: FAIL" in report and "Restoration stages:" in report
+    assert not fake.started
+
+
+def test_explicit_restore_success_checks_all_state_and_preserves_native_run_report(
+    recovery, capsys
+):
+    fake, directory, _, hub = recovery
+    original = hub / "reports" / "T-074-run-synthetic.md"
+    original.write_text("original native evidence", encoding="utf-8")
+    assert rehearsal.main(["--restore", str(directory / "postgres.dump")]) == 0
+    assert "restore verified" in capsys.readouterr().out
+    assert original.read_text(encoding="utf-8") == "original native evidence"
+    text = next((hub / "reports").glob("T-074-restore-*.md")).read_text(encoding="utf-8")
+    assert "Result: PASS" in text
+    assert "| no temporary rehearsal containers remain | PASS |" in text
+    assert fake.temps == [] and fake.started
+
+
+def test_mid_rush_failure_restores_everything_and_keeps_original_error(recovery, monkeypatch):
+    fake, _, _, hub = recovery
+
+    def fail(*args, **kwargs):
+        raise rehearsal.RehearsalError("synthetic mid-rush failure")
+
+    monkeypatch.setattr(rehearsal, "run_rush", fail)
+    assert rehearsal.main(["--restore-after", "--duration", "0"]) == 1
+    text = next((hub / "reports").glob("*.md")).read_text(encoding="utf-8")
+    assert "synthetic mid-rush failure" in text
+    assert "| restored services verified healthy | PASS |" in text
+    assert fake.started and fake.temps == []
+
+
+def test_successful_restore_after_uses_the_shared_verified_cleanup(recovery):
+    fake, _, _, hub = recovery
+    assert rehearsal.main(["--restore-after", "--duration", "0"]) == 0
+    text = next((hub / "reports").glob("*.md")).read_text(encoding="utf-8")
+    assert "Result: PASS" in text
+    assert "| DEV archive baseline restored | PASS |" in text
+    assert fake.started and fake.temps == []
+
+
+def test_unexpected_restore_exception_still_cleans_and_reports_without_exception_data(
+    recovery, monkeypatch
+):
+    fake, _, _, hub = recovery
+
+    def fail(*args, **kwargs):
+        raise ValueError(PNR)
+
+    monkeypatch.setattr(rehearsal, "restore_data", fail)
+    assert rehearsal.main(["--restore-after", "--duration", "0"]) == 1
+    text = next((hub / "reports").glob("*.md")).read_text(encoding="utf-8")
+    assert "| data_restoration | failed | ValueError |" in text
+    assert PNR not in text
+    assert fake.temps == [] and not fake.started

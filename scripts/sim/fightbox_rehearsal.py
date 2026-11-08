@@ -316,6 +316,29 @@ class Docker:
         count, revenue = output.split("|")
         return {"archive_rows": int(count), "revenue": float(revenue)}
 
+    def restored_active_ids(self, manifest):
+        code = "import sqlite3,json; c=sqlite3.connect('file:/data/database.sqlite?mode=ro',uri=True); print(json.dumps([r[0] for r in c.execute('SELECT id FROM workflow_entity WHERE active=1 ORDER BY id')]))"
+        return json.loads(
+            self.run(
+                "run",
+                "--rm",
+                "--label",
+                "t074.run=" + manifest.get("run_id", "restore"),
+                "--mount",
+                f"type=volume,source={manifest['volume']},target=/data,readonly",
+                "--entrypoint",
+                "python",
+                manifest["image"],
+                "-c",
+                code,
+            )
+        )
+
+    def configured_engine(self):
+        # This works while stopped and emits no other environment values/credentials.
+        template = '{{range .Config.Env}}{{if eq (index (split . "=") 0) "INTEGRATION_ENGINE"}}{{index (split . "=") 1}}{{end}}{{end}}'
+        return self.run("inspect", BACKEND, "--format", template).decode().strip()
+
 
 def progress(message):
     print("T074 " + message, flush=True)
@@ -361,6 +384,7 @@ def snapshot(docker, directory):
         "image": image,
         "baseline": before,
         "active_ids": sorted(flow["id"] for flow in flows),
+        "run_id": directory.name.removeprefix("T074-"),
     }
     progress("snapshotting DEV Postgres and stopped n8n volume")
     dump = docker.run("exec", POSTGRES, "pg_dump", "-U", "fgc", "-d", "fgc_checkin", "-Fc")
@@ -388,43 +412,251 @@ def snapshot(docker, directory):
     return manifest, flows
 
 
-def restore_data(docker, directory, *, postgres=True):
+def restore_manifest(docker, directory):
     if not directory.resolve().is_relative_to((HUB / "backups").resolve()):
         raise RehearsalError("Only a rehearsal backup beneath agent-hub/backups can be restored")
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if manifest["project"] != PROJECT or docker.metadata() != manifest["volume"]:
         raise RehearsalError("Restore ownership differs from the DEV snapshot")
+    manifest.setdefault("run_id", directory.name.removeprefix("T074-"))
+    return manifest
+
+
+def restore_step(steps, name, operation, *, expected=None):
+    try:
+        value = operation()
+        passed = expected is None or expected(value)
+        steps[name] = {"status": "passed" if passed else "failed"}
+        if not passed:
+            steps[name]["error"] = "postcondition_mismatch"
+        return passed, value
+    except Exception as error:
+        # Exceptions can contain database/provider data; retain only the stage and type.
+        steps[name] = {"status": "failed", "error": type(error).__name__}
+        return False, None
+
+
+def restore_data(docker, directory, *, postgres=True, steps=None):
+    steps = {} if steps is None else steps
+    manifest = restore_manifest(docker, directory)
     progress("restoring DEV snapshot" + (" (Postgres and n8n)" if postgres else " (n8n)"))
-    docker.run("stop", BACKEND, "fgt-dev-fgt_dashboard-1", N8N)
-    if postgres:
-        docker.run(
-            "exec",
-            "-i",
-            POSTGRES,
-            "pg_restore",
-            "--clean",
-            "--if-exists",
-            "-U",
-            "fgc",
-            "-d",
-            "fgc_checkin",
-            input=(directory / "postgres.dump").read_bytes(),
+    stopped = {}
+    for service in (BACKEND, "fgt-dev-fgt_dashboard-1", N8N):
+        stopped[service], _ = restore_step(
+            steps, "stop_" + service, lambda service=service: docker.run("stop", service)
         )
-    docker.run(
-        "run",
-        "--rm",
-        "--user",
-        "0",
-        "--mount",
-        f"type=volume,source={manifest['volume']},target=/data",
-        "--mount",
-        f"type=bind,source={directory},target=/backup,readonly",
-        "--entrypoint",
-        "python",
-        manifest["image"],
-        "-c",
-        RESTORE_VOLUME,
+    if postgres and all(stopped.values()):
+        restore_step(
+            steps,
+            "postgres_restore",
+            lambda: docker.run(
+                "exec",
+                "-i",
+                POSTGRES,
+                "pg_restore",
+                "--clean",
+                "--if-exists",
+                "-U",
+                "fgc",
+                "-d",
+                "fgc_checkin",
+                input=(directory / "postgres.dump").read_bytes(),
+            ),
+        )
+    elif postgres:
+        steps["postgres_restore"] = {"status": "blocked", "error": "writers_not_stopped"}
+    else:
+        steps["postgres_restore"] = {"status": "not_requested"}
+    if stopped[N8N]:
+        restore_step(
+            steps,
+            "n8n_restore",
+            lambda: docker.run(
+                "run",
+                "--rm",
+                "--label",
+                "t074.run=" + manifest["run_id"],
+                "--user",
+                "0",
+                "--mount",
+                f"type=volume,source={manifest['volume']},target=/data",
+                "--mount",
+                f"type=bind,source={directory},target=/backup,readonly",
+                "--entrypoint",
+                "python",
+                manifest["image"],
+                "-c",
+                RESTORE_VOLUME,
+            ),
+        )
+    else:
+        steps["n8n_restore"] = {"status": "blocked", "error": "n8n_not_stopped"}
+    return all(step["status"] in {"passed", "not_requested"} for step in steps.values())
+
+
+def finish_restoration(docker, directory, manifest, devstack, target, report, *, postgres, run_id):
+    steps = report.setdefault("restoration_steps", {})
+    ownership, _ = restore_step(
+        steps,
+        "restore_ownership",
+        docker.metadata,
+        expected=lambda value: value == manifest["volume"],
     )
+    data_ok = False
+    if ownership:
+        data_ok, _ = restore_step(
+            steps,
+            "data_restoration",
+            lambda: restore_data(docker, directory, postgres=postgres, steps=steps),
+            expected=bool,
+        )
+        # Recreate the plain configuration stopped. Verify data/identities before exposure.
+        configured, _ = restore_step(
+            steps,
+            "plain_configuration",
+            lambda: compose(
+                docker,
+                devstack,
+                "up",
+                "--no-start",
+                "--no-deps",
+                "--force-recreate",
+                "--no-build",
+                "--pull",
+                "never",
+                "backend",
+                "n8n",
+                "fgt_dashboard",
+            ),
+        )
+        baseline_ok, actual = restore_step(
+            steps,
+            "verify_baseline",
+            docker.baseline,
+            expected=(lambda value: value == manifest["baseline"]) if postgres else None,
+        )
+        report["restored_baseline"] = actual
+        flows_ok, _ = restore_step(
+            steps,
+            "verify_original_flows",
+            lambda: sorted(docker.restored_active_ids(manifest)),
+            expected=lambda value: value == sorted(manifest["active_ids"]),
+        )
+        engine_ok, _ = restore_step(
+            steps,
+            "verify_engine_none",
+            docker.configured_engine,
+            expected=lambda value: value == "none",
+        )
+    else:
+        configured = baseline_ok = flows_ok = engine_ok = False
+        for name in (
+            "data_restoration",
+            "plain_configuration",
+            "verify_baseline",
+            "verify_original_flows",
+            "verify_engine_none",
+        ):
+            steps[name] = {"status": "blocked", "error": "ownership_not_verified"}
+
+    listed, owned = restore_step(
+        steps,
+        "list_temporary_containers",
+        lambda: docker.run("ps", "-aq", "--filter", "label=t074.run=" + run_id).decode().split(),
+    )
+    if listed:
+        for index, container in enumerate(owned):
+            restore_step(
+                steps,
+                "remove_temporary_" + str(index + 1),
+                lambda container=container: docker.run("rm", "-f", container),
+            )
+    empty, _ = restore_step(
+        steps,
+        "verify_no_temporary_containers",
+        lambda: docker.run("ps", "-aq", "--filter", "label=t074.run").decode().split(),
+        expected=lambda value: not value,
+    )
+
+    verified = data_ok and configured and baseline_ok and flows_ok and engine_ok and empty
+    if verified:
+        started, _ = restore_step(
+            steps,
+            "plain_runtime_start",
+            lambda: compose(
+                docker,
+                devstack,
+                "up",
+                "-d",
+                "--no-build",
+                "--pull",
+                "never",
+                "backend",
+                "n8n",
+                "fgt_dashboard",
+            ),
+        )
+        backend_ok, _ = restore_step(steps, "backend_health", lambda: wait_health(target))
+        n8n_ok, _ = restore_step(steps, "n8n_health", lambda: wait_n8n(docker))
+        baseline_ok, actual = restore_step(
+            steps,
+            "verify_live_baseline",
+            docker.baseline,
+            expected=(lambda value: value == manifest["baseline"]) if postgres else None,
+        )
+        report["restored_baseline"] = actual
+        flows_ok, _ = restore_step(
+            steps,
+            "verify_live_original_flows",
+            lambda: sorted(flow["id"] for flow in docker.active_flows()),
+            expected=lambda value: value == sorted(manifest["active_ids"]),
+        )
+        engine_ok, _ = restore_step(
+            steps,
+            "verify_live_engine_none",
+            lambda: docker.environment(BACKEND).get("INTEGRATION_ENGINE"),
+            expected=lambda value: value == "none",
+        )
+        empty, _ = restore_step(
+            steps,
+            "verify_live_no_temporary_containers",
+            lambda: docker.run("ps", "-aq", "--filter", "label=t074.run").decode().split(),
+            expected=lambda value: not value,
+        )
+        verified = verified and baseline_ok and flows_ok and engine_ok and empty
+    else:
+        started = backend_ok = n8n_ok = False
+        for name in ("plain_runtime_start", "backend_health", "n8n_health"):
+            steps[name] = {"status": "blocked", "error": "restoration_not_verified"}
+    complete = (
+        verified
+        and started
+        and backend_ok
+        and n8n_ok
+        and all(step["status"] in {"passed", "not_requested"} for step in steps.values())
+    )
+    if not complete and ownership:
+        for service in (BACKEND, "fgt-dev-fgt_dashboard-1", N8N):
+            restore_step(
+                steps, "quarantine_" + service, lambda service=service: docker.run("stop", service)
+            )
+    report["restored_active_flows"] = flows_ok
+    report["restored_engine_none"] = engine_ok
+    report["restored_no_temporary_containers"] = empty
+    report["restored_safe_to_serve"] = complete
+    checks = report.setdefault("checks", [])
+    for name, passed in (
+        ("original n8n activations restored", flows_ok),
+        ("runtime restored to engine none", engine_ok),
+        ("no temporary rehearsal containers remain", empty),
+        ("restored services verified healthy", complete),
+    ):
+        checks.append({"name": name, "passed": passed})
+    if postgres:
+        checks.append({"name": "DEV archive baseline restored", "passed": baseline_ok})
+    if not complete:
+        report["error"] = "Restoration incomplete; DEV was not verified safe to serve"
+    return complete
 
 
 def compose(docker, devstack, *arguments, override=None):
@@ -432,7 +664,7 @@ def compose(docker, devstack, *arguments, override=None):
     if override:
         files += ["-f", str(override)]
     output = docker.run("compose", "-p", PROJECT, *files, *arguments)
-    if "up" in arguments:
+    if "up" in arguments and "--no-start" not in arguments:
         # nginx resolves these upstream names when loading its configuration.
         docker.run("exec", NGINX, "nginx", "-s", "reload")
     return output
@@ -1243,7 +1475,7 @@ def write_report(report, directory):
         for name in arrival_checks
     )
     lines = [
-        "# T-074 FightBox rehearsal",
+        "# T-074 explicit restore" if report.get("restore_only") else "# T-074 FightBox rehearsal",
         "",
         "Result: " + ("FAIL" if failed or report.get("error") else "PASS"),
         "",
@@ -1348,6 +1580,9 @@ def write_report(report, directory):
             + " | ".join(map(str, (location, policy["rate"], policy["burst"], policy["nodelay"])))
             + " |"
         )
+    lines += ["", "Restoration stages:", "| Stage | Status | Issue |", "|---|---|---|"]
+    for name, state in report.get("restoration_steps", {}).items():
+        lines.append("| " + name + " | " + state["status"] + " | " + state.get("error", "") + " |")
     lines += ["", "All named checks:", "| Check | Result | Detail |", "|---|---|---|"]
     for item in report.get("checks", []):
         lines.append(
@@ -1367,12 +1602,20 @@ def write_report(report, directory):
         "",
         "Exact settings fields written: " + ", ".join(report.get("settings_fields", [])),
         "Event date 2026-11-14; free; membership required; Start.gg admission optional; SSBU/SF6/T8/Strive; no Doubles.",
-        "Defaults: snapshot before writes; n8n and runtime always restored. Postgres restores only with --restore or --restore-after.",
+        "Defaults: snapshot before writes; n8n/runtime recovery is always attempted and every stage reported. Postgres restores only with --restore or --restore-after.",
         "",
     ]
     text = "\n".join(lines)
     guard_report(text)
-    path = HUB / "reports" / ("T-074-run-" + directory.name.removeprefix("T074-") + ".md")
+    name = "T-074-run-" + directory.name.removeprefix("T074-")
+    if report.get("restore_only"):
+        name = (
+            "T-074-restore-"
+            + directory.name.removeprefix("T074-")
+            + "-"
+            + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ").lower()
+        )
+    path = HUB / "reports" / (name + ".md")
     path.write_text(text, encoding="utf-8")
     return path, bool(failed or report.get("error"))
 
@@ -1408,23 +1651,26 @@ def main(argv=None):
         docker.metadata()
         if options.restore:
             directory = options.restore.resolve().parent
-            restore_data(docker, directory)
-            compose(
+            manifest = restore_manifest(docker, directory)
+            report = {
+                "checks": [],
+                "restore_only": True,
+                "backup": str(directory),
+                "baseline": manifest["baseline"],
+            }
+            finish_restoration(
                 docker,
+                directory,
+                manifest,
                 options.devstack,
-                "up",
-                "-d",
-                "--no-build",
-                "--pull",
-                "never",
-                "backend",
-                "n8n",
-                "fgt_dashboard",
+                target,
+                report,
+                postgres=True,
+                run_id=manifest.get("run_id", directory.name.removeprefix("T074-")),
             )
-            wait_health(target)
-            wait_n8n(docker)
-            progress("restore verified: " + json.dumps(docker.baseline()))
-            return 0
+            path, failed = write_report(report, directory)
+            progress(("RESTORE FAIL " if failed else "restore verified ") + str(path))
+            return 1 if failed else 0
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ").lower()
         directory = HUB / "backups" / ("T074-" + run_id)
         manifest, originals = snapshot(docker, directory)
@@ -1488,53 +1734,16 @@ def main(argv=None):
             )
         finally:
             if changed_runtime:
-                docker.run("stop", BACKEND, "fgt-dev-fgt_dashboard-1")
-                restore_data(docker, directory, postgres=options.restore_after)
-                compose(
+                finish_restoration(
                     docker,
+                    directory,
+                    manifest,
                     options.devstack,
-                    "up",
-                    "-d",
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    "backend",
-                    "n8n",
-                    "fgt_dashboard",
+                    target,
+                    report,
+                    postgres=options.restore_after,
+                    run_id=run_id,
                 )
-                wait_health(target)
-                wait_n8n(docker)
-                owned = (
-                    docker.run("ps", "-aq", "--filter", "label=t074.run=" + run_id).decode().split()
-                )
-                if owned:
-                    docker.run("rm", "-f", *owned)
-                report["restored_baseline"] = docker.baseline()
-                report["restored_active_flows"] = (
-                    sorted(flow["id"] for flow in docker.active_flows()) == manifest["active_ids"]
-                )
-                report["restored_engine_none"] = (
-                    docker.environment(BACKEND).get("INTEGRATION_ENGINE") == "none"
-                )
-                report["checks"].extend(
-                    [
-                        {
-                            "name": "original n8n activations restored",
-                            "passed": report["restored_active_flows"],
-                        },
-                        {
-                            "name": "runtime restored to engine none",
-                            "passed": report["restored_engine_none"],
-                        },
-                    ]
-                )
-                if options.restore_after:
-                    report["checks"].append(
-                        {
-                            "name": "DEV archive baseline restored",
-                            "passed": report["restored_baseline"] == manifest["baseline"],
-                        }
-                    )
         path, failed = write_report(report, directory)
         progress(("FAIL " if failed else "PASS ") + str(path))
         return 1 if failed else 0
