@@ -185,6 +185,7 @@ def get_checkins(slug: str = None, include_all: bool = False) -> List[Dict[str, 
             # Membership / registration / payment
             "member": f.get("member"),
             "member_lookup_state": f.get("member_lookup_state") or "unknown",
+            "member_lookup_reported": f.get("member_lookup_state") is not None,
             "startgg": f.get("startgg"),
             "is_guest": f.get("is_guest"),
             "payment_amount": f.get("payment_amount"),

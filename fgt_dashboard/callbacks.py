@@ -6,6 +6,10 @@ try:
     from auth_helpers import current_user
 except ImportError:
     from fgt_dashboard.auth_helpers import current_user
+try:
+    import membership_badge
+except ImportError:
+    from fgt_dashboard import membership_badge
 from shared.storage import (
     get_checkins,
     get_active_settings,
@@ -163,6 +167,49 @@ def _csv_safe(df):
         return value
 
     return df.apply(lambda column: column.map(safe_cell))
+
+
+def _flag(value):
+    """True/False for a stored boolean or a ✓/✗ cell; None when unknown."""
+    if value is True or value is False:
+        return value
+    if value == membership_badge.MEMBER_CELL or str(value).lower() == "true":
+        return True
+    if value in (membership_badge.MISSING_CELL, membership_badge.EBAS_UNKNOWN_CELL):
+        return False
+    if str(value).lower() == "false":
+        return False
+    return None
+
+
+def _row_member_flag(row):
+    """The row's member value, independent of whether the Member column is visible:
+    the hidden member_flag (T-075), else the visible cell; None when unknown."""
+    if "member_flag" in row:
+        return row["member_flag"]
+    return _flag(row.get("member"))
+
+
+def _row_membership_state(row):
+    """membership_badge state from the row's CURRENT fields (T-075): the hidden member
+    flag plus the hidden member_lookup_state / member_lookup_reported keys."""
+    return membership_badge.membership_state(
+        _row_member_flag(row), row.get("member_lookup_state"), row.get("member_lookup_reported")
+    )
+
+
+def _sync_membership(row, fields=None):
+    """After a local edit: take the lookup context storage returned (only when it says
+    whether a result was stored; partial reads leave the row's own context alone), then
+    re-derive the Member cell. Never relies on what the row looked like when loaded."""
+    fields = fields or {}
+    if "member" in fields:
+        row["member_flag"] = _flag(fields["member"])
+    if "member_lookup_reported" in fields:
+        row["member_lookup_state"] = fields.get("member_lookup_state")
+        row["member_lookup_reported"] = fields["member_lookup_reported"] is True
+    if "member" in row:
+        row["member"] = membership_badge.member_cell(_row_membership_state(row))
 
 
 def _find_checkin_row(table_data, row_id):
@@ -725,6 +772,18 @@ def register_callbacks(app):
                         lambda x: x is True or str(x).lower() == "true"
                     )
 
+            # T-075: an eBas failure must not look like "not a member". Every row carries
+            # its lookup context (hidden keys); the Member cell is derived from it.
+            lookup_context = {
+                raw.get("record_id"): (
+                    raw.get("member_lookup_state"),
+                    raw.get("member_lookup_reported") is True,
+                    _flag(raw.get("member")),
+                )
+                for raw in data
+            }
+            show_badge = requirements.get("require_membership") is True
+
             # Convert booleans to icons ✓/✗
             for col in ["member", "startgg", "payment_valid", "is_guest"]:
                 if col in df.columns:
@@ -817,6 +876,15 @@ def register_callbacks(app):
             table_rows = df_filtered.to_dict("records")
             for row in table_rows:
                 row["id"] = row.get("record_id")
+                # Hidden (not columns): the badge is always derived from these.
+                state, reported, flag = lookup_context.get(
+                    row.get("record_id"), (None, False, None)
+                )
+                row["member_lookup_state"] = state
+                row["member_lookup_reported"] = reported
+                row["member_flag"] = flag
+                if show_badge:
+                    _sync_membership(row)
 
             # T-068: possible duplicates of existing players (active event only; best effort,
             # never affects the table or any check-in if it fails).
@@ -1854,9 +1922,11 @@ def register_callbacks(app):
 
             # Only check membership if it's a required field
             if require_membership:
-                member_val = row.get("member", "")
-                if not is_ok(member_val):
-                    missing.append({"field": "Membership", "icon": "🎫"})
+                if _row_member_flag(row) is not True:
+                    if _row_membership_state(row) == membership_badge.EBAS_UNKNOWN:
+                        missing.append({"field": "eBas", "icon": "⚠"})
+                    else:
+                        missing.append({"field": "Membership", "icon": "🎫"})
 
             # Only check payment if it's a required field
             if require_payment:
@@ -1909,6 +1979,13 @@ def register_callbacks(app):
                 "color": "#00d4ff",
                 "border": "1px solid rgba(0, 212, 255, 0.3)",
             },
+            # T-075: amber = "unknown, check it", never the red/negative of a non-member.
+            "eBas": {
+                "backgroundColor": "rgba(245, 158, 11, 0.15)",
+                "color": "#f59e0b",
+                "border": "1px dashed rgba(245, 158, 11, 0.6)",
+                "cursor": "help",
+            },
         }
         badge_base = {
             "padding": "0.25rem 0.5rem",
@@ -1931,7 +2008,32 @@ def register_callbacks(app):
                 field = m["field"]
                 icon = m["icon"]
                 style = {**badge_base, **badge_styles.get(field, badge_styles["Payment"])}
+                if field == "eBas":
+                    missing_badges.append(
+                        html.Span(
+                            f"{icon} {membership_badge.EBAS_UNKNOWN_LABEL}",
+                            title=membership_badge.EBAS_UNKNOWN_HELP,
+                            style=style,
+                        )
+                    )
+                    missing_badges.append(
+                        html.Span(
+                            membership_badge.EBAS_UNKNOWN_HELP,
+                            style={
+                                "flexBasis": "100%",
+                                "color": "#94a3b8",
+                                "fontSize": "0.75rem",
+                                "marginLeft": "0.25rem",
+                            },
+                        )
+                    )
+                    continue
                 missing_badges.append(html.Span(f"{icon} {field.upper()}", style=style))
+
+            # T-075: only "eBas did not answer" = amber (check it), not red (missing).
+            accent = "#ef4444"
+            if all(m["field"] == "eBas" for m in player["missing"]):
+                accent = "#f59e0b"
 
             items.append(
                 html.Div(
@@ -1942,7 +2044,7 @@ def register_callbacks(app):
                                 html.Span(
                                     "•",
                                     style={
-                                        "color": "#ef4444",
+                                        "color": accent,
                                         "marginRight": "0.5rem",
                                         "fontSize": "1.2rem",
                                     },
@@ -1971,9 +2073,13 @@ def register_callbacks(app):
                     style={
                         "padding": "0.75rem",
                         "marginBottom": "0.5rem",
-                        "backgroundColor": "rgba(239, 68, 68, 0.05)",
+                        "backgroundColor": (
+                            "rgba(245, 158, 11, 0.06)"
+                            if accent == "#f59e0b"
+                            else "rgba(239, 68, 68, 0.05)"
+                        ),
                         "borderRadius": "8px",
-                        "borderLeft": "3px solid #ef4444",
+                        "borderLeft": f"3px solid {accent}",
                     },
                 )
             )
@@ -5913,7 +6019,7 @@ def register_callbacks(app):
         for row in table_data:
             missing_something = False
             # Only check membership if required
-            if require_membership and not is_ok(row.get("member", "")):
+            if require_membership and _row_member_flag(row) is not True:
                 missing_something = True
             # Only check payment if required
             if require_payment and not is_ok(row.get("payment_valid", "")):
@@ -6063,9 +6169,12 @@ def register_callbacks(app):
                 fields = fresh.get("fields", {}) if isinstance(fresh, dict) else {}
             # Boolean-only adapters keep the local click feedback, without inventing a status.
             row[col_id] = "✓" if new_val else "✗"
+            if col_id == "member":
+                row["member_flag"] = bool(new_val)  # local click; storage fields win below
             for flag in ("payment_valid", "member", "startgg", "is_guest"):
                 if flag in fields:
                     row[flag] = "✓" if is_checked(fields[flag]) else "✗"
+            _sync_membership(row, fields)
             for field in ("status", "payment_amount", "payment_expected"):
                 if field in fields:
                     row[field] = fields[field]
@@ -6278,6 +6387,7 @@ def register_callbacks(app):
                         row[flag] = (
                             "✓" if value is True or str(value).lower() == "true" else "✗"
                         )
+                _sync_membership(row, fields)
                 table_needs_refresh = True
 
             updated += 1
