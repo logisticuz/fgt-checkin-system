@@ -4,6 +4,10 @@ FGC Dashboard Layout - Modern Esports Theme
 """
 import os
 import flask
+try:
+    import membership_badge
+except ImportError:
+    from fgt_dashboard import membership_badge
 from dash import html, dcc, dash_table
 from shared.storage import (
     get_all_event_slugs,
@@ -1142,6 +1146,29 @@ def create_layout():
                                                     page_size=20,
                                                     sort_action="native",
                                                     row_selectable="multi",
+                                                    # T-075: explain the eBas-unknown badge on hover.
+                                                    tooltip_conditional=[
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{member} = "'
+                                                                + membership_badge.EBAS_UNKNOWN_CELL
+                                                                + '"',
+                                                                "column_id": "member",
+                                                            },
+                                                            "type": "text",
+                                                            "value": membership_badge.EBAS_UNKNOWN_HELP,
+                                                        }
+                                                    ],
+                                                    tooltip_delay=200,
+                                                    tooltip_duration=None,
+                                                    css=[
+                                                        {
+                                                            "selector": ".dash-table-tooltip",
+                                                            "rule": "background-color: #12121a; color: #e2e8f0; "
+                                                            "border: 1px solid #f59e0b; border-radius: 6px; "
+                                                            "font-size: 0.8rem; max-width: 320px; padding: 0.5rem;",
+                                                        }
+                                                    ],
                                                     style_table={"overflowX": "auto"},
                                                     style_header={
                                                         "backgroundColor": COLORS["bg_dark"],
@@ -1256,6 +1283,22 @@ def create_layout():
                                                             "fontWeight": "600",
                                                             "cursor": "pointer",
                                                             "textDecoration": "underline",
+                                                        },
+                                                        # T-075: eBas did not answer = amber "unknown",
+                                                        # never the red of a confirmed non-member.
+                                                        {
+                                                            "if": {
+                                                                "filter_query": '{member} = "'
+                                                                + membership_badge.EBAS_UNKNOWN_CELL
+                                                                + '"',
+                                                                "column_id": "member",
+                                                            },
+                                                            "color": COLORS["accent_yellow"],
+                                                            "backgroundColor": "rgba(245, 158, 11, 0.12)",
+                                                            "fontWeight": "600",
+                                                            "fontSize": "0.8rem",
+                                                            "whiteSpace": "nowrap",
+                                                            "cursor": "pointer",
                                                         },
                                                         # Hover/active effect - keep text readable
                                                         {

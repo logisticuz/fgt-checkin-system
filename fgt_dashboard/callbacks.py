@@ -6,6 +6,10 @@ try:
     from auth_helpers import current_user
 except ImportError:
     from fgt_dashboard.auth_helpers import current_user
+try:
+    import membership_badge
+except ImportError:
+    from fgt_dashboard import membership_badge
 from shared.storage import (
     get_checkins,
     get_active_settings,
@@ -163,6 +167,15 @@ def _csv_safe(df):
         return value
 
     return df.apply(lambda column: column.map(safe_cell))
+
+
+def _member_cell(checked, row):
+    """Member column text after a local edit: keeps the eBas-unknown badge (T-075)."""
+    if checked:
+        return membership_badge.MEMBER_CELL
+    if (row or {}).get("member_lookup") == membership_badge.EBAS_UNKNOWN:
+        return membership_badge.EBAS_UNKNOWN_CELL
+    return membership_badge.MISSING_CELL
 
 
 def _find_checkin_row(table_data, row_id):
@@ -725,12 +738,30 @@ def register_callbacks(app):
                         lambda x: x is True or str(x).lower() == "true"
                     )
 
+            # T-075: an eBas failure must not look like "not a member". Classify from the
+            # raw values before the icon conversion; only when membership is required.
+            membership_states = {}
+            if requirements.get("require_membership") is True and "member" in df.columns:
+                for raw in data:
+                    membership_states[raw.get("record_id")] = membership_badge.membership_state(
+                        raw.get("member"),
+                        raw.get("member_lookup_state"),
+                        raw.get("member_lookup_reported"),
+                    )
+
             # Convert booleans to icons ✓/✗
             for col in ["member", "startgg", "payment_valid", "is_guest"]:
                 if col in df.columns:
                     df[col] = df[col].apply(
                         lambda x: "✓" if x is True or str(x).lower() == "true" else "✗"
                     )
+            if membership_states and "record_id" in df.columns:
+                df["member"] = [
+                    membership_badge.member_cell(membership_states[rid])
+                    if rid in membership_states
+                    else cell
+                    for rid, cell in zip(df["record_id"], df["member"])
+                ]
 
             # Apply quick filter
             # If payment is not required, disable the no-payment filter behavior.
@@ -817,6 +848,9 @@ def register_callbacks(app):
             table_rows = df_filtered.to_dict("records")
             for row in table_rows:
                 row["id"] = row.get("record_id")
+                # Hidden (not a column): Needs attention reads it even if Member is hidden.
+                if membership_states.get(row.get("record_id")) == membership_badge.EBAS_UNKNOWN:
+                    row["member_lookup"] = membership_badge.EBAS_UNKNOWN
 
             # T-068: possible duplicates of existing players (active event only; best effort,
             # never affects the table or any check-in if it fails).
@@ -1856,7 +1890,10 @@ def register_callbacks(app):
             if require_membership:
                 member_val = row.get("member", "")
                 if not is_ok(member_val):
-                    missing.append({"field": "Membership", "icon": "🎫"})
+                    if row.get("member_lookup") == membership_badge.EBAS_UNKNOWN:
+                        missing.append({"field": "eBas", "icon": "⚠"})
+                    else:
+                        missing.append({"field": "Membership", "icon": "🎫"})
 
             # Only check payment if it's a required field
             if require_payment:
@@ -1909,6 +1946,13 @@ def register_callbacks(app):
                 "color": "#00d4ff",
                 "border": "1px solid rgba(0, 212, 255, 0.3)",
             },
+            # T-075: amber = "unknown, check it", never the red/negative of a non-member.
+            "eBas": {
+                "backgroundColor": "rgba(245, 158, 11, 0.15)",
+                "color": "#f59e0b",
+                "border": "1px dashed rgba(245, 158, 11, 0.6)",
+                "cursor": "help",
+            },
         }
         badge_base = {
             "padding": "0.25rem 0.5rem",
@@ -1931,7 +1975,32 @@ def register_callbacks(app):
                 field = m["field"]
                 icon = m["icon"]
                 style = {**badge_base, **badge_styles.get(field, badge_styles["Payment"])}
+                if field == "eBas":
+                    missing_badges.append(
+                        html.Span(
+                            f"{icon} {membership_badge.EBAS_UNKNOWN_LABEL}",
+                            title=membership_badge.EBAS_UNKNOWN_HELP,
+                            style=style,
+                        )
+                    )
+                    missing_badges.append(
+                        html.Span(
+                            membership_badge.EBAS_UNKNOWN_HELP,
+                            style={
+                                "flexBasis": "100%",
+                                "color": "#94a3b8",
+                                "fontSize": "0.75rem",
+                                "marginLeft": "0.25rem",
+                            },
+                        )
+                    )
+                    continue
                 missing_badges.append(html.Span(f"{icon} {field.upper()}", style=style))
+
+            # T-075: only "eBas did not answer" = amber (check it), not red (missing).
+            accent = "#ef4444"
+            if all(m["field"] == "eBas" for m in player["missing"]):
+                accent = "#f59e0b"
 
             items.append(
                 html.Div(
@@ -1942,7 +2011,7 @@ def register_callbacks(app):
                                 html.Span(
                                     "•",
                                     style={
-                                        "color": "#ef4444",
+                                        "color": accent,
                                         "marginRight": "0.5rem",
                                         "fontSize": "1.2rem",
                                     },
@@ -1971,9 +2040,13 @@ def register_callbacks(app):
                     style={
                         "padding": "0.75rem",
                         "marginBottom": "0.5rem",
-                        "backgroundColor": "rgba(239, 68, 68, 0.05)",
+                        "backgroundColor": (
+                            "rgba(245, 158, 11, 0.06)"
+                            if accent == "#f59e0b"
+                            else "rgba(239, 68, 68, 0.05)"
+                        ),
                         "borderRadius": "8px",
-                        "borderLeft": "3px solid #ef4444",
+                        "borderLeft": f"3px solid {accent}",
                     },
                 )
             )
@@ -6066,6 +6139,8 @@ def register_callbacks(app):
             for flag in ("payment_valid", "member", "startgg", "is_guest"):
                 if flag in fields:
                     row[flag] = "✓" if is_checked(fields[flag]) else "✗"
+            if "member" in row and not is_checked(row["member"]):
+                row["member"] = _member_cell(False, row)
             for field in ("status", "payment_amount", "payment_expected"):
                 if field in fields:
                     row[field] = fields[field]
@@ -6278,6 +6353,8 @@ def register_callbacks(app):
                         row[flag] = (
                             "✓" if value is True or str(value).lower() == "true" else "✗"
                         )
+                if row.get("member") == "✗":
+                    row["member"] = _member_cell(False, row)
                 table_needs_refresh = True
 
             updated += 1

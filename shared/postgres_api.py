@@ -621,6 +621,8 @@ def get_checkins(
                 "status": status,
                 "member": member,
                 "member_lookup_state": member_lookup_state or "unknown",
+                # T-075: whether eBas actually stored a result (NULL = never asked).
+                "member_lookup_reported": member_lookup_state is not None,
                 "startgg": startgg,
                 "is_guest": is_guest,
                 "payment_amount": payment_amount,
