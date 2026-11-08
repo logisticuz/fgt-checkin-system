@@ -66,6 +66,27 @@ Make sure you have Docker installed.
 
 ---
 
+## FightBox DEV rehearsal
+
+Run `python scripts/sim/fightbox_rehearsal.py --restore-after` from the build worktree on
+the Windows Docker host. The runner takes the agent-hub `dev-db-shared` lock, backs up DEV
+Postgres and the stopped n8n volume beneath `C:\Users\vikto\agent-hub\backups`, then sends
+25 synthetic attempts through DEV nginx from 16 container IPs (five people share one IP).
+It uses legacy registration, private eBas/Start.gg HTTP simulators, generated workflow
+copies and dummy provider keys. No simulator binds a host port. Published workflow URLs
+and keys must pass the guard before the first check-in. Reports contain synthetic roles only.
+Every check is named in the report; injected scenario waits are measured separately from
+the remaining HTTP/backend/n8n time. Only the shipped synthetic identity catalog is accepted.
+
+The mock event writes `event_date=2026-11-14`, a free price, membership required,
+Start.gg admission optional and games SSBU/SF6/T8/Strive. It confirms a duplicate, archives,
+reopens, adds two manual backfills and checks arrival-time preservation and fresh statistics.
+Default mode snapshots, runs and reports; n8n/runtime always restore. `--restore-after`
+also restores Postgres before releasing the lock. `--snapshot` only creates backups;
+`--restore <backup-directory>/postgres.dump` explicitly restores both data stores.
+`--target` accepts only localhost/127.0.0.1:8088; `--duration` and `--seed` control the rush.
+The default compose source is sibling `wt/devstack`; its files are read and never edited.
+
 ## Contact
 
 Built by **Viktor Molina** ([@logisticuz](https://github.com/logisticuz)).
