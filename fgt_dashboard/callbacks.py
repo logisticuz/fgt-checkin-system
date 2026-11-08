@@ -40,6 +40,22 @@ logger = logging.getLogger(__name__)
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
 
+
+def _backend_post(path, **kwargs):
+    """Authenticate internal calls; missing tokens retain the backend's soft policy."""
+    headers = dict(kwargs.pop("headers", None) or {})
+    token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["X-Internal-Token"] = token
+    if headers:
+        kwargs["headers"] = headers
+    response = requests.post(f"{BACKEND_INTERNAL_URL.rstrip('/')}{path}", **kwargs)
+    status = getattr(response, "status_code", 0) or 0
+    if not 200 <= status < 300:
+        logger.warning("Internal backend request refused: path=%s HTTP %s", path, status)
+    return response
+
+
 # Dismissed duplicate pairs shown per "Show more" step (T-056).
 DISMISSED_PAGE = 25
 
@@ -974,28 +990,18 @@ def register_callbacks(app):
     def _broadcast_duplicates_changed(event_slug=""):
         """Tell every connected dashboard to refresh (no candidate or contact data).
 
-        /api/notify/update is an internal route (require_internal_soft): send the shared
-        X-Internal-Token like n8n does, so it also works with INTERNAL_AUTH_MODE=enforce.
         Returns False when the broadcast was not accepted (other TOs refresh later)."""
-        headers = {}
-        token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
-        if token:
-            headers["X-Internal-Token"] = token
         try:
-            response = requests.post(
-                f"{BACKEND_INTERNAL_URL}/api/notify/update",
+            response = _backend_post(
+                "/api/notify/update",
                 json={"type": "duplicates_changed", "event_slug": event_slug or ""},
-                headers=headers,
                 timeout=2,
             )
         except Exception as error:
             logger.warning("Failed to broadcast duplicates update: %s", type(error).__name__)
             return False
         status = getattr(response, "status_code", 0) or 0
-        if not 200 <= status < 300:
-            logger.warning("Duplicates update broadcast was refused (HTTP %s)", status)
-            return False
-        return True
+        return 200 <= status < 300
 
     @app.callback(
         Output("duplicate-warning", "style", allow_duplicate=True),
@@ -6183,8 +6189,8 @@ def register_callbacks(app):
 
             # Broadcast SSE to notify status pages
             try:
-                requests.post(
-                    "http://backend:8000/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "field_updated",
                         "record_id": record_id,
@@ -6538,8 +6544,8 @@ def register_callbacks(app):
                     games_note = " – games updated"
 
             try:
-                requests.post(
-                    "http://backend:8000/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "manual_checkin",
                         "record_id": record_id,
@@ -6857,8 +6863,8 @@ def register_callbacks(app):
         prev_games = row.get("tournament_games_registered", "")
 
         try:
-            resp = requests.post(
-                "http://backend:8000/api/admin/recheck-startgg",
+            resp = _backend_post(
+                "/api/admin/recheck-startgg",
                 json={"record_id": record_id},
                 timeout=20,
             )
@@ -6946,8 +6952,8 @@ def register_callbacks(app):
             return no_update
 
         try:
-            resp = requests.post(
-                "http://backend:8000/api/admin/bulk-recheck-startgg",
+            resp = _backend_post(
+                "/api/admin/bulk-recheck-startgg",
                 json={},
                 timeout=120,
             )
@@ -7378,8 +7384,8 @@ def register_callbacks(app):
                     new_store,
                 )
             try:
-                requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "requirements_updated",
                         "event_slug": active_slug,
@@ -8121,8 +8127,8 @@ def register_callbacks(app):
                 )
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/event",
+                resp = _backend_post(
+                    "/api/archive/event",
                     json=payload,
                     timeout=30,
                 )
@@ -8318,8 +8324,8 @@ def register_callbacks(app):
                 )
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/reopen",
+                resp = _backend_post(
+                    "/api/archive/reopen",
                     json=payload,
                     timeout=30,
                 )
@@ -8469,8 +8475,8 @@ def register_callbacks(app):
                 return html.Span(f"❌ Delete archive failed: {e}", style={"color": "#ef4444"})
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/delete",
+                resp = _backend_post(
+                    "/api/archive/delete",
                     json=payload,
                     timeout=30,
                 )
