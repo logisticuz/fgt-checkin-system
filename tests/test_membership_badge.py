@@ -19,7 +19,8 @@ REQ = {"require_membership": True}
         (True, "unknown", True, badge.MEMBER),  # TO verified and marked as member
         ("✓", "unknown", True, badge.MEMBER),
         (False, "unknown", True, badge.EBAS_UNKNOWN),  # eBas timeout / 5xx / non-JSON
-        (None, "unknown", True, badge.EBAS_UNKNOWN),
+        (None, "unknown", True, badge.MISSING),  # member value unknown: never amber
+        ("✓-ish", "unknown", True, badge.MISSING),
         (False, "confirmed_nonmember", True, badge.NONMEMBER),
         (False, "skipped", True, badge.MISSING),
         (False, "unknown", False, badge.MISSING),  # NULL state: eBas never asked
@@ -315,6 +316,38 @@ def test_a_new_nonmember_result_shows_up_with_an_unrelated_edit(real_ui):
     assert edited["member"] == "✗"
     texts = attention_texts(real_ui, rows)
     assert "🎫 MEMBERSHIP" in texts and "⚠ eBas svarade inte" not in texts
+
+
+def load_hidden_member_column(ui):
+    result = ui.callbacks["update_table"](
+        ui.slug, 0, 0, None, ["name", "tag", "startgg", "status"], "all", None, None, 0, REQ
+    )
+    return result[0]
+
+
+@pytest.mark.db
+def test_mark_then_reload_with_the_member_column_hidden_shows_no_card(real_ui):
+    """Review round 3 P2: timeout -> TO marks member -> reload with Member HIDDEN: no
+    false amber card (and no generic MEMBERSHIP card either)."""
+    _, marked = toggle(real_ui, load(real_ui), "member")
+    assert marked["member"] == "✓"
+    rows = load_hidden_member_column(real_ui)
+    assert "member" not in rows[0]
+    items, count = real_ui.callbacks["update_needs_attention"](rows, REQ, {})
+    texts = [s.children for s in spans(items) if isinstance(s.children, str)]
+    assert "⚠ eBas svarade inte" not in texts and "🎫 MEMBERSHIP" not in texts
+    assert count == "0"
+    stats = real_ui.callbacks["update_stats"](rows, REQ, {})
+    assert stats[3] == "0"  # needs-attention counter
+    assert rows[0]["member_flag"] is True  # carried hidden, whatever the columns
+
+
+@pytest.mark.db
+def test_hidden_member_column_still_shows_the_badge_for_a_real_outage(real_ui):
+    rows = load_hidden_member_column(real_ui)
+    texts = attention_texts(real_ui, rows)
+    assert "⚠ eBas svarade inte" in texts
+    assert rows[0]["member_flag"] is False
 
 
 # --- storage: the real eBas failure path -------------------------------------------------

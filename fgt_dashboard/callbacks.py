@@ -169,11 +169,32 @@ def _csv_safe(df):
     return df.apply(lambda column: column.map(safe_cell))
 
 
+def _flag(value):
+    """True/False for a stored boolean or a ✓/✗ cell; None when unknown."""
+    if value is True or value is False:
+        return value
+    if value == membership_badge.MEMBER_CELL or str(value).lower() == "true":
+        return True
+    if value in (membership_badge.MISSING_CELL, membership_badge.EBAS_UNKNOWN_CELL):
+        return False
+    if str(value).lower() == "false":
+        return False
+    return None
+
+
+def _row_member_flag(row):
+    """The row's member value, independent of whether the Member column is visible:
+    the hidden member_flag (T-075), else the visible cell; None when unknown."""
+    if "member_flag" in row:
+        return row["member_flag"]
+    return _flag(row.get("member"))
+
+
 def _row_membership_state(row):
-    """membership_badge state from the row's CURRENT fields (T-075): the member cell
-    (or flag) plus the hidden member_lookup_state / member_lookup_reported keys."""
+    """membership_badge state from the row's CURRENT fields (T-075): the hidden member
+    flag plus the hidden member_lookup_state / member_lookup_reported keys."""
     return membership_badge.membership_state(
-        row.get("member"), row.get("member_lookup_state"), row.get("member_lookup_reported")
+        _row_member_flag(row), row.get("member_lookup_state"), row.get("member_lookup_reported")
     )
 
 
@@ -182,6 +203,8 @@ def _sync_membership(row, fields=None):
     whether a result was stored; partial reads leave the row's own context alone), then
     re-derive the Member cell. Never relies on what the row looked like when loaded."""
     fields = fields or {}
+    if "member" in fields:
+        row["member_flag"] = _flag(fields["member"])
     if "member_lookup_reported" in fields:
         row["member_lookup_state"] = fields.get("member_lookup_state")
         row["member_lookup_reported"] = fields["member_lookup_reported"] is True
@@ -755,6 +778,7 @@ def register_callbacks(app):
                 raw.get("record_id"): (
                     raw.get("member_lookup_state"),
                     raw.get("member_lookup_reported") is True,
+                    _flag(raw.get("member")),
                 )
                 for raw in data
             }
@@ -853,9 +877,12 @@ def register_callbacks(app):
             for row in table_rows:
                 row["id"] = row.get("record_id")
                 # Hidden (not columns): the badge is always derived from these.
-                state, reported = lookup_context.get(row.get("record_id"), (None, False))
+                state, reported, flag = lookup_context.get(
+                    row.get("record_id"), (None, False, None)
+                )
                 row["member_lookup_state"] = state
                 row["member_lookup_reported"] = reported
+                row["member_flag"] = flag
                 if show_badge:
                     _sync_membership(row)
 
@@ -1895,8 +1922,7 @@ def register_callbacks(app):
 
             # Only check membership if it's a required field
             if require_membership:
-                member_val = row.get("member", "")
-                if not is_ok(member_val):
+                if _row_member_flag(row) is not True:
                     if _row_membership_state(row) == membership_badge.EBAS_UNKNOWN:
                         missing.append({"field": "eBas", "icon": "⚠"})
                     else:
@@ -5993,7 +6019,7 @@ def register_callbacks(app):
         for row in table_data:
             missing_something = False
             # Only check membership if required
-            if require_membership and not is_ok(row.get("member", "")):
+            if require_membership and _row_member_flag(row) is not True:
                 missing_something = True
             # Only check payment if required
             if require_payment and not is_ok(row.get("payment_valid", "")):
@@ -6143,6 +6169,8 @@ def register_callbacks(app):
                 fields = fresh.get("fields", {}) if isinstance(fresh, dict) else {}
             # Boolean-only adapters keep the local click feedback, without inventing a status.
             row[col_id] = "✓" if new_val else "✗"
+            if col_id == "member":
+                row["member_flag"] = bool(new_val)  # local click; storage fields win below
             for flag in ("payment_valid", "member", "startgg", "is_guest"):
                 if flag in fields:
                     row[flag] = "✓" if is_checked(fields[flag]) else "✗"

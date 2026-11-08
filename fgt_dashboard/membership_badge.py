@@ -30,11 +30,12 @@ def membership_state(member, lookup_state, lookup_reported) -> str:
 
     ``lookup_reported`` says an eBas result was actually stored for the row. Storage
     reads a missing state as 'unknown', so without it a row where eBas was never asked
-    (no personnummer) would wrongly claim that eBas failed.
+    (no personnummer) would wrongly claim that eBas failed. The badge also needs
+    ``member`` to be explicitly False: an unknown member value never shows amber.
     """
     if _truthy(member):
         return MEMBER
-    if lookup_reported is True and lookup_state == "unknown":
+    if member is False and lookup_reported is True and lookup_state == "unknown":
         return EBAS_UNKNOWN
     if lookup_state == "confirmed_nonmember":
         return NONMEMBER
