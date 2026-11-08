@@ -169,13 +169,24 @@ def _csv_safe(df):
     return df.apply(lambda column: column.map(safe_cell))
 
 
-def _member_cell(checked, row):
-    """Member column text after a local edit: keeps the eBas-unknown badge (T-075)."""
-    if checked:
-        return membership_badge.MEMBER_CELL
-    if (row or {}).get("member_lookup") == membership_badge.EBAS_UNKNOWN:
-        return membership_badge.EBAS_UNKNOWN_CELL
-    return membership_badge.MISSING_CELL
+def _row_membership_state(row):
+    """membership_badge state from the row's CURRENT fields (T-075): the member cell
+    (or flag) plus the hidden member_lookup_state / member_lookup_reported keys."""
+    return membership_badge.membership_state(
+        row.get("member"), row.get("member_lookup_state"), row.get("member_lookup_reported")
+    )
+
+
+def _sync_membership(row, fields=None):
+    """After a local edit: take the lookup context storage returned (only when it says
+    whether a result was stored; partial reads leave the row's own context alone), then
+    re-derive the Member cell. Never relies on what the row looked like when loaded."""
+    fields = fields or {}
+    if "member_lookup_reported" in fields:
+        row["member_lookup_state"] = fields.get("member_lookup_state")
+        row["member_lookup_reported"] = fields["member_lookup_reported"] is True
+    if "member" in row:
+        row["member"] = membership_badge.member_cell(_row_membership_state(row))
 
 
 def _find_checkin_row(table_data, row_id):
@@ -738,16 +749,16 @@ def register_callbacks(app):
                         lambda x: x is True or str(x).lower() == "true"
                     )
 
-            # T-075: an eBas failure must not look like "not a member". Classify from the
-            # raw values before the icon conversion; only when membership is required.
-            membership_states = {}
-            if requirements.get("require_membership") is True and "member" in df.columns:
-                for raw in data:
-                    membership_states[raw.get("record_id")] = membership_badge.membership_state(
-                        raw.get("member"),
-                        raw.get("member_lookup_state"),
-                        raw.get("member_lookup_reported"),
-                    )
+            # T-075: an eBas failure must not look like "not a member". Every row carries
+            # its lookup context (hidden keys); the Member cell is derived from it.
+            lookup_context = {
+                raw.get("record_id"): (
+                    raw.get("member_lookup_state"),
+                    raw.get("member_lookup_reported") is True,
+                )
+                for raw in data
+            }
+            show_badge = requirements.get("require_membership") is True
 
             # Convert booleans to icons ✓/✗
             for col in ["member", "startgg", "payment_valid", "is_guest"]:
@@ -755,13 +766,6 @@ def register_callbacks(app):
                     df[col] = df[col].apply(
                         lambda x: "✓" if x is True or str(x).lower() == "true" else "✗"
                     )
-            if membership_states and "record_id" in df.columns:
-                df["member"] = [
-                    membership_badge.member_cell(membership_states[rid])
-                    if rid in membership_states
-                    else cell
-                    for rid, cell in zip(df["record_id"], df["member"])
-                ]
 
             # Apply quick filter
             # If payment is not required, disable the no-payment filter behavior.
@@ -848,9 +852,12 @@ def register_callbacks(app):
             table_rows = df_filtered.to_dict("records")
             for row in table_rows:
                 row["id"] = row.get("record_id")
-                # Hidden (not a column): Needs attention reads it even if Member is hidden.
-                if membership_states.get(row.get("record_id")) == membership_badge.EBAS_UNKNOWN:
-                    row["member_lookup"] = membership_badge.EBAS_UNKNOWN
+                # Hidden (not columns): the badge is always derived from these.
+                state, reported = lookup_context.get(row.get("record_id"), (None, False))
+                row["member_lookup_state"] = state
+                row["member_lookup_reported"] = reported
+                if show_badge:
+                    _sync_membership(row)
 
             # T-068: possible duplicates of existing players (active event only; best effort,
             # never affects the table or any check-in if it fails).
@@ -1890,7 +1897,7 @@ def register_callbacks(app):
             if require_membership:
                 member_val = row.get("member", "")
                 if not is_ok(member_val):
-                    if row.get("member_lookup") == membership_badge.EBAS_UNKNOWN:
+                    if _row_membership_state(row) == membership_badge.EBAS_UNKNOWN:
                         missing.append({"field": "eBas", "icon": "⚠"})
                     else:
                         missing.append({"field": "Membership", "icon": "🎫"})
@@ -6139,8 +6146,7 @@ def register_callbacks(app):
             for flag in ("payment_valid", "member", "startgg", "is_guest"):
                 if flag in fields:
                     row[flag] = "✓" if is_checked(fields[flag]) else "✗"
-            if "member" in row and not is_checked(row["member"]):
-                row["member"] = _member_cell(False, row)
+            _sync_membership(row, fields)
             for field in ("status", "payment_amount", "payment_expected"):
                 if field in fields:
                     row[field] = fields[field]
@@ -6353,8 +6359,7 @@ def register_callbacks(app):
                         row[flag] = (
                             "✓" if value is True or str(value).lower() == "true" else "✗"
                         )
-                if row.get("member") == "✗":
-                    row["member"] = _member_cell(False, row)
+                _sync_membership(row, fields)
                 table_needs_refresh = True
 
             updated += 1

@@ -87,18 +87,33 @@ def test_table_shows_the_eBas_badge_only_for_a_failed_lookup(dashboard):  # noqa
         "skipped": "✗",
         "never-asked": "✗",
     }
-    assert [rid for rid, row in rows.items() if row.get("member_lookup")] == ["ebas-down"]
+    # Every row carries its lookup context (hidden keys), whatever its member flag.
+    assert {
+        rid: (r["member_lookup_state"], r["member_lookup_reported"]) for rid, r in rows.items()
+    } == {
+        "member": ("confirmed_member", True),
+        "ebas-down": ("unknown", True),
+        "nonmember": ("confirmed_nonmember", True),
+        "skipped": ("skipped", True),
+        "never-asked": ("unknown", False),
+    }
 
 
 def test_needs_attention_knows_even_when_the_member_column_is_hidden(dashboard):  # noqa: F811
     rows = table(dashboard, REQ, columns=("name", "tag", "status"))
     assert "member" not in rows["ebas-down"]
-    assert rows["ebas-down"]["member_lookup"] == badge.EBAS_UNKNOWN
+    assert (
+        rows["ebas-down"]["member_lookup_state"],
+        rows["ebas-down"]["member_lookup_reported"],
+    ) == (
+        "unknown",
+        True,
+    )
 
 
 def test_no_badge_when_membership_is_not_required(dashboard):  # noqa: F811
     rows = table(dashboard, {"require_membership": False})
-    assert all("member_lookup" not in row and "member" not in row for row in rows.values())
+    assert all("member" not in row for row in rows.values())
 
 
 def test_the_badge_cell_has_amber_style_and_hover_help():
@@ -163,6 +178,143 @@ def test_marking_and_unmarking_member_keeps_the_eBas_context(dashboard):  # noqa
     assert unmarked["member"] == badge.EBAS_UNKNOWN_CELL
     other = [r for r in updated if r["record_id"] == "nonmember"][0]
     assert other["member"] == "✗"
+
+
+def test_an_edit_takes_the_lookup_context_storage_returns(dashboard):  # noqa: F811
+    """Review P2 (mocked): fresh lookup fields from the edit response win over the loaded row."""
+    rows = list(table(dashboard, REQ).values())
+    target = [r for r in rows if r["record_id"] == "ebas-down"][0]
+    dashboard.storage.update_checkin.return_value = {
+        "fields": {
+            "member": False,
+            "startgg": False,
+            "member_lookup_state": "confirmed_nonmember",
+            "member_lookup_reported": True,
+        }
+    }
+    cell = {"row": 0, "row_id": target["id"], "column_id": "startgg"}
+    _, updated, _ = dashboard.callbacks["toggle_field"](cell, rows, "test-event", {})
+    edited = [r for r in updated if r["record_id"] == "ebas-down"][0]
+    assert edited["member"] == "✗"
+    assert edited["member_lookup_state"] == "confirmed_nonmember"
+
+
+def test_a_partial_read_never_invents_lookup_context(dashboard):  # noqa: F811
+    """Responses without member_lookup_reported (e.g. a read that skipped the column, whose
+    member_lookup_state is just the 'unknown' default) leave the row's own context alone."""
+    rows = list(table(dashboard, REQ).values())
+    target = [r for r in rows if r["record_id"] == "nonmember"][0]
+    dashboard.storage.update_checkin.return_value = {
+        "fields": {"member": False, "startgg": False, "member_lookup_state": "unknown"}
+    }
+    cell = {"row": 0, "row_id": target["id"], "column_id": "startgg"}
+    _, updated, _ = dashboard.callbacks["toggle_field"](cell, rows, "test-event", {})
+    edited = [r for r in updated if r["record_id"] == "nonmember"][0]
+    assert (edited["member"], edited["member_lookup_state"]) == ("✗", "confirmed_nonmember")
+
+
+# --- real PostgreSQL + the registered callbacks (review-1 P2 sequences) -------------------
+
+
+@pytest.fixture
+def real_ui(pg_db, monkeypatch):
+    from types import SimpleNamespace
+
+    from dash import Dash
+
+    import fgt_dashboard.callbacks as callbacks
+
+    monkeypatch.setattr(  # SSE notify to the backend: stubbed, nothing leaves the test
+        callbacks.requests, "post", lambda *a, **k: SimpleNamespace(status_code=200)
+    )
+    app = Dash(__name__)
+    callbacks.register_callbacks(app)
+    handlers = {
+        d["callback"].__wrapped__.__name__: d["callback"].__wrapped__
+        for d in app.callback_map.values()
+        if "callback" in d
+    }
+    slug = "pw-t075-" + __import__("uuid").uuid4().hex[:8]
+    pg_db.seed_settings(
+        active_event_slug=slug,
+        require_membership=True,
+        require_startgg=False,
+        require_payment=False,
+    )
+    checkin = pg_db.seed_checkin(
+        event_slug=slug,
+        record_id="rec-t075",
+        name="Synthetic T075",
+        tag="pw-t075",
+        member=False,
+        member_source="ebas_check",
+        status="Pending",
+    )
+    postgres.apply_integration_result(  # eBas timeout -> member false + 'unknown'
+        checkin["record_id"],
+        "ebas",
+        False,
+        {},
+        state="unavailable",
+        error={"code": "provider_timeout"},
+    )
+    return SimpleNamespace(callbacks=handlers, slug=slug, record_id=checkin["record_id"])
+
+
+def load(ui):
+    result = ui.callbacks["update_table"](
+        ui.slug,
+        0,
+        0,
+        None,
+        ["name", "tag", "member", "startgg", "status"],
+        "all",
+        None,
+        None,
+        0,
+        REQ,
+    )
+    return result[0]
+
+
+def toggle(ui, rows, column):
+    target = [r for r in rows if r["record_id"] == ui.record_id][0]
+    cell = {"row": 0, "row_id": target["id"], "column_id": column}
+    _, updated, _ = ui.callbacks["toggle_field"](cell, rows, ui.slug, {})
+    return updated, [r for r in updated if r["record_id"] == ui.record_id][0]
+
+
+def attention_texts(ui, rows):
+    items, _ = ui.callbacks["update_needs_attention"](rows, REQ, {})
+    return [s.children for s in spans(items) if isinstance(s.children, str)]
+
+
+@pytest.mark.db
+def test_mark_reload_unmark_brings_the_eBas_badge_back(real_ui):
+    rows = load(real_ui)
+    assert [r["member"] for r in rows] == [badge.EBAS_UNKNOWN_CELL]
+    _, marked = toggle(real_ui, rows, "member")
+    assert marked["member"] == "✓"
+    rows = load(real_ui)  # reload while member is true
+    assert [r["member"] for r in rows] == ["✓"]
+    rows, unmarked = toggle(real_ui, rows, "member")
+    assert unmarked["member"] == badge.EBAS_UNKNOWN_CELL
+    texts = attention_texts(real_ui, rows)
+    assert "⚠ eBas svarade inte" in texts and "🎫 MEMBERSHIP" not in texts
+
+
+@pytest.mark.db
+def test_a_new_nonmember_result_shows_up_with_an_unrelated_edit(real_ui):
+    rows = load(real_ui)
+    assert [r["member"] for r in rows] == [badge.EBAS_UNKNOWN_CELL]
+    postgres.apply_integration_result(  # eBas answers later: confirmed non-member
+        real_ui.record_id, "ebas", True, {"member": False}, state="verified_false"
+    )
+    rows, edited = toggle(real_ui, rows, "startgg")  # the TO edits Start.gg on the old table
+    assert edited["startgg"] == "✓"
+    assert edited["member"] == "✗"
+    texts = attention_texts(real_ui, rows)
+    assert "🎫 MEMBERSHIP" in texts and "⚠ eBas svarade inte" not in texts
 
 
 # --- storage: the real eBas failure path -------------------------------------------------

@@ -185,7 +185,7 @@ def _row_to_dict(columns: List[str], row: tuple) -> Dict[str, Any]:
 
 
 def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    fields = {
         "name": row.get("name"),
         "email": row.get("email"),
         "telephone": row.get("telephone"),
@@ -206,6 +206,9 @@ def _checkin_fields_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "added_via": row.get("added_via"),
         "acquisition_source": row.get("acquisition_source"),
     }
+    if "member_lookup_state" in row:  # T-075: only when the read included the column
+        fields["member_lookup_reported"] = row["member_lookup_state"] is not None
+    return fields
 
 
 def _settings_value(key: str, value: Any) -> Any:
