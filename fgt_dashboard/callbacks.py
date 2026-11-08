@@ -39,6 +39,29 @@ logger = logging.getLogger(__name__)
 # Storage backend + Start.gg API config
 STARTGG_API_KEY = os.getenv("STARTGG_API_KEY") or os.getenv("STARTGG_TOKEN")
 BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
+_invalid_internal_token_logged = False
+
+
+def _backend_post(path, **kwargs):
+    """Authenticate internal calls; missing tokens retain the backend's soft policy."""
+    global _invalid_internal_token_logged
+    headers = dict(kwargs.pop("headers", None) or {})
+    token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in token):
+        token = ""
+        if not _invalid_internal_token_logged:
+            _invalid_internal_token_logged = True
+            logger.warning("INTERNAL_API_TOKEN invalid (control characters); sending without token")
+    if token:
+        headers["X-Internal-Token"] = token
+    if headers:
+        kwargs["headers"] = headers
+    response = requests.post(f"{BACKEND_INTERNAL_URL.rstrip('/')}{path}", **kwargs)
+    status = getattr(response, "status_code", 0) or 0
+    if not 200 <= status < 300:
+        logger.warning("Internal backend request refused: path=%s HTTP %s", path, status)
+    return response
+
 
 # Dismissed duplicate pairs shown per "Show more" step (T-056).
 DISMISSED_PAGE = 25
@@ -974,28 +997,21 @@ def register_callbacks(app):
     def _broadcast_duplicates_changed(event_slug=""):
         """Tell every connected dashboard to refresh (no candidate or contact data).
 
-        /api/notify/update is an internal route (require_internal_soft): send the shared
-        X-Internal-Token like n8n does, so it also works with INTERNAL_AUTH_MODE=enforce.
         Returns False when the broadcast was not accepted (other TOs refresh later)."""
-        headers = {}
-        token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
-        if token:
-            headers["X-Internal-Token"] = token
         try:
-            response = requests.post(
-                f"{BACKEND_INTERNAL_URL}/api/notify/update",
+            response = _backend_post(
+                "/api/notify/update",
                 json={"type": "duplicates_changed", "event_slug": event_slug or ""},
-                headers=headers,
                 timeout=2,
             )
         except Exception as error:
-            logger.warning("Failed to broadcast duplicates update: %s", type(error).__name__)
+            logger.warning(
+                "Duplicates broadcast failed: path=/api/notify/update error=%s",
+                type(error).__name__,
+            )
             return False
         status = getattr(response, "status_code", 0) or 0
-        if not 200 <= status < 300:
-            logger.warning("Duplicates update broadcast was refused (HTTP %s)", status)
-            return False
-        return True
+        return 200 <= status < 300
 
     @app.callback(
         Output("duplicate-warning", "style", allow_duplicate=True),
@@ -6183,8 +6199,8 @@ def register_callbacks(app):
 
             # Broadcast SSE to notify status pages
             try:
-                requests.post(
-                    "http://backend:8000/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "field_updated",
                         "record_id": record_id,
@@ -6195,7 +6211,9 @@ def register_callbacks(app):
                     timeout=2,
                 )
             except Exception as e:
-                logger.warning(f"Failed to broadcast SSE: {e}")
+                logger.warning(
+                    "SSE broadcast failed: path=/api/notify/update error=%s", type(e).__name__
+                )
 
             # Feedback message based on column
             col_labels = {
@@ -6538,8 +6556,8 @@ def register_callbacks(app):
                     games_note = " – games updated"
 
             try:
-                requests.post(
-                    "http://backend:8000/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "manual_checkin",
                         "record_id": record_id,
@@ -6548,7 +6566,10 @@ def register_callbacks(app):
                     timeout=2,
                 )
             except Exception as e:
-                logger.warning(f"Failed to broadcast manual check-in SSE: {e}")
+                logger.warning(
+                    "Manual check-in broadcast failed: path=/api/notify/update error=%s",
+                    type(e).__name__,
+                )
 
             try:
                 storage_api.log_action(
@@ -6857,8 +6878,8 @@ def register_callbacks(app):
         prev_games = row.get("tournament_games_registered", "")
 
         try:
-            resp = requests.post(
-                "http://backend:8000/api/admin/recheck-startgg",
+            resp = _backend_post(
+                "/api/admin/recheck-startgg",
                 json={"record_id": record_id},
                 timeout=20,
             )
@@ -6918,15 +6939,22 @@ def register_callbacks(app):
                     style={"color": "#f59e0b"},
                 )
 
-        except requests.exceptions.Timeout:
+        except requests.exceptions.Timeout as e:
+            logger.warning(
+                "Internal backend request failed: path=/api/admin/recheck-startgg error=%s",
+                type(e).__name__,
+            )
             return html.Span(
                 "Re-check timed out — Start.gg or n8n may be slow. Try again.",
                 style={"color": "#ef4444"},
             )
         except Exception as e:
-            logger.exception(f"Re-check Start.gg failed for '{player_name}': {e}")
+            logger.warning(
+                "Internal backend request failed: path=/api/admin/recheck-startgg error=%s",
+                type(e).__name__,
+            )
             return html.Span(
-                f"Re-check failed: {e}",
+                f"Re-check failed: {type(e).__name__}",
                 style={"color": "#ef4444"},
             )
 
@@ -6946,8 +6974,8 @@ def register_callbacks(app):
             return no_update
 
         try:
-            resp = requests.post(
-                "http://backend:8000/api/admin/bulk-recheck-startgg",
+            resp = _backend_post(
+                "/api/admin/bulk-recheck-startgg",
                 json={},
                 timeout=120,
             )
@@ -6994,15 +7022,22 @@ def register_callbacks(app):
                 style={"color": "#22c55e", "fontWeight": "600"},
             )
 
-        except requests.exceptions.Timeout:
+        except requests.exceptions.Timeout as e:
+            logger.warning(
+                "Internal backend request failed: path=/api/admin/bulk-recheck-startgg error=%s",
+                type(e).__name__,
+            )
             return html.Span(
                 "Bulk re-check timed out — too many players or Start.gg is slow.",
                 style={"color": "#f59e0b"},
             )
         except Exception as e:
-            logger.exception(f"Bulk re-check Start.gg failed: {e}")
+            logger.warning(
+                "Internal backend request failed: path=/api/admin/bulk-recheck-startgg error=%s",
+                type(e).__name__,
+            )
             return html.Span(
-                f"Bulk re-check failed: {e}",
+                f"Bulk re-check failed: {type(e).__name__}",
                 style={"color": "#ef4444"},
             )
 
@@ -7378,8 +7413,8 @@ def register_callbacks(app):
                     new_store,
                 )
             try:
-                requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/notify/update",
+                _backend_post(
+                    "/api/notify/update",
                     json={
                         "type": "requirements_updated",
                         "event_slug": active_slug,
@@ -7388,7 +7423,10 @@ def register_callbacks(app):
                     timeout=2,
                 )
             except Exception as error:
-                logger.warning("Failed to broadcast requirements update: %s", error)
+                logger.warning(
+                    "Requirements broadcast failed: path=/api/notify/update error=%s",
+                    type(error).__name__,
+                )
 
             return html.Span(f"✅ Saved! {summary}", style={"color": "#10b981"}), new_store
         else:
@@ -8121,8 +8159,8 @@ def register_callbacks(app):
                 )
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/event",
+                resp = _backend_post(
+                    "/api/archive/event",
                     json=payload,
                     timeout=30,
                 )
@@ -8137,9 +8175,14 @@ def register_callbacks(app):
                     )
                 result = resp.json()
             except Exception as e:
-                logger.exception(f"Archive API call failed for {selected_slug}: {e}")
+                logger.warning(
+                    "Internal backend request failed: path=/api/archive/event error=%s",
+                    type(e).__name__,
+                )
                 return (
-                    html.Span(f"❌ Archive API failed: {e}", style={"color": "#ef4444"}),
+                    html.Span(
+                        f"❌ Archive API failed: {type(e).__name__}", style={"color": "#ef4444"}
+                    ),
                     no_update,
                     no_update,
                 )
@@ -8318,8 +8361,8 @@ def register_callbacks(app):
                 )
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/reopen",
+                resp = _backend_post(
+                    "/api/archive/reopen",
                     json=payload,
                     timeout=30,
                 )
@@ -8335,9 +8378,14 @@ def register_callbacks(app):
                     )
                 result = resp.json()
             except Exception as e:
-                logger.exception(f"Reopen API call failed for {selected_slug}: {e}")
+                logger.warning(
+                    "Internal backend request failed: path=/api/archive/reopen error=%s",
+                    type(e).__name__,
+                )
                 return (
-                    html.Span(f"❌ Reopen API failed: {e}", style={"color": "#ef4444"}),
+                    html.Span(
+                        f"❌ Reopen API failed: {type(e).__name__}", style={"color": "#ef4444"}
+                    ),
                     no_update,
                     no_update,
                     no_update,
@@ -8469,8 +8517,8 @@ def register_callbacks(app):
                 return html.Span(f"❌ Delete archive failed: {e}", style={"color": "#ef4444"})
         else:
             try:
-                resp = requests.post(
-                    f"{BACKEND_INTERNAL_URL}/api/archive/delete",
+                resp = _backend_post(
+                    "/api/archive/delete",
                     json=payload,
                     timeout=30,
                 )
@@ -8481,8 +8529,13 @@ def register_callbacks(app):
                     )
                 result = resp.json()
             except Exception as e:
-                logger.exception(f"Delete archive API call failed for {selected_slug}: {e}")
-                return html.Span(f"❌ Delete archive API failed: {e}", style={"color": "#ef4444"})
+                logger.warning(
+                    "Internal backend request failed: path=/api/archive/delete error=%s",
+                    type(e).__name__,
+                )
+                return html.Span(
+                    f"❌ Delete archive API failed: {type(e).__name__}", style={"color": "#ef4444"}
+                )
 
         return html.Div(
             style={"color": "#10b981", "lineHeight": "1.5"},
